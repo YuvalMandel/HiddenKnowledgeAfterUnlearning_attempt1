@@ -48,19 +48,28 @@ def load_datasets():
 # Forget set: yes/no prompts
 # ------------------------------------------------------------------
 
+SYSTEM_PROMPT = (
+    "You are a concise evaluator. "
+    "Always begin your response with exactly 'Yes' or 'No' as the first word, "
+    "followed by a brief explanation of at most 10 words."
+)
+
+
 def make_yn_prompt(question, proposed_answer):
     """
     Build a yes/no chat message asking whether proposed_answer is correct
-    for the given question. Model is instructed to answer Yes or No first.
+    for the given question. System prompt enforces Yes/No first, ≤10 word explanation.
     """
     content = (
         "Consider the following question and proposed answer:\n\n"
         f"Question: {question}\n"
         f"Proposed answer: {proposed_answer}\n\n"
-        "Is the proposed answer correct? "
-        "Answer Yes or No first, then briefly explain why."
+        "Is the proposed answer correct?"
     )
-    return [{"role": "user", "content": content}]
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
 
 
 def format_forget_yn_questions(example, rng):
@@ -94,15 +103,17 @@ def format_forget_yn_questions(example, rng):
 def make_continuation_yn_prompt(prefix, continuation):
     """
     Build a yes/no chat message asking whether the continuation follows
-    naturally from the passage prefix. Model answers Yes or No first.
+    naturally from the passage prefix. System prompt enforces Yes/No first, ≤10 word explanation.
     """
     content = (
         "Does the following text continue naturally from the passage?\n\n"
         f"Passage: {prefix}\n\n"
-        f"Continuation: {continuation}\n\n"
-        "Answer Yes or No first, then briefly explain why."
+        f"Continuation: {continuation}"
     )
-    return [{"role": "user", "content": content}]
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
 
 
 def format_retain_yn_questions(text, wrong_text):
@@ -185,6 +196,21 @@ def run_yn_pair(model, tokenizer, pos_prompt, neg_prompt):
     )
 
 
+def print_prompts(pos_prompt, neg_prompt):
+    """Print the human-readable content of both yes/no prompts, including system message."""
+    system_content = pos_prompt[0]["content"]  # same for both
+    pos_content = pos_prompt[1]["content"]
+    neg_content = neg_prompt[1]["content"]
+    print(f"  [SYSTEM PROMPT]")
+    print(f"    {system_content}")
+    print(f"  [PROMPT — correct answer]")
+    for line in pos_content.splitlines():
+        print(f"    {line}")
+    print(f"  [PROMPT — wrong answer]")
+    for line in neg_content.splitlines():
+        print(f"    {line}")
+
+
 def print_yn_result(label, pos_answer, neg_answer):
     """Print yes/no results for one model, with correctness markers."""
     pos_yn = extract_yn(pos_answer)
@@ -192,8 +218,8 @@ def print_yn_result(label, pos_answer, neg_answer):
     pos_mark = "✓" if pos_yn == "Yes" else "✗"
     neg_mark = "✓" if neg_yn == "No" else "✗"
     print(f"  [{label}]")
-    print(f"    Correct answer → {pos_yn or '?':3s} {pos_mark}  {pos_answer[:100]}")
-    print(f"    Wrong answer   → {neg_yn or '?':3s} {neg_mark}  {neg_answer[:100]}")
+    print(f"    Correct answer → {pos_yn or '?':3s} {pos_mark}  {pos_answer}")
+    print(f"    Wrong answer   → {neg_yn or '?':3s} {neg_mark}  {neg_answer}")
 
 
 # ------------------------------------------------------------------
@@ -233,6 +259,7 @@ def main():
         print(f"  Question:        {example['question']}")
         print(f"  Correct answer:  {correct_text}")
         print(f"  Wrong answer:    {wrong_text}")
+        print_prompts(pos_prompt, neg_prompt)
         print_yn_result("Base     ", base_pos, base_neg)
         print_yn_result("Unlearned", un_pos, un_neg)
 
@@ -255,6 +282,7 @@ def main():
         print(f"  Prefix:              ...{prefix[-80:]}")
         print(f"  Real continuation:   {correct_cont[:80]}")
         print(f"  Wrong continuation:  {wrong_cont[:80]}")
+        print_prompts(pos_prompt, neg_prompt)
         print_yn_result("Base     ", base_pos, base_neg)
         print_yn_result("Unlearned", un_pos, un_neg)
 
