@@ -15,7 +15,7 @@ RANDOM_SEED = 42
 # Forget set: WMDP bio-hazardous knowledge subset
 FORGET_SUBSET = "wmdp-bio"
 # How many forget-set questions to evaluate (set to None for all)
-N_FORGET_QUESTIONS = 10
+N_FORGET_QUESTIONS = None
 
 # Retain set: Wikitext (used during training as retain set per the paper)
 WIKITEXT_CONFIG = "wikitext-103-raw-v1"
