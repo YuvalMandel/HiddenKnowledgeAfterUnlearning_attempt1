@@ -1,7 +1,10 @@
 import re
+import json
+import pickle
 import random
 import numpy as np
 import torch
+from pathlib import Path
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -53,6 +56,69 @@ MAX_NEW_TOKENS   = 64
 MAX_INPUT_LENGTH = 512
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+CHECKPOINT_DIR = Path("checkpoints")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Checkpointing
+# ──────────────────────────────────────────────────────────────────────────
+
+def save_base_checkpoint(hs_train, hs_val, hs_test, probes, best_layer,
+                         test_answers, retain_answers, gen_stats, probe_stats):
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    np.save(CHECKPOINT_DIR / "base_hs_train.npy", hs_train)
+    np.save(CHECKPOINT_DIR / "base_hs_val.npy",   hs_val)
+    np.save(CHECKPOINT_DIR / "base_hs_test.npy",  hs_test)
+    with open(CHECKPOINT_DIR / "base_probes.pkl", "wb") as f:
+        pickle.dump(probes, f)
+    with open(CHECKPOINT_DIR / "base_results.json", "w") as f:
+        json.dump({
+            "best_layer":     best_layer,
+            "test_answers":   test_answers,
+            "retain_answers": retain_answers,
+            "gen_stats":      gen_stats,
+            "probe_stats":    probe_stats,
+        }, f)
+    print("[checkpoint] Base model checkpoint saved.", flush=True)
+
+
+def load_base_checkpoint():
+    if not (CHECKPOINT_DIR / "base_results.json").exists():
+        return None
+    print("[checkpoint] Loading base model checkpoint...", flush=True)
+    hs_train = np.load(CHECKPOINT_DIR / "base_hs_train.npy")
+    hs_val   = np.load(CHECKPOINT_DIR / "base_hs_val.npy")
+    hs_test  = np.load(CHECKPOINT_DIR / "base_hs_test.npy")
+    with open(CHECKPOINT_DIR / "base_probes.pkl", "rb") as f:
+        probes = pickle.load(f)
+    with open(CHECKPOINT_DIR / "base_results.json") as f:
+        r = json.load(f)
+    best_layer = r["best_layer"]
+    print(f"[checkpoint] Loaded. Best layer: {best_layer}, "
+          f"base gen acc: {r['gen_stats']['accuracy']:.3f}", flush=True)
+    return (hs_train, hs_val, hs_test, probes, best_layer,
+            r["test_answers"], r["retain_answers"],
+            r["gen_stats"], r["probe_stats"])
+
+
+def save_method_checkpoint(method_name, results):
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    # results may contain non-serialisable keys; keep only stats + answers
+    payload = {k: results[k] for k in ("gen", "probe", "retain",
+                                        "test_answers", "retain_answers")}
+    with open(CHECKPOINT_DIR / f"{method_name}_results.json", "w") as f:
+        json.dump(payload, f)
+    print(f"[checkpoint] {method_name} checkpoint saved.", flush=True)
+
+
+def load_method_checkpoint(method_name):
+    path = CHECKPOINT_DIR / f"{method_name}_results.json"
+    if not path.exists():
+        return None
+    print(f"[checkpoint] Loading {method_name} checkpoint...", flush=True)
+    with open(path) as f:
+        return json.load(f)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -373,54 +439,60 @@ def main():
     y_val   = pairs_to_labels(val_pairs)
     y_test  = pairs_to_labels(test_pairs)
 
-    # ── 2. Load base model ────────────────────────────────────────────────
-    print("\nLoading base model...")
-    base_tok, base_model = load_model_and_tokenizer(BASE_MODEL)
+    # ── 2-5. Base model (load from checkpoint or compute) ─────────────────
+    base_ckpt = load_base_checkpoint()
+    if base_ckpt is not None:
+        (hs_train, hs_val, hs_test_base, probes, best_layer,
+         base_test_answers, base_retain_answers,
+         base_gen_stats, base_probe_stats) = base_ckpt
+    else:
+        print("\nLoading base model...")
+        base_tok, base_model = load_model_and_tokenizer(BASE_MODEL)
 
-    # ── 3. Extract hidden states (base model) ─────────────────────────────
-    print("\n" + "=" * 60)
-    print("Extracting hidden states — BASE model")
-    print("=" * 60)
-    hs_train     = extract_hidden_states(base_model, base_tok, train_pairs,
-                                         HIDDEN_STATE_BATCH_SIZE, "base/train")
-    hs_val       = extract_hidden_states(base_model, base_tok, val_pairs,
-                                         HIDDEN_STATE_BATCH_SIZE, "base/val")
-    hs_test_base = extract_hidden_states(base_model, base_tok, test_pairs,
-                                         HIDDEN_STATE_BATCH_SIZE, "base/test")
+        print("\n" + "=" * 60)
+        print("Extracting hidden states — BASE model")
+        print("=" * 60)
+        hs_train     = extract_hidden_states(base_model, base_tok, train_pairs,
+                                             HIDDEN_STATE_BATCH_SIZE, "base/train")
+        hs_val       = extract_hidden_states(base_model, base_tok, val_pairs,
+                                             HIDDEN_STATE_BATCH_SIZE, "base/val")
+        hs_test_base = extract_hidden_states(base_model, base_tok, test_pairs,
+                                             HIDDEN_STATE_BATCH_SIZE, "base/test")
 
-    # ── 4. Train probes & select best layer ───────────────────────────────
-    print("\n" + "=" * 60)
-    print("Training linear probes (one per layer) on TRAIN hidden states...")
-    print("=" * 60)
-    probes    = train_probes(hs_train, y_train)
-    val_accs  = eval_probes(probes, hs_val, y_val)
-    best_layer = max(val_accs, key=val_accs.get)
-    print(f"\nValidation accuracies per layer (showing top 5):")
-    for l, acc in sorted(val_accs.items(), key=lambda x: -x[1])[:5]:
-        marker = " <- BEST" if l == best_layer else ""
-        print(f"  Layer {l:2d}: {acc:.3f}{marker}")
-    print(f"\nBest layer: {best_layer}  (val accuracy: {val_accs[best_layer]:.3f})")
+        print("\n" + "=" * 60)
+        print("Training linear probes (one per layer) on TRAIN hidden states...")
+        print("=" * 60)
+        probes    = train_probes(hs_train, y_train)
+        val_accs  = eval_probes(probes, hs_val, y_val)
+        best_layer = max(val_accs, key=val_accs.get)
+        print(f"\nValidation accuracies per layer (showing top 5):")
+        for l, acc in sorted(val_accs.items(), key=lambda x: -x[1])[:5]:
+            marker = " <- BEST" if l == best_layer else ""
+            print(f"  Layer {l:2d}: {acc:.3f}{marker}")
+        print(f"\nBest layer: {best_layer}  (val accuracy: {val_accs[best_layer]:.3f})")
 
-    # ── 5. Base model generation ──────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("Running batched generation — BASE model — test forget set")
-    print("=" * 60)
-    base_test_answers = batch_generate(base_model, base_tok, test_pairs,
-                                       GENERATION_BATCH_SIZE, "base/test")
+        print("\n" + "=" * 60)
+        print("Running batched generation — BASE model — test forget set")
+        print("=" * 60)
+        base_test_answers = batch_generate(base_model, base_tok, test_pairs,
+                                           GENERATION_BATCH_SIZE, "base/test")
 
-    print("\n" + "=" * 60)
-    print("Running batched generation — BASE model — retain set")
-    print("=" * 60)
-    base_retain_answers = batch_generate(base_model, base_tok, retain_pairs,
-                                         GENERATION_BATCH_SIZE, "base/retain")
+        print("\n" + "=" * 60)
+        print("Running batched generation — BASE model — retain set")
+        print("=" * 60)
+        base_retain_answers = batch_generate(base_model, base_tok, retain_pairs,
+                                             GENERATION_BATCH_SIZE, "base/retain")
 
-    base_gen_stats   = generation_stats(base_test_answers, test_pairs)
-    base_probe_stats = probe_stats(probes[best_layer], hs_test_base, best_layer, y_test)
+        base_gen_stats   = generation_stats(base_test_answers, test_pairs)
+        base_probe_stats = probe_stats(probes[best_layer], hs_test_base, best_layer, y_test)
 
-    # Unload base model — free GPU memory before loading unlearned models
-    print("\nUnloading base model to free GPU memory...")
-    unload_model(base_model)
-    del base_tok
+        save_base_checkpoint(hs_train, hs_val, hs_test_base, probes, best_layer,
+                             base_test_answers, base_retain_answers,
+                             base_gen_stats, base_probe_stats)
+
+        print("\nUnloading base model to free GPU memory...")
+        unload_model(base_model)
+        del base_tok
 
     # ── 6. Per-method loop ────────────────────────────────────────────────
     all_results = {}
@@ -430,36 +502,51 @@ def main():
         print(f"METHOD: {method_name}  ({model_id})")
         print("=" * 60)
 
-        print(f"Loading {method_name} model...")
-        un_tok, un_model = load_model_and_tokenizer(model_id)
+        # ── Check checkpoint ──────────────────────────────────────────────
+        method_ckpt = load_method_checkpoint(method_name)
+        if method_ckpt is not None:
+            all_results[method_name] = method_ckpt
+            un_gen_stats    = method_ckpt["gen"]
+            un_probe_stats  = method_ckpt["probe"]
+            un_retain_stats = method_ckpt["retain"]
+            un_test_answers = method_ckpt["test_answers"]
+        else:
+            print(f"Loading {method_name} model...")
+            un_tok, un_model = load_model_and_tokenizer(model_id)
 
-        # Generation — test forget set
-        print(f"\nGenerating answers — {method_name} — test forget set")
-        un_test_answers = batch_generate(un_model, un_tok, test_pairs,
-                                         GENERATION_BATCH_SIZE, f"{method_name}/test")
+            # Generation — test forget set
+            print(f"\nGenerating answers — {method_name} — test forget set")
+            un_test_answers = batch_generate(un_model, un_tok, test_pairs,
+                                             GENERATION_BATCH_SIZE, f"{method_name}/test")
 
-        # Generation — retain set
-        print(f"\nGenerating answers — {method_name} — retain set")
-        un_retain_answers = batch_generate(un_model, un_tok, retain_pairs,
-                                           GENERATION_BATCH_SIZE, f"{method_name}/retain")
+            # Generation — retain set
+            print(f"\nGenerating answers — {method_name} — retain set")
+            un_retain_answers = batch_generate(un_model, un_tok, retain_pairs,
+                                               GENERATION_BATCH_SIZE, f"{method_name}/retain")
 
-        # Hidden states — test set only (needed for probe eval)
-        print(f"\nExtracting hidden states — {method_name} — test set")
-        hs_test_un = extract_hidden_states(un_model, un_tok, test_pairs,
-                                           HIDDEN_STATE_BATCH_SIZE, f"{method_name}/test")
+            # Hidden states — test set only (needed for probe eval)
+            print(f"\nExtracting hidden states — {method_name} — test set")
+            hs_test_un = extract_hidden_states(un_model, un_tok, test_pairs,
+                                               HIDDEN_STATE_BATCH_SIZE, f"{method_name}/test")
 
-        # Stats
-        un_gen_stats    = generation_stats(un_test_answers, test_pairs)
-        un_probe_stats  = probe_stats(probes[best_layer], hs_test_un, best_layer, y_test)
-        un_retain_stats = generation_stats(un_retain_answers, retain_pairs)
+            # Stats
+            un_gen_stats    = generation_stats(un_test_answers, test_pairs)
+            un_probe_stats  = probe_stats(probes[best_layer], hs_test_un, best_layer, y_test)
+            un_retain_stats = generation_stats(un_retain_answers, retain_pairs)
 
-        all_results[method_name] = {
-            "gen":            un_gen_stats,
-            "probe":          un_probe_stats,
-            "retain":         un_retain_stats,
-            "test_answers":   un_test_answers,
-            "retain_answers": un_retain_answers,
-        }
+            all_results[method_name] = {
+                "gen":            un_gen_stats,
+                "probe":          un_probe_stats,
+                "retain":         un_retain_stats,
+                "test_answers":   un_test_answers,
+                "retain_answers": un_retain_answers,
+            }
+
+            save_method_checkpoint(method_name, all_results[method_name])
+
+            print(f"\nUnloading {method_name} model...")
+            unload_model(un_model)
+            del un_tok
 
         # Per-question sample (first 5 questions for brevity)
         print(f"\n--- Sample per-question results ({method_name}, first 5 questions) ---")
@@ -487,11 +574,6 @@ def main():
         print(f"\n  RETAIN SET — GENERATION STATS ({method_name}):")
         print_gen_stats("Base     ", generation_stats(base_retain_answers, retain_pairs))
         print_gen_stats(method_name, un_retain_stats)
-
-        # Unload before next method
-        print(f"\nUnloading {method_name} model...")
-        unload_model(un_model)
-        del un_tok
 
     # ── 7. Final retain set display (base model) ──────────────────────────
     print("\n" + "=" * 60)
