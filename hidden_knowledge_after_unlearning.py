@@ -11,17 +11,21 @@ UNLEARNED_MODEL = "LLM-GAT/llama-3-8b-instruct-pbj-checkpoint-8"  # PB&J - state
 
 # Forget set: WMDP bio-hazardous knowledge subset
 FORGET_SUBSET = "wmdp-bio"
+# How many forget-set questions to evaluate (set to None for all)
+N_FORGET_QUESTIONS = 10
 # Retain set: Wikitext (used during training as retain set per the paper)
 WIKITEXT_CONFIG = "wikitext-103-raw-v1"
 WIKITEXT_MIN_LEN = 100  # minimum characters for a usable passage
+# How many retain passages to evaluate
+N_RETAIN_PASSAGES = 3
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_datasets():
     """
-    Load the full WMDP-bio forget set and one Wikitext retain passage.
-    Returns the full forget dataset (for iteration) and one retain text.
+    Load the WMDP-bio forget set and Wikitext retain passages.
+    Returns the forget dataset and a list of retain texts.
     """
     ds_forget = load_dataset("cais/wmdp", FORGET_SUBSET, split="test")
 
@@ -30,9 +34,8 @@ def load_datasets():
         row["text"] for row in ds_retain
         if len(row["text"].strip()) >= WIKITEXT_MIN_LEN
     ]
-    ex_retain = retain_texts[0]
 
-    return ds_forget, ex_retain
+    return ds_forget, retain_texts
 
 
 def format_mc_question(example):
@@ -130,9 +133,8 @@ def generate_answer(model, tokenizer, prompt, max_new_tokens=64):
 def main():
     # 1. Load datasets
     print("Loading datasets...")
-    ds_forget, retain_text = load_datasets()
-    retain_prompt = format_wikitext_prompt(retain_text)
-    print(f"Forget set: {len(ds_forget)} questions")
+    ds_forget, retain_texts = load_datasets()
+    print(f"Forget set: {len(ds_forget)} questions | Retain set: {len(retain_texts)} passages")
 
     # 2. Load both models simultaneously.
     # Two 8B bfloat16 models ~= 32 GB, well within the A40's 48 GB.
@@ -141,52 +143,44 @@ def main():
     print("Loading unlearned model (PB&J checkpoint-8)...")
     un_tokenizer, un_model = load_model_and_tokenizer(UNLEARNED_MODEL)
 
-    # 3. Iterate over forget questions until the two models give different answers.
-    print("\nSearching for a question where base and unlearned models disagree...\n")
-    divergent_idx = None
-    divergent_example = None
-    divergent_base_answer = None
-    divergent_un_answer = None
+    # 3. Forget set — evaluate N questions, show full answers for both models.
+    n_forget = N_FORGET_QUESTIONS if N_FORGET_QUESTIONS is not None else len(ds_forget)
+    print(f"\n{'=' * 60}")
+    print(f"FORGET SET (WMDP-Bio) — first {n_forget} questions")
+    print(f"{'=' * 60}")
 
     for i, example in enumerate(ds_forget):
+        if i >= n_forget:
+            break
+
         forget_prompt = format_mc_question(example)
         base_answer = generate_answer(base_model, base_tokenizer, forget_prompt)
         un_answer = generate_answer(un_model, un_tokenizer, forget_prompt)
 
         base_letter = extract_letter(base_answer)
         un_letter = extract_letter(un_answer)
+        divergent = base_letter != un_letter
 
-        marker = " <-- DIVERGENT" if base_letter != un_letter else ""
-        print(f"[Q{i:04d}] Base={base_letter or '?'}  Unlearned={un_letter or '?'}{marker}")
+        print(f"\n--- Q{i:04d} {'*** DIVERGENT ***' if divergent else ''} ---")
+        print(format_mc_question_display(example))
+        print(f"\n  [Base]     {base_answer}")
+        print(f"  [Unlearned] {un_answer}")
 
-        if base_letter != un_letter:
-            divergent_idx = i
-            divergent_example = example
-            divergent_base_answer = base_answer
-            divergent_un_answer = un_answer
-            break
+    # 4. Retain set — evaluate N passages, show full continuations for both models.
+    n_retain = min(N_RETAIN_PASSAGES, len(retain_texts))
+    print(f"\n{'=' * 60}")
+    print(f"RETAIN SET (Wikitext) — first {n_retain} passages")
+    print(f"{'=' * 60}")
 
-    # 4. Print full details for the divergent question
-    print("\n" + "=" * 60)
-    if divergent_idx is not None:
-        print(f"DIVERGENT ANSWER FOUND at question {divergent_idx}")
-    else:
-        print("No divergent answer found across all questions.")
-    print("=" * 60)
+    for j, text in enumerate(retain_texts[:n_retain]):
+        retain_prompt = format_wikitext_prompt(text)
+        base_cont = generate_answer(base_model, base_tokenizer, retain_prompt)
+        un_cont = generate_answer(un_model, un_tokenizer, retain_prompt)
 
-    if divergent_example is not None:
-        print("\n[FORGET - WMDP-Bio] question:")
-        print(format_mc_question_display(divergent_example))
-        print(f"\n[FORGET] base answer:\n{divergent_base_answer}")
-        print(f"\n[FORGET] unlearned answer ({UNLEARNED_MODEL}):\n{divergent_un_answer}")
-
-    # 5. Retain set — one passage, both models
-    print("\n" + "=" * 60)
-    print("RETAIN SET (Wikitext)")
-    print("=" * 60)
-    print(f"\nPrompt prefix:\n{retain_prompt}")
-    print(f"\nBase continuation:\n{generate_answer(base_model, base_tokenizer, retain_prompt)}")
-    print(f"\nUnlearned continuation:\n{generate_answer(un_model, un_tokenizer, retain_prompt)}")
+        print(f"\n--- Passage {j} ---")
+        print(f"Prompt: {retain_prompt}")
+        print(f"\n  [Base]      {base_cont}")
+        print(f"  [Unlearned] {un_cont}")
 
 
 if __name__ == "__main__":
