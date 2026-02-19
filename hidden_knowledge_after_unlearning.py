@@ -1,3 +1,4 @@
+import re
 import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -17,16 +18,13 @@ WIKITEXT_MIN_LEN = 100  # minimum characters for a usable passage
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_examples():
+def load_datasets():
     """
-    Load one question from the WMDP-bio forget subset and one passage from the Wikitext retain set.
-    Per the paper: forget set = bio-remove-split of WMDP, retain set = Wikitext.
+    Load the full WMDP-bio forget set and one Wikitext retain passage.
+    Returns the full forget dataset (for iteration) and one retain text.
     """
-    # Forget set: WMDP-bio multiple-choice questions
     ds_forget = load_dataset("cais/wmdp", FORGET_SUBSET, split="test")
-    ex_forget = ds_forget[0]
 
-    # Retain set: Wikitext-103 passages (filter out empty/header lines)
     ds_retain = load_dataset("wikitext", WIKITEXT_CONFIG, split="train")
     retain_texts = [
         row["text"] for row in ds_retain
@@ -34,12 +32,13 @@ def load_examples():
     ]
     ex_retain = retain_texts[0]
 
-    return ex_forget, ex_retain
+    return ds_forget, ex_retain
 
 
 def format_mc_question(example):
     """
     Turn a WMDP multiple-choice row into a chat messages list for Llama-instruct models.
+    Instructs the model to begin its answer with the option letter (A/B/C/D).
     Returns a list of dicts for use with tokenizer.apply_chat_template().
     """
     stem = example["question"]
@@ -54,9 +53,21 @@ def format_mc_question(example):
         "Answer the following multiple-choice question.\n\n"
         f"Question: {stem}\n"
         f"Options:\n{choices_text}\n\n"
-        "Answer with the letter of the correct option."
+        "Begin your response with the letter of the correct option (A, B, C, or D), "
+        "then briefly explain why."
     )
     return [{"role": "user", "content": content}]
+
+
+def format_mc_question_display(example):
+    """Return a human-readable string of the question for printing."""
+    stem = example["question"]
+    choices = example["choices"]
+    letters = ["A", "B", "C", "D"]
+    choices_text = "\n".join(
+        f"{letters[i]}. {choices[i]}" for i in range(len(choices))
+    )
+    return f"Question: {stem}\nOptions:\n{choices_text}"
 
 
 def format_wikitext_prompt(text, max_words=80):
@@ -67,6 +78,12 @@ def format_wikitext_prompt(text, max_words=80):
     words = text.split()
     prefix = " ".join(words[:max_words])
     return prefix
+
+
+def extract_letter(answer):
+    """Extract the first A/B/C/D letter from a model answer, or None."""
+    match = re.search(r'\b([A-D])\b', answer.strip())
+    return match.group(1) if match else None
 
 
 def load_model_and_tokenizer(model_name):
@@ -111,36 +128,65 @@ def generate_answer(model, tokenizer, prompt, max_new_tokens=64):
 
 
 def main():
-    # 1. Load forget (WMDP-bio) and retain (Wikitext) examples
-    forget_example, retain_text = load_examples()
-    forget_prompt = format_mc_question(forget_example)
+    # 1. Load datasets
+    print("Loading datasets...")
+    ds_forget, retain_text = load_datasets()
     retain_prompt = format_wikitext_prompt(retain_text)
+    print(f"Forget set: {len(ds_forget)} questions")
 
-    # 2. Load models
-    print("Loading base model...")
+    # 2. Load both models simultaneously.
+    # Two 8B bfloat16 models ~= 32 GB, well within the A40's 48 GB.
+    print("\nLoading base model...")
     base_tokenizer, base_model = load_model_and_tokenizer(BASE_MODEL)
     print("Loading unlearned model (PB&J checkpoint-8)...")
     un_tokenizer, un_model = load_model_and_tokenizer(UNLEARNED_MODEL)
 
-    # 3. Run base model
-    print("\n=== BASE MODEL RESPONSES (before unlearning) ===")
-    print("\n[FORGET - WMDP-Bio] question:")
-    print(forget_prompt)
-    print("\n[FORGET] base answer:")
-    print(generate_answer(base_model, base_tokenizer, forget_prompt))
+    # 3. Iterate over forget questions until the two models give different answers.
+    print("\nSearching for a question where base and unlearned models disagree...\n")
+    divergent_idx = None
+    divergent_example = None
+    divergent_base_answer = None
+    divergent_un_answer = None
 
-    print("\n[RETAIN - Wikitext] prompt prefix:")
-    print(retain_prompt)
-    print("\n[RETAIN] base continuation:")
-    print(generate_answer(base_model, base_tokenizer, retain_prompt))
+    for i, example in enumerate(ds_forget):
+        forget_prompt = format_mc_question(example)
+        base_answer = generate_answer(base_model, base_tokenizer, forget_prompt)
+        un_answer = generate_answer(un_model, un_tokenizer, forget_prompt)
 
-    # 4. Run unlearned model
-    print("\n=== UNLEARNED MODEL RESPONSES (after unlearning) ===")
-    print(f"\n[FORGET] unlearned answer ({UNLEARNED_MODEL}):")
-    print(generate_answer(un_model, un_tokenizer, forget_prompt))
+        base_letter = extract_letter(base_answer)
+        un_letter = extract_letter(un_answer)
 
-    print("\n[RETAIN] unlearned continuation:")
-    print(generate_answer(un_model, un_tokenizer, retain_prompt))
+        marker = " <-- DIVERGENT" if base_letter != un_letter else ""
+        print(f"[Q{i:04d}] Base={base_letter or '?'}  Unlearned={un_letter or '?'}{marker}")
+
+        if base_letter != un_letter:
+            divergent_idx = i
+            divergent_example = example
+            divergent_base_answer = base_answer
+            divergent_un_answer = un_answer
+            break
+
+    # 4. Print full details for the divergent question
+    print("\n" + "=" * 60)
+    if divergent_idx is not None:
+        print(f"DIVERGENT ANSWER FOUND at question {divergent_idx}")
+    else:
+        print("No divergent answer found across all questions.")
+    print("=" * 60)
+
+    if divergent_example is not None:
+        print("\n[FORGET - WMDP-Bio] question:")
+        print(format_mc_question_display(divergent_example))
+        print(f"\n[FORGET] base answer:\n{divergent_base_answer}")
+        print(f"\n[FORGET] unlearned answer ({UNLEARNED_MODEL}):\n{divergent_un_answer}")
+
+    # 5. Retain set — one passage, both models
+    print("\n" + "=" * 60)
+    print("RETAIN SET (Wikitext)")
+    print("=" * 60)
+    print(f"\nPrompt prefix:\n{retain_prompt}")
+    print(f"\nBase continuation:\n{generate_answer(base_model, base_tokenizer, retain_prompt)}")
+    print(f"\nUnlearned continuation:\n{generate_answer(un_model, un_tokenizer, retain_prompt)}")
 
 
 if __name__ == "__main__":

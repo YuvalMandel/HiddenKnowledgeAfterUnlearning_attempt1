@@ -1,0 +1,24 @@
+.claude*
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# HuggingFace cache
+.cache/
+
+# SLURM job output files
+*.out
+*.err
+
+# Temp/monitoring scripts
+monitor.py
+monitor.sh
+
+# OS
+.DS_Store
+Thumbs.db
