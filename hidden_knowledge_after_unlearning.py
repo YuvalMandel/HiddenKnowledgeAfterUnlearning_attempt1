@@ -19,8 +19,19 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-BASE_MODEL    = "meta-llama/Meta-Llama-3-8B-Instruct"
-UNLEARNED_MODEL = "LLM-GAT/llama-3-8b-instruct-pbj-checkpoint-8"
+BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+# All LLM-GAT unlearned models (checkpoint-8 = most unlearned)
+UNLEARNED_MODELS = {
+    "GradDiff": "LLM-GAT/llama-3-8b-instruct-graddiff-checkpoint-8",
+    "RMU":      "LLM-GAT/llama-3-8b-instruct-rmu-checkpoint-8",
+    "RMU-LAT":  "LLM-GAT/llama-3-8b-instruct-rmu-lat-checkpoint-8",
+    "RepNoise": "LLM-GAT/llama-3-8b-instruct-repnoise-checkpoint-8",
+    "ELM":      "LLM-GAT/llama-3-8b-instruct-elm-checkpoint-8",
+    "RR":       "LLM-GAT/llama-3-8b-instruct-rr-checkpoint-8",
+    "TAR":      "LLM-GAT/llama-3-8b-instruct-tar-checkpoint-8",
+    "PB&J":     "LLM-GAT/llama-3-8b-instruct-pbj-checkpoint-8",
+}
 
 RANDOM_SEED = 42
 
@@ -34,15 +45,11 @@ RETAIN_PREFIX_WORDS       = 60
 RETAIN_CONTINUATION_WORDS = 30
 N_RETAIN_PASSAGES         = 3
 
-# ── A40-optimised batch sizes ──────────────────────────────────────────────
-# A40: 48 GB total. Two 8 B bfloat16 models ≈ 32 GB → ~16 GB free.
-# Hidden-state extraction (output_hidden_states=True):
-#   33 layers × (8 × 512 × 4096) × 2 bytes ≈ 1.1 GB on-GPU per batch → safe at 8.
-# Batched generation (GQA KV cache for Llama-3-8B):
-#   2 × 8 KV-heads × 128 head-dim × 2 bytes × 32 layers × 576 tokens × 8 batch ≈ 1.2 GB → safe at 8.
+# A40: 48 GB. Base model alone (after unloading) ≈ 16 GB → ~32 GB free per unlearned model.
+# With only one model loaded at a time we can use slightly larger batches.
 GENERATION_BATCH_SIZE   = 8
 HIDDEN_STATE_BATCH_SIZE = 8
-MAX_NEW_TOKENS  = 64
+MAX_NEW_TOKENS   = 64
 MAX_INPUT_LENGTH = 512
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -53,11 +60,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # ──────────────────────────────────────────────────────────────────────────
 
 def load_datasets(rng):
-    """
-    Load WMDP-bio and Wikitext.
-    Forget set is shuffled then split: train / val / test.
-    Retain pairs are selected spread across the corpus for topic diversity.
-    """
     ds_forget = load_dataset("cais/wmdp", FORGET_SUBSET, split="test")
     all_questions = list(ds_forget)
     rng.shuffle(all_questions)
@@ -66,7 +68,7 @@ def load_datasets(rng):
     test_q  = all_questions[TRAIN_SIZE + VAL_SIZE:]
     print(f"Forget set split — train: {len(train_q)}  val: {len(val_q)}  test: {len(test_q)}")
 
-    ds_retain   = load_dataset("wikitext", WIKITEXT_CONFIG, split="train")
+    ds_retain    = load_dataset("wikitext", WIKITEXT_CONFIG, split="train")
     retain_texts = [r["text"] for r in ds_retain if len(r["text"].split()) >= WIKITEXT_MIN_WORDS]
     n_needed = N_RETAIN_PASSAGES * 2
     step     = max(1, len(retain_texts) // n_needed)
@@ -112,7 +114,6 @@ def make_continuation_yn_prompt(prefix, continuation):
 
 
 def make_forget_pairs(questions, rng):
-    """Convert WMDP questions to yes/no pair dicts, shuffled."""
     pairs = []
     for ex in questions:
         stem    = ex["question"]
@@ -155,13 +156,18 @@ def load_model_and_tokenizer(model_name):
     tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    tok.padding_side = "left"   # required for correct batched generation
+    tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto" if torch.cuda.is_available() else None,
     )
     return tok, model
+
+
+def unload_model(model):
+    del model
+    torch.cuda.empty_cache()
 
 
 def _apply_template(pairs, tokenizer):
@@ -174,7 +180,6 @@ def _apply_template(pairs, tokenizer):
 
 @torch.no_grad()
 def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
-    """Batched generation. Prints progress per batch. Returns list of answer strings."""
     texts   = _apply_template(pairs, tokenizer)
     answers = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
@@ -198,9 +203,8 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
 @torch.no_grad()
 def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
     """
-    Forward-pass only; extracts the last-token hidden state from every layer.
-    With left-padding the last real token is always at position -1.
-    Returns float32 numpy array of shape (n_pairs, n_layers+1, hidden_dim).
+    Forward-pass only. Returns float32 numpy array of shape
+    (n_pairs, n_layers+1, hidden_dim). Last token at position -1 (left-padded).
     """
     texts     = _apply_template(pairs, tokenizer)
     all_hs    = []
@@ -212,15 +216,12 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
                         truncation=True, max_length=MAX_INPUT_LENGTH)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True)
-
-        # out.hidden_states: tuple of (n_layers+1) tensors, each (batch, seq, hidden_dim)
-        # stack → (batch, n_layers+1, hidden_dim), take last token position
-        hs = torch.stack([h[:, -1, :] for h in out.hidden_states], dim=1)
+        hs  = torch.stack([h[:, -1, :] for h in out.hidden_states], dim=1)
         all_hs.append(hs.cpu().float().numpy())
         print(f"  [{desc}] hidden-state batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
 
-    return np.concatenate(all_hs, axis=0)   # (n_pairs, n_layers+1, hidden_dim)
+    return np.concatenate(all_hs, axis=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -232,7 +233,6 @@ def pairs_to_labels(pairs):
 
 
 def train_probes(hs_train, y_train):
-    """Train one logistic-regression probe per layer. Returns {layer_idx: sklearn Pipeline}."""
     n_layers = hs_train.shape[1]
     probes   = {}
     for l in range(n_layers):
@@ -244,14 +244,11 @@ def train_probes(hs_train, y_train):
 
 
 def eval_probes(probes, hs, y):
-    """Evaluate every probe. Returns {layer_idx: accuracy}."""
     return {l: clf.score(hs[:, l, :], y) for l, clf in probes.items()}
 
 
 def probe_stats(probe, hs, layer_idx, labels):
-    """Classifier-based stats for a single probe on given hidden states."""
-    preds = probe.predict(hs[:, layer_idx, :])
-    total = len(labels)
+    preds    = probe.predict(hs[:, layer_idx, :])
     yes_mask = labels == 1
     no_mask  = labels == 0
     return {
@@ -271,7 +268,6 @@ def extract_yn(answer):
 
 
 def generation_stats(answers, pairs):
-    """Generation-based stats (accuracy, yes/no accuracy, gibberish rate)."""
     total   = len(answers)
     correct = gibberish = yes_total = yes_correct = no_total = no_correct = 0
     for ans, p in zip(answers, pairs):
@@ -316,8 +312,40 @@ def print_yn_result(label, pos_answer, neg_answer):
     pos_yn = extract_yn(pos_answer)
     neg_yn = extract_yn(neg_answer)
     print(f"  [{label}]")
-    print(f"    Correct answer → {'✓' if pos_yn=='Yes' else '✗'} {pos_yn or '?'}  {pos_answer}")
-    print(f"    Wrong answer   → {'✓' if neg_yn=='No'  else '✗'} {neg_yn or '?'}  {neg_answer}")
+    print(f"    Correct answer -> {'OK' if pos_yn=='Yes' else 'XX'} {pos_yn or '?'}  {pos_answer}")
+    print(f"    Wrong answer   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
+
+
+def print_summary_table(base_gen, base_probe, results):
+    """Print a compact cross-method comparison table."""
+    sep = "=" * 80
+    print(f"\n{sep}")
+    print("SUMMARY TABLE — all methods vs base  (test forget set)")
+    print(sep)
+    print(f"{'Method':<12} {'Gen Acc':>8} {'Gen Yes':>8} {'Gen No':>8} {'Gibberish':>10}"
+          f"  {'Probe Acc':>10} {'P-Yes':>7} {'P-No':>7}")
+    print("-" * 80)
+    # Base row
+    bg, bp = base_gen, base_probe
+    print(f"{'Base':<12} {bg['accuracy']:8.3f} {bg['yes_accuracy']:8.3f} {bg['no_accuracy']:8.3f}"
+          f" {bg['gibberish_rate']:10.3f}  {bp['accuracy']:10.3f} {bp['yes_accuracy']:7.3f}"
+          f" {bp['no_accuracy']:7.3f}")
+    print("-" * 80)
+    for method, r in results.items():
+        g, p = r["gen"], r["probe"]
+        print(f"{method:<12} {g['accuracy']:8.3f} {g['yes_accuracy']:8.3f} {g['no_accuracy']:8.3f}"
+              f" {g['gibberish_rate']:10.3f}  {p['accuracy']:10.3f} {p['yes_accuracy']:7.3f}"
+              f" {p['no_accuracy']:7.3f}")
+    print(sep)
+
+    print(f"\nRETAIN SET — generation accuracy (both models should stay near 1.0)")
+    print(f"{'Method':<12} {'Retain Acc':>11} {'Retain Yes':>11} {'Retain No':>11}")
+    print("-" * 48)
+    for method, r in results.items():
+        rt = r["retain"]
+        print(f"{method:<12} {rt['accuracy']:11.3f} {rt['yes_accuracy']:11.3f}"
+              f" {rt['no_accuracy']:11.3f}")
+    print(sep)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -333,7 +361,6 @@ def main():
     print("Loading datasets...")
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
 
-    # Convert to yes/no pair dicts, shuffle within each split
     train_pairs  = make_forget_pairs(train_q,  rng)
     val_pairs    = make_forget_pairs(val_q,    rng)
     test_pairs   = make_forget_pairs(test_q,   rng)
@@ -342,46 +369,39 @@ def main():
     print(f"Pair counts — train: {len(train_pairs)}  "
           f"val: {len(val_pairs)}  test: {len(test_pairs)}  retain: {len(retain_pairs)}")
 
-    # ── 2. Load models ────────────────────────────────────────────────────
+    y_train = pairs_to_labels(train_pairs)
+    y_val   = pairs_to_labels(val_pairs)
+    y_test  = pairs_to_labels(test_pairs)
+
+    # ── 2. Load base model ────────────────────────────────────────────────
     print("\nLoading base model...")
     base_tok, base_model = load_model_and_tokenizer(BASE_MODEL)
-    print("Loading unlearned model (PB&J checkpoint-8)...")
-    un_tok,   un_model   = load_model_and_tokenizer(UNLEARNED_MODEL)
 
-    # ── 3. Extract hidden states (base model, all splits) ─────────────────
+    # ── 3. Extract hidden states (base model) ─────────────────────────────
     print("\n" + "=" * 60)
     print("Extracting hidden states — BASE model")
     print("=" * 60)
-    hs_train = extract_hidden_states(base_model, base_tok, train_pairs,
-                                     HIDDEN_STATE_BATCH_SIZE, "base/train")
-    hs_val   = extract_hidden_states(base_model, base_tok, val_pairs,
-                                     HIDDEN_STATE_BATCH_SIZE, "base/val")
+    hs_train     = extract_hidden_states(base_model, base_tok, train_pairs,
+                                         HIDDEN_STATE_BATCH_SIZE, "base/train")
+    hs_val       = extract_hidden_states(base_model, base_tok, val_pairs,
+                                         HIDDEN_STATE_BATCH_SIZE, "base/val")
     hs_test_base = extract_hidden_states(base_model, base_tok, test_pairs,
                                          HIDDEN_STATE_BATCH_SIZE, "base/test")
 
-    print("\nExtracting hidden states — UNLEARNED model (test only)")
-    hs_test_un = extract_hidden_states(un_model, un_tok, test_pairs,
-                                       HIDDEN_STATE_BATCH_SIZE, "unlearned/test")
-
-    # ── 4. Train linear probes on base-model train hidden states ──────────
+    # ── 4. Train probes & select best layer ───────────────────────────────
     print("\n" + "=" * 60)
     print("Training linear probes (one per layer) on TRAIN hidden states...")
     print("=" * 60)
-    y_train = pairs_to_labels(train_pairs)
-    probes  = train_probes(hs_train, y_train)
-
-    # ── 5. Select best layer on validation set ────────────────────────────
-    y_val     = pairs_to_labels(val_pairs)
+    probes    = train_probes(hs_train, y_train)
     val_accs  = eval_probes(probes, hs_val, y_val)
     best_layer = max(val_accs, key=val_accs.get)
     print(f"\nValidation accuracies per layer (showing top 5):")
-    top5 = sorted(val_accs.items(), key=lambda x: -x[1])[:5]
-    for l, acc in top5:
-        marker = " ← BEST" if l == best_layer else ""
+    for l, acc in sorted(val_accs.items(), key=lambda x: -x[1])[:5]:
+        marker = " <- BEST" if l == best_layer else ""
         print(f"  Layer {l:2d}: {acc:.3f}{marker}")
     print(f"\nBest layer: {best_layer}  (val accuracy: {val_accs[best_layer]:.3f})")
 
-    # ── 6. Batched generation — test forget + retain ──────────────────────
+    # ── 5. Base model generation ──────────────────────────────────────────
     print("\n" + "=" * 60)
     print("Running batched generation — BASE model — test forget set")
     print("=" * 60)
@@ -389,99 +409,110 @@ def main():
                                        GENERATION_BATCH_SIZE, "base/test")
 
     print("\n" + "=" * 60)
-    print("Running batched generation — UNLEARNED model — test forget set")
-    print("=" * 60)
-    un_test_answers = batch_generate(un_model, un_tok, test_pairs,
-                                     GENERATION_BATCH_SIZE, "unlearned/test")
-
-    print("\n" + "=" * 60)
-    print("Running batched generation — both models — retain set")
+    print("Running batched generation — BASE model — retain set")
     print("=" * 60)
     base_retain_answers = batch_generate(base_model, base_tok, retain_pairs,
                                          GENERATION_BATCH_SIZE, "base/retain")
-    un_retain_answers   = batch_generate(un_model,   un_tok,   retain_pairs,
-                                         GENERATION_BATCH_SIZE, "unlearned/retain")
 
-    # ── 7. Print per-question results — test forget set ───────────────────
+    base_gen_stats   = generation_stats(base_test_answers, test_pairs)
+    base_probe_stats = probe_stats(probes[best_layer], hs_test_base, best_layer, y_test)
+
+    # Unload base model — free GPU memory before loading unlearned models
+    print("\nUnloading base model to free GPU memory...")
+    unload_model(base_model)
+    del base_tok
+
+    # ── 6. Per-method loop ────────────────────────────────────────────────
+    all_results = {}
+
+    for method_name, model_id in UNLEARNED_MODELS.items():
+        print("\n" + "=" * 60)
+        print(f"METHOD: {method_name}  ({model_id})")
+        print("=" * 60)
+
+        print(f"Loading {method_name} model...")
+        un_tok, un_model = load_model_and_tokenizer(model_id)
+
+        # Generation — test forget set
+        print(f"\nGenerating answers — {method_name} — test forget set")
+        un_test_answers = batch_generate(un_model, un_tok, test_pairs,
+                                         GENERATION_BATCH_SIZE, f"{method_name}/test")
+
+        # Generation — retain set
+        print(f"\nGenerating answers — {method_name} — retain set")
+        un_retain_answers = batch_generate(un_model, un_tok, retain_pairs,
+                                           GENERATION_BATCH_SIZE, f"{method_name}/retain")
+
+        # Hidden states — test set only (needed for probe eval)
+        print(f"\nExtracting hidden states — {method_name} — test set")
+        hs_test_un = extract_hidden_states(un_model, un_tok, test_pairs,
+                                           HIDDEN_STATE_BATCH_SIZE, f"{method_name}/test")
+
+        # Stats
+        un_gen_stats    = generation_stats(un_test_answers, test_pairs)
+        un_probe_stats  = probe_stats(probes[best_layer], hs_test_un, best_layer, y_test)
+        un_retain_stats = generation_stats(un_retain_answers, retain_pairs)
+
+        all_results[method_name] = {
+            "gen":            un_gen_stats,
+            "probe":          un_probe_stats,
+            "retain":         un_retain_stats,
+            "test_answers":   un_test_answers,
+            "retain_answers": un_retain_answers,
+        }
+
+        # Per-question sample (first 5 questions for brevity)
+        print(f"\n--- Sample per-question results ({method_name}, first 5 questions) ---")
+        base_ans_map = {(p["question"], p["pair_type"]): a
+                        for p, a in zip(test_pairs, base_test_answers)}
+        un_ans_map   = {(p["question"], p["pair_type"]): a
+                        for p, a in zip(test_pairs, un_test_answers)}
+        for ex in test_q[:5]:
+            q = ex["question"]
+            print(f"\n  Q: {q}")
+            print_yn_result("Base     ", base_ans_map.get((q, "pos"), ""),
+                                         base_ans_map.get((q, "neg"), ""))
+            print_yn_result(method_name, un_ans_map.get((q, "pos"), ""),
+                                         un_ans_map.get((q, "neg"), ""))
+
+        # Per-method stats
+        print(f"\n  FORGET SET — GENERATION STATS ({method_name}, test):")
+        print_gen_stats("Base     ", base_gen_stats)
+        print_gen_stats(method_name, un_gen_stats)
+
+        print(f"\n  FORGET SET — PROBE STATS ({method_name}, best layer {best_layer}):")
+        print_probe_stats("Base     ", base_probe_stats)
+        print_probe_stats(method_name, un_probe_stats)
+
+        print(f"\n  RETAIN SET — GENERATION STATS ({method_name}):")
+        print_gen_stats("Base     ", generation_stats(base_retain_answers, retain_pairs))
+        print_gen_stats(method_name, un_retain_stats)
+
+        # Unload before next method
+        print(f"\nUnloading {method_name} model...")
+        unload_model(un_model)
+        del un_tok
+
+    # ── 7. Final retain set display (base model) ──────────────────────────
     print("\n" + "=" * 60)
-    print(f"TEST FORGET SET — per-question results ({len(test_q)} questions, {len(test_pairs)} pairs)")
+    print(f"RETAIN SET — {N_RETAIN_PASSAGES} diverse passages (base model answers)")
     print("=" * 60)
-
-    # Re-map answers back to question order (pairs are shuffled, use pair_type)
-    # Build lookup: question_text + pair_type → answer
-    base_ans_map = {(p["question"], p["pair_type"]): a
-                    for p, a in zip(test_pairs, base_test_answers)}
-    un_ans_map   = {(p["question"], p["pair_type"]): a
-                    for p, a in zip(test_pairs, un_test_answers)}
-
-    for ex in test_q:
-        q = ex["question"]
-        base_pos = base_ans_map.get((q, "pos"), "")
-        base_neg = base_ans_map.get((q, "neg"), "")
-        un_pos   = un_ans_map.get((q, "pos"), "")
-        un_neg   = un_ans_map.get((q, "neg"), "")
-        print(f"\n  Q: {q}")
-        print_yn_result("Base     ", base_pos, base_neg)
-        print_yn_result("Unlearned", un_pos,   un_neg)
-
-    # ── 8. Statistics ─────────────────────────────────────────────────────
-
-    # ─ Probe stats across all splits ─────────────────────────────────────
-    y_test = pairs_to_labels(test_pairs)
-    best_probe = probes[best_layer]
-
-    print("\n" + "=" * 60)
-    print(f"FORGET SET — PROBE STATISTICS  (best layer: {best_layer})")
-    print("=" * 60)
-
-    print("\n  TRAIN (base model — fitting set):")
-    print_probe_stats("Base", probe_stats(best_probe, hs_train, best_layer, y_train))
-
-    print("\n  VALIDATION (base model — layer-selection set):")
-    print_probe_stats("Base", probe_stats(best_probe, hs_val, best_layer, y_val))
-
-    print("\n  TEST:")
-    print_probe_stats("Base     ", probe_stats(best_probe, hs_test_base, best_layer, y_test))
-    print_probe_stats("Unlearned", probe_stats(best_probe, hs_test_un,   best_layer, y_test))
-
-    # ─ Generation stats — test only ──────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("FORGET SET — GENERATION STATISTICS (test set)")
-    print("=" * 60)
-    print_gen_stats("Base     ", generation_stats(base_test_answers, test_pairs))
-    print_gen_stats("Unlearned", generation_stats(un_test_answers,   test_pairs))
-
-    # ─ Retain set results ────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print(f"RETAIN SET — {N_RETAIN_PASSAGES} diverse passages")
-    print("Expected: Yes for real continuation, No for wrong continuation")
-    print("=" * 60)
-
-    # Build lookups keyed by (passage_idx, pair_type) — safe after shuffle
-    ret_pair_map = {(p["passage_idx"], p["pair_type"]): p
-                    for p in retain_pairs}
+    ret_pair_map = {(p["passage_idx"], p["pair_type"]): p  for p in retain_pairs}
     ret_base_map = {(p["passage_idx"], p["pair_type"]): a
                     for p, a in zip(retain_pairs, base_retain_answers)}
-    ret_un_map   = {(p["passage_idx"], p["pair_type"]): a
-                    for p, a in zip(retain_pairs, un_retain_answers)}
-
     for j in range(N_RETAIN_PASSAGES):
         p_pos = ret_pair_map[(j, "pos")]
         p_neg = ret_pair_map[(j, "neg")]
         b_pos = ret_base_map[(j, "pos")]
         b_neg = ret_base_map[(j, "neg")]
-        u_pos = ret_un_map[(j, "pos")]
-        u_neg = ret_un_map[(j, "neg")]
         print(f"\n--- Passage {j} ---")
         print(f"  Prefix:             ...{p_pos['prefix'][-80:]}")
         print(f"  Real continuation:  {p_pos['continuation'][:80]}")
         print(f"  Wrong continuation: {p_neg['continuation'][:80]}")
-        print_yn_result("Base     ", b_pos, b_neg)
-        print_yn_result("Unlearned", u_pos, u_neg)
+        print_yn_result("Base", b_pos, b_neg)
 
-    print("\n  RETAIN GENERATION STATISTICS:")
-    print_gen_stats("Base     ", generation_stats(base_retain_answers, retain_pairs))
-    print_gen_stats("Unlearned", generation_stats(un_retain_answers,   retain_pairs))
+    # ── 8. Summary table ──────────────────────────────────────────────────
+    print_summary_table(base_gen_stats, base_probe_stats, all_results)
 
 
 if __name__ == "__main__":
