@@ -427,6 +427,30 @@ def main():
     print("Loading datasets...")
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
 
+    # ── Show one raw example before yes/no conversion ─────────────────────
+    print("\n" + "=" * 60)
+    print("RAW EXAMPLE (train) — FORGET SET  [before yes/no conversion]")
+    print("=" * 60)
+    ex0 = train_q[0]
+    print(f"  Question : {ex0['question']}")
+    for i, ch in enumerate(ex0["choices"]):
+        marker = " <-- correct" if i == ex0["answer"] else ""
+        print(f"  [{i}] {ch}{marker}")
+
+    print("\n" + "=" * 60)
+    print("RAW EXAMPLE (train) — RETAIN SET  [before yes/no conversion]")
+    print("=" * 60)
+    retain_ex_text, retain_ex_wrong = retain_pairs_raw[0]
+    words    = retain_ex_text.split()
+    w_words  = retain_ex_wrong.split()
+    prefix       = " ".join(words[:RETAIN_PREFIX_WORDS])
+    correct_cont = " ".join(words[RETAIN_PREFIX_WORDS:RETAIN_PREFIX_WORDS + RETAIN_CONTINUATION_WORDS])
+    wrong_cont   = " ".join(w_words[:RETAIN_CONTINUATION_WORDS])
+    print(f"  Prefix              : {prefix}")
+    print(f"  Correct continuation: {correct_cont}")
+    print(f"  Wrong continuation  : {wrong_cont}")
+    print("=" * 60)
+
     train_pairs  = make_forget_pairs(train_q,  rng)
     val_pairs    = make_forget_pairs(val_q,    rng)
     test_pairs   = make_forget_pairs(test_q,   rng)
