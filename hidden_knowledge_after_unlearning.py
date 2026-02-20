@@ -427,18 +427,29 @@ def main():
     print("Loading datasets...")
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
 
-    # ── Show one raw example before yes/no conversion ─────────────────────
+    # ── Show one raw example + yes/no prompt for both sets ────────────────
+    def _print_prompt(messages):
+        for msg in messages:
+            print(f"    [{msg['role'].upper()}] {msg['content']}")
+
     print("\n" + "=" * 60)
-    print("RAW EXAMPLE (train) — FORGET SET  [before yes/no conversion]")
+    print("EXAMPLE (train[0]) — FORGET SET")
     print("=" * 60)
     ex0 = train_q[0]
+    print("  -- RAW --")
     print(f"  Question : {ex0['question']}")
     for i, ch in enumerate(ex0["choices"]):
         marker = " <-- correct" if i == ex0["answer"] else ""
         print(f"  [{i}] {ch}{marker}")
+    cor_txt0 = ex0["choices"][ex0["answer"]]
+    wrg_txt0 = ex0["choices"][[i for i in range(len(ex0["choices"])) if i != ex0["answer"]][0]]
+    print("\n  -- YES/NO PROMPT (correct answer) --")
+    _print_prompt(make_yn_prompt(ex0["question"], cor_txt0))
+    print("\n  -- YES/NO PROMPT (wrong answer) --")
+    _print_prompt(make_yn_prompt(ex0["question"], wrg_txt0))
 
     print("\n" + "=" * 60)
-    print("RAW EXAMPLE (train) — RETAIN SET  [before yes/no conversion]")
+    print("EXAMPLE (retain passage 0) — RETAIN SET")
     print("=" * 60)
     retain_ex_text, retain_ex_wrong = retain_pairs_raw[0]
     words    = retain_ex_text.split()
@@ -446,9 +457,14 @@ def main():
     prefix       = " ".join(words[:RETAIN_PREFIX_WORDS])
     correct_cont = " ".join(words[RETAIN_PREFIX_WORDS:RETAIN_PREFIX_WORDS + RETAIN_CONTINUATION_WORDS])
     wrong_cont   = " ".join(w_words[:RETAIN_CONTINUATION_WORDS])
+    print("  -- RAW --")
     print(f"  Prefix              : {prefix}")
     print(f"  Correct continuation: {correct_cont}")
     print(f"  Wrong continuation  : {wrong_cont}")
+    print("\n  -- YES/NO PROMPT (correct continuation) --")
+    _print_prompt(make_continuation_yn_prompt(prefix, correct_cont))
+    print("\n  -- YES/NO PROMPT (wrong continuation) --")
+    _print_prompt(make_continuation_yn_prompt(prefix, wrong_cont))
     print("=" * 60)
 
     train_pairs  = make_forget_pairs(train_q,  rng)
