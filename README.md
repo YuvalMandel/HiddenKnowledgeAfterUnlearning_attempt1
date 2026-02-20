@@ -10,29 +10,60 @@ The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosec
 
 ### Pipeline overview
 
-1. **Dataset preparation**
-   - The WMDP-bio multiple-choice questions are split into train / val / test (500 / 200 / rest).
-   - Each question is turned into two yes/no prompts: one with the *correct* answer ("Is this correct? → Yes") and one with a *wrong* answer ("Is this correct? → No").
-   - For the retain set, WikiText passages are split into prefix + correct continuation, paired with a wrong continuation from a different passage.
+```
+Stage 1: base      ──► Stage 2: methods (×8, parallel) ──► Stage 3: summary
+```
 
-2. **Base model evaluation** (`meta-llama/Meta-Llama-3-8B-Instruct`)
-   - Extract hidden states (all transformer layers, last token) for the train / val / test forget pairs.
-   - Train a **linear probe** (logistic regression) per layer to classify yes/no labels from the hidden states.
-   - Pick the best layer on the validation set.
-   - Run generation on the test forget set and the retain set; record yes/no accuracy.
+#### Stage 1 — Base model (`--stage base`)
+1. Load and split WMDP-bio questions into **train / val / test** (500 / 200 / rest).
+2. Each question becomes two yes/no prompts: one with the *correct* answer (→ "Yes") and one with a *wrong* answer (→ "No").  WikiText passages are similarly turned into correct/wrong continuation pairs.
+3. Extract **hidden states** (all transformer layers, last token) for train/val/test pairs.
+4. Train a **linear probe** (logistic regression) per layer; pick the best layer on the validation set.
+5. Run **generation** on test and retain sets; record the first word (Yes/No).
+6. Run a **logit-based metric**: a forward pass at the last input token records the max logit over Yes-tokens vs No-tokens — no decoding required.
+7. Save everything to `checkpoints/`.
 
-3. **Unlearned model evaluation** (8 LLM-GAT checkpoints: GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, PB&J)
-   - For each unlearned model, repeat generation and hidden-state extraction on the test set.
-   - Apply the **base-model probes** (trained in step 2) to the unlearned model's hidden states.
-   - If probe accuracy stays high even though generation accuracy drops, the model still internally represents the "forgotten" knowledge.
+#### Stage 2 — Unlearned models (`--stage method --method <NAME>`)
+Runs independently for each of the 8 LLM-GAT unlearning methods (all in parallel via SLURM job array):
 
-4. **Summary table** comparing generation accuracy, probe accuracy, and retain-set accuracy across all methods.
+1. Extract hidden states of **train / val / test** using the *unlearned* model.
+2. Train a **method-specific probe** on those hidden states (same train set, different model).  Find its best layer on the unlearned model's val hidden states.
+3. Run generation and logit scoring on test and retain sets.
+4. Evaluate with **two probe sets**:
+   - **Base probes** (trained on base-model hs) — do the base-model's learned directions transfer?
+   - **Method probes** (trained on unlearned-model hs) — is a *new* direction still detectable?
+5. Save to `checkpoints/`.
 
-### Key insight
+#### Stage 3 — Summary (`--stage summary`)
+Loads all checkpoints (no GPU needed) and prints:
+- Per-method sample Q&A comparisons
+- Three summary tables (generation + base probe + logit, method-specific probes, retain set)
 
-- **Generation accuracy** measures what the model *says* it knows.
-- **Probe accuracy** measures what the model's hidden states *encode*.
-- A gap between them (low generation, high probe) would be evidence of hidden residual knowledge after unlearning.
+### Metrics
+
+| Metric | What it measures |
+|---|---|
+| **Generation accuracy** | Does the model *say* the right Yes/No? |
+| **Base probe accuracy** | Do directions learned from the base model's hidden states still classify Yes/No in the unlearned model? |
+| **Method probe accuracy** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
+| **Logit accuracy** | Is the logit for the correct Yes/No token higher than the wrong one, without any generation? |
+
+A gap between generation ↓ and probe/logit accuracy ↑ is evidence of **residual hidden knowledge** after unlearning.
+
+---
+
+## File structure
+
+```
+hidden_knowledge_after_unlearning.py   Main Python script (all stages)
+submit_pipeline.sh                     Submit all jobs with SLURM dependencies
+run_hidden_knowledge.sh                Convenience alias for submit_pipeline.sh
+slurm_base.sh                          SLURM script for stage 1 (base model)
+slurm_methods.sh                       SLURM job array for stage 2 (8 methods)
+slurm_summary.sh                       SLURM script for stage 3 (summary)
+checkpoints/                           Auto-created; holds .npy, .pkl, .json
+logs/                                  Auto-created; SLURM stdout/stderr
+```
 
 ---
 
@@ -51,7 +82,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 pip install transformers datasets scikit-learn numpy
 ```
 
-You will also need a Hugging Face account with access to `meta-llama/Meta-Llama-3-8B-Instruct`. Set your token:
+You need a Hugging Face account with access to `meta-llama/Meta-Llama-3-8B-Instruct`:
 
 ```bash
 huggingface-cli login
@@ -61,26 +92,53 @@ huggingface-cli login
 
 ## Running the code
 
-### Directly (local machine or interactive node)
+### On a SLURM cluster (recommended)
 
 ```bash
-python hidden_knowledge_after_unlearning.py
+# Submit all three stages with automatic job dependencies:
+bash submit_pipeline.sh
+
+# Monitor:
+squeue -u $USER
+
+# Logs:
+tail -f logs/base_<JOBID>.out
+tail -f logs/method_<TASK>_<JOBID>.out
+tail -f logs/summary_<JOBID>.out
 ```
 
-### On a SLURM cluster
+The three stages run as:
+- `slurm_base.sh` — 1 × A40, up to 8 h
+- `slurm_methods.sh` — 8 × A40 in parallel (job array), up to 10 h each
+- `slurm_summary.sh` — CPU-only, 30 min
+
+Stage 2 starts automatically once stage 1 succeeds; stage 3 starts once all stage-2 tasks succeed.
+
+### Running a single method manually
 
 ```bash
-sbatch run_hidden_knowledge.sh
+# Prerequisite: stage 1 must have completed first.
+python hidden_knowledge_after_unlearning.py --stage method --method GradDiff
 ```
 
-The script requests 1 × A40 GPU (48 GB), 48 GB RAM, 8 CPUs, and a 12-hour time limit.
-Output is written to `hidden_knowledge_<jobid>.out`.
+### Running locally (no SLURM)
 
-### Checkpointing
+```bash
+python hidden_knowledge_after_unlearning.py --stage base
+python hidden_knowledge_after_unlearning.py --stage method --method GradDiff
+# ... repeat for each method ...
+python hidden_knowledge_after_unlearning.py --stage summary
+```
 
-Intermediate results are saved in `checkpoints/` after each model is processed.
-If the job is interrupted and resubmitted, already-computed models are loaded from disk and skipped — only missing models are rerun.
-Delete the `checkpoints/` directory to start fresh.
+### Resubmitting after preemption
+
+Checkpoints are saved after each heavy operation (hidden-state extraction arrays, generation answers, logit scores).  Simply resubmit the failed job — it will resume from where it left off:
+
+```bash
+sbatch slurm_methods.sh   # or the full pipeline again
+```
+
+To start completely from scratch, delete the `checkpoints/` directory.
 
 ---
 
@@ -98,28 +156,40 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | `N_RETAIN_PASSAGES` | 3 | Number of WikiText passage pairs |
 | `GENERATION_BATCH_SIZE` | 8 | Batch size for text generation |
 | `HIDDEN_STATE_BATCH_SIZE` | 8 | Batch size for hidden-state extraction |
+| `LOGIT_BATCH_SIZE` | 16 | Batch size for logit-score computation |
 | `MAX_NEW_TOKENS` | 64 | Max tokens generated per prompt |
 
 ---
 
 ## Output
 
-The script prints a **per-method breakdown** and a final **summary table**:
+The summary stage prints three tables:
 
 ```
-SUMMARY TABLE — all methods vs base  (test forget set)
-================================================================================
-Method        Gen Acc  Gen Yes   Gen No  Gibberish   Probe Acc   P-Yes    P-No
---------------------------------------------------------------------------------
-Base            0.XXX    0.XXX    0.XXX       0.XXX       0.XXX   0.XXX   0.XXX
-GradDiff        0.XXX    0.XXX    0.XXX       0.XXX       0.XXX   0.XXX   0.XXX
+SUMMARY — FORGET SET (test) — Generation / Base-model Probe / Logit
+═══════════════════════════════════════════════════════════════════════
+Method        GenAcc  GYes   GNo   Gib  BaseProbe  BPYes  BPNo  LogitAcc  LYes   LNo
+──────────────────────────────────────────────────────────────────────
+Base           0.XXX 0.XXX 0.XXX 0.XXX      0.XXX  0.XXX 0.XXX     0.XXX 0.XXX 0.XXX
+GradDiff       ...
 ...
-================================================================================
 
-RETAIN SET — generation accuracy (both models should stay near 1.0)
+SUMMARY — FORGET SET (test) — Method-Specific Probes
+  (probes trained on the UNLEARNED model's own hidden states)
+═══════════════════════════════
+Method       BestLyr  MProbe  MPYes   MPNo
+...
+
+SUMMARY — RETAIN SET — Generation / Logit  (should stay near 1.0)
+═══════════════════════════════════════════════════════════
+Method       RetainAcc   RYes   RNo   RLogit  RLYes   RLNo
+...
 ```
 
-- **Gen Acc**: fraction of test prompts where the model's first word (Yes/No) matches the ground truth.
-- **Probe Acc**: fraction correctly classified by the linear probe from hidden states.
-- **Gibberish rate**: fraction of outputs that contain neither "Yes" nor "No".
-- **Retain Acc**: same as Gen Acc but on WikiText continuation prompts (should remain high for all methods).
+**Column guide:**
+- `Gen*` — generation accuracy (first word of model output is Yes/No)
+- `BaseProbe` / `BP*` — base-model probe applied to unlearned model hidden states
+- `Logit*` — max(Yes-token logits) vs max(No-token logits) comparison
+- `MProbe` / `MP*` — probe trained on the *unlearned* model's own hidden states
+- `Retain*` — same metrics on the WikiText retain set (should remain high)
+- `Gibberish` — fraction of outputs that contain neither "Yes" nor "No"
