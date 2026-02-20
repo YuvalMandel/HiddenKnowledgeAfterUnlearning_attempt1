@@ -848,6 +848,28 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results)
         _row2(method, r.get("all_method_probe_stats"))
     print(sep)
 
+    # ── Table 5: Cross-probe  (train post → test pre) ────────────────────────
+    print(f"\n{sep}")
+    print("TABLE 5 — FORGET SET (test): METHOD probes → BASE model test hidden states")
+    print("          (train post-unlearning, test pre-unlearning)")
+    print("          Completes the 2×2 probe matrix:")
+    print("              Train\\Test |  Base hs      |  Unlearned hs")
+    print("            ─────────────┼───────────────┼──────────────────")
+    print("            Base probes  │  Table 2 (diag)│  Table 2")
+    print("            Method probes│  Table 5 ★    │  Table 3")
+    print(sep)
+    print(f"{'Method':<12}"
+          + "  PL-LR  Acc  Yes   No Lyr"
+          + "  PL-RF  Acc  Yes   No Lyr"
+          + "  PL-Ada Acc  Yes   No Lyr"
+          + "  ML-LR  Yes   No"
+          + "  ML-RF  Yes   No"
+          + "  ML-Ada Yes   No")
+    print("-" * W)
+    for method, r in all_results.items():
+        _row2(method, r.get("all_method_probe_on_base_stats"))
+    print(sep)
+
     # ── Table 4: Retain set ───────────────────────────────────────────────────
     print(f"\n{sep}")
     print("TABLE 4 — RETAIN SET: Generation + Logit  (should stay near 1.0)")
@@ -1106,9 +1128,29 @@ def run_method(method_name: str):
     y_test  = pairs_to_labels(test_pairs)
 
     # ── Complete checkpoint? ──────────────────────────────────────────────────
-    if load_method_checkpoint(method_name, load_hs=False) is not None:
-        print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
-        return
+    results_path = CHECKPOINT_DIR / f"{sn}_results.json"
+    if results_path.exists():
+        with open(results_path) as _f:
+            _existing = json.load(_f)
+        if "all_method_probe_on_base_stats" in _existing:
+            print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
+            return
+        # Older checkpoint: patch the missing cross-probe quadrant without full rerun.
+        print(f"[{method_name}] Checkpoint missing cross-probe stats — patching now.")
+        _base_hs_test = _load_npy(CHECKPOINT_DIR / "base_hs_test.npy")
+        _probe_path   = CHECKPOINT_DIR / f"{sn}_probes.pkl"
+        if _base_hs_test is not None and _probe_path.exists():
+            with open(_probe_path, "rb") as _f:
+                _ps = pickle.load(_f)
+            if isinstance(_ps, dict) and "per_layer" in _ps:
+                _existing["all_method_probe_on_base_stats"] = \
+                    compute_all_probe_stats(_ps, _base_hs_test, y_test)
+                with open(results_path, "w") as _f:
+                    json.dump(_existing, _f)
+                print(f"[{method_name}] Cross-probe stats patched.", flush=True)
+                return
+        print(f"[{method_name}] Cannot patch (missing base_hs_test.npy or probes). "
+              "Will recompute from scratch.")
 
     # ── Partial state ─────────────────────────────────────────────────────────
     partial = _load_partial(sn)
@@ -1222,13 +1264,19 @@ def run_method(method_name: str):
             pickle.dump(method_probe_set, f)
         print(f"[{method_name}] Method probes saved.")
 
+    # ── Load base test hidden states for the cross-probe quadrant ────────────
+    base_hs_test = _load_npy(CHECKPOINT_DIR / "base_hs_test.npy")
+    if base_hs_test is None:
+        raise RuntimeError("base_hs_test.npy not found. Run --stage base first.")
+
     # ── Compute stats ─────────────────────────────────────────────────────────
-    un_gen_stats              = generation_stats(test_answers, test_pairs)
-    all_base_probe_stats_v    = compute_all_probe_stats(base_probe_set, hs_test_un, y_test)
-    all_method_probe_stats_v  = compute_all_probe_stats(method_probe_set, hs_test_un, y_test)
-    un_logit_stats            = logit_stats(logit_scores, test_pairs)
-    un_retain_stats           = generation_stats(retain_answers, retain_pairs)
-    un_retain_logit_stats     = logit_stats(retain_logit_scores, retain_pairs)
+    un_gen_stats                    = generation_stats(test_answers, test_pairs)
+    all_base_probe_stats_v          = compute_all_probe_stats(base_probe_set,   hs_test_un,   y_test)
+    all_method_probe_stats_v        = compute_all_probe_stats(method_probe_set, hs_test_un,   y_test)
+    all_method_probe_on_base_stats_v = compute_all_probe_stats(method_probe_set, base_hs_test, y_test)
+    un_logit_stats                  = logit_stats(logit_scores, test_pairs)
+    un_retain_stats                 = generation_stats(retain_answers, retain_pairs)
+    un_retain_logit_stats           = logit_stats(retain_logit_scores, retain_pairs)
 
     print(f"\n  FORGET SET — GENERATION STATS ({method_name}):")
     print_gen_stats("Base     ", base_gen)
@@ -1241,6 +1289,9 @@ def run_method(method_name: str):
     print(f"\n  FORGET SET — METHOD PROBE STATS ({method_name}):")
     print_probe_stats_all(method_name, all_method_probe_stats_v)
 
+    print(f"\n  FORGET SET — METHOD PROBES ON BASE hs ({method_name} → base model test hs):")
+    print_probe_stats_all(method_name, all_method_probe_on_base_stats_v)
+
     print(f"\n  FORGET SET — LOGIT STATS ({method_name}):")
     print_logit_stats("Base     ", base_logit_s)
     print_logit_stats(method_name, un_logit_stats)
@@ -1250,14 +1301,15 @@ def run_method(method_name: str):
     print_gen_stats(method_name, un_retain_stats)
 
     results = {
-        "gen":                   un_gen_stats,
-        "all_base_probe_stats":  all_base_probe_stats_v,
-        "all_method_probe_stats":all_method_probe_stats_v,
-        "logit":                 un_logit_stats,
-        "retain":                un_retain_stats,
-        "retain_logit":          un_retain_logit_stats,
-        "test_answers":          test_answers,
-        "retain_answers":        retain_answers,
+        "gen":                            un_gen_stats,
+        "all_base_probe_stats":           all_base_probe_stats_v,
+        "all_method_probe_stats":         all_method_probe_stats_v,
+        "all_method_probe_on_base_stats": all_method_probe_on_base_stats_v,
+        "logit":                          un_logit_stats,
+        "retain":                         un_retain_stats,
+        "retain_logit":                   un_retain_logit_stats,
+        "test_answers":                   test_answers,
+        "retain_answers":                 retain_answers,
     }
     save_method_checkpoint(method_name, hs_train_un, hs_val_un, hs_test_un,
                            method_probe_set, results)
@@ -1326,6 +1378,13 @@ def run_summary():
 
         print(f"\n  FORGET SET — METHOD PROBES ({method_name}):")
         print_probe_stats_all(method_name, r.get("all_method_probe_stats", {}))
+
+        print(f"\n  FORGET SET — METHOD PROBES ON BASE hs ({method_name} → base model test hs):")
+        cross = r.get("all_method_probe_on_base_stats")
+        if cross:
+            print_probe_stats_all(method_name, cross)
+        else:
+            print(f"  [{method_name}] N/A — rerun --stage method to compute this quadrant.")
 
         print(f"\n  FORGET SET — LOGIT ({method_name}):")
         print_logit_stats("Base     ", base_logit_s)

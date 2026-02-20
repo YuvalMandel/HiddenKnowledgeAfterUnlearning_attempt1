@@ -51,9 +51,19 @@ For **every model** (base + all 8 unlearned), two families of probes are trained
 - **Per-layer**: one classifier per transformer layer per type; best layer selected independently for each classifier type on the val set.
 - **Multi-layer**: single classifier sees information from every layer simultaneously; PCA is applied first to keep training tractable.
 
-For unlearned models, probes are evaluated in two configurations:
-- **Base probes** (trained on base-model hidden states) applied to the unlearned model's test hidden states — tests whether the base model's learned directions still carry information.
-- **Method-specific probes** (trained on the unlearned model's own hidden states) applied to the same model's test hidden states — tests whether *new* directions in the unlearned model still encode the knowledge.
+The four combinations of (training hs source) × (test hs source) form a 2×2 matrix:
+
+```
+Train \ Test  │  Base model hs     │  Unlearned model hs
+──────────────┼────────────────────┼─────────────────────
+Base probes   │  Table 2 diagonal  │  Table 2
+Method probes │  Table 5  ★        │  Table 3
+```
+
+- **Table 2 diagonal** (train pre → test pre): baseline — probes trained and tested on the base model.
+- **Table 2** (train pre → test post): do the base model's learned directions still work in the unlearned model?
+- **Table 3** (train post → test post): does a fresh probe on the unlearned model still find the knowledge?
+- **Table 5 ★** (train post → test pre): do the unlearned model's directions transfer back to the base model? If yes, the representations are similar; if no, unlearning shifted them significantly.
 
 ### Metrics
 
@@ -214,4 +224,6 @@ Method       RetainAcc   RYes   RNo   RLogit  RLYes   RLNo
 - `Ret*` — retain-set metrics (should stay high)
 - `Gibberish` — fraction of outputs containing neither "Yes" nor "No"
 
-**Tables 2 & 3** (base probes vs method-specific probes) each show per-layer (PL) and multi-layer (ML) columns for LR, RF, and AdaBoost. Table 2 rows are the *base-model probes* applied to each model's hidden states; Table 3 rows are *method-trained probes* applied to the same model's hidden states.
+**Tables 2, 3, 5** all share the same column layout — per-layer (PL) and multi-layer (ML) results for LR, RF, and AdaBoost. The distinction is which probes are applied to which hidden states (see the 2×2 matrix above).
+
+**Note on old checkpoints:** If a method checkpoint was created before Table 5 was added, the method stage will automatically compute the missing cross-probe stats from the saved probes and `base_hs_test.npy` without a full rerun.
