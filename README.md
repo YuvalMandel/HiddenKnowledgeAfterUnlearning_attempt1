@@ -39,16 +39,33 @@ Loads all checkpoints (no GPU needed) and prints:
 - Per-method sample Q&A comparisons
 - Three summary tables (generation + base probe + logit, method-specific probes, retain set)
 
+### Probe types
+
+For **every model** (base + all 8 unlearned), two families of probes are trained on the **train set** hidden states, validated on the **val set**, and evaluated on the **test set**:
+
+| Family | Input | Classifiers |
+|---|---|---|
+| **Per-layer** | Single layer's hidden state vector (4096-d) | LR · RF (PCA→64 first) · AdaBoost (PCA→64) |
+| **Multi-layer** | All layers concatenated, then PCA→256 | LR · RF · AdaBoost |
+
+- **Per-layer**: one classifier per transformer layer per type; best layer selected independently for each classifier type on the val set.
+- **Multi-layer**: single classifier sees information from every layer simultaneously; PCA is applied first to keep training tractable.
+
+For unlearned models, probes are evaluated in two configurations:
+- **Base probes** (trained on base-model hidden states) applied to the unlearned model's test hidden states — tests whether the base model's learned directions still carry information.
+- **Method-specific probes** (trained on the unlearned model's own hidden states) applied to the same model's test hidden states — tests whether *new* directions in the unlearned model still encode the knowledge.
+
 ### Metrics
 
 | Metric | What it measures |
 |---|---|
 | **Generation accuracy** | Does the model *say* the right Yes/No? |
-| **Base probe accuracy** | Do directions learned from the base model's hidden states still classify Yes/No in the unlearned model? |
-| **Method probe accuracy** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
+| **Base probe (LR/RF/AdaBoost)** | Do directions learned from the base model still classify Yes/No in the unlearned model's hidden states? |
+| **Method probe (LR/RF/AdaBoost)** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
 | **Logit accuracy** | Is the logit for the correct Yes/No token higher than the wrong one, without any generation? |
 
 A gap between generation ↓ and probe/logit accuracy ↑ is evidence of **residual hidden knowledge** after unlearning.
+Tree-based probes (RF, AdaBoost) can detect non-linear residual structure that LR would miss.
 
 ---
 
@@ -158,12 +175,14 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | `HIDDEN_STATE_BATCH_SIZE` | 8 | Batch size for hidden-state extraction |
 | `LOGIT_BATCH_SIZE` | 16 | Batch size for logit-score computation |
 | `MAX_NEW_TOKENS` | 64 | Max tokens generated per prompt |
+| `PCA_DIMS_PER_LAYER` | 64 | PCA components before RF/AdaBoost per-layer probes |
+| `PCA_DIMS_MULTI` | 256 | PCA components for all multi-layer probes |
 
 ---
 
 ## Output
 
-The summary stage prints three tables:
+The summary stage prints four tables:
 
 ```
 SUMMARY — FORGET SET (test) — Generation / Base-model Probe / Logit
@@ -188,8 +207,11 @@ Method       RetainAcc   RYes   RNo   RLogit  RLYes   RLNo
 
 **Column guide:**
 - `Gen*` — generation accuracy (first word of model output is Yes/No)
-- `BaseProbe` / `BP*` — base-model probe applied to unlearned model hidden states
-- `Logit*` — max(Yes-token logits) vs max(No-token logits) comparison
-- `MProbe` / `MP*` — probe trained on the *unlearned* model's own hidden states
-- `Retain*` — same metrics on the WikiText retain set (should remain high)
-- `Gibberish` — fraction of outputs that contain neither "Yes" nor "No"
+- `Gen*` — generation accuracy (first word of model output is Yes/No)
+- `Logit*` — max(Yes-token logits) vs max(No-token logits) at the last input position
+- `PL-{clf}` — per-layer probe at that classifier's independently chosen best validation layer
+- `ML-{clf}` — multi-layer probe (all layers concatenated, then PCA-256)
+- `Ret*` — retain-set metrics (should stay high)
+- `Gibberish` — fraction of outputs containing neither "Yes" nor "No"
+
+**Tables 2 & 3** (base probes vs method-specific probes) each show per-layer (PL) and multi-layer (ML) columns for LR, RF, and AdaBoost. Table 2 rows are the *base-model probes* applied to each model's hidden states; Table 3 rows are *method-trained probes* applied to the same model's hidden states.

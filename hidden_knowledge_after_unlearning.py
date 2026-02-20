@@ -17,10 +17,17 @@ Three independent stages, each submitted as a separate SLURM job:
   --stage summary         Load all checkpoints and print the summary table.
                           Requires all method checkpoints to exist.
 
-Checkpointing is granular: numpy arrays are saved immediately after each
-extraction step; generation answers and logit scores are accumulated in a
-partial-state JSON so that preempted jobs can resume without recomputing
-completed operations.
+Probe types trained for every model:
+  Per-layer  — one classifier per transformer layer:
+                 LR        (LogisticRegression, no PCA)
+                 RF        (RandomForest, PCA-64 pre-projection)
+                 AdaBoost  (AdaBoost on decision stumps, PCA-64)
+  Multi-layer — single classifier fed all layers concatenated,
+                 PCA-256 pre-projection + LR / RF / AdaBoost
+
+The best layer for each per-layer probe type is selected independently on
+the validation set.  Base-model probes are also applied to every unlearned
+model's test hidden states to check whether the same directions transfer.
 """
 
 import argparse
@@ -36,12 +43,16 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 try:
     from sklearn.linear_model import LogisticRegression
+    from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+    from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
 except ImportError:
     import subprocess
     subprocess.run(["pip", "install", "scikit-learn", "-q"], check=True)
     from sklearn.linear_model import LogisticRegression
+    from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+    from sklearn.decomposition import PCA
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
 
@@ -75,9 +86,15 @@ N_RETAIN_PASSAGES         = 3
 
 GENERATION_BATCH_SIZE   = 8
 HIDDEN_STATE_BATCH_SIZE = 8
-LOGIT_BATCH_SIZE        = 16   # forward-only, no decode overhead
+LOGIT_BATCH_SIZE        = 16
 MAX_NEW_TOKENS          = 64
 MAX_INPUT_LENGTH        = 512
+
+# Probe dimensionality reduction
+PCA_DIMS_PER_LAYER = 64    # for RF / AdaBoost per-layer pipelines
+PCA_DIMS_MULTI     = 256   # for all multi-layer pipelines
+
+CLF_NAMES = ["LR", "RF", "AdaBoost"]
 
 CHECKPOINT_DIR = Path("checkpoints")
 
@@ -96,7 +113,6 @@ def safe_name(method_name: str) -> str:
 # =============================================================================
 
 def _load_npy(path: Path):
-    """Return numpy array if file exists, else None."""
     if path.exists():
         print(f"  [cache] Loading {path.name}", flush=True)
         return np.load(path)
@@ -128,28 +144,25 @@ def _save_partial(sn: str, updates: dict):
 
 
 # =============================================================================
-# Base checkpoint  (complete results)
+# Base checkpoint
 # =============================================================================
 
 def save_base_checkpoint(hs_train, hs_val, hs_test,
-                         probes, best_layer,
-                         test_answers, retain_answers,
-                         gen_stats, probe_stats,
-                         logit_stats, logit_scores,
-                         retain_logit_stats):
+                         probe_set, test_answers, retain_answers,
+                         gen_stats, all_probe_stats,
+                         logit_stats, logit_scores, retain_logit_stats):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     _save_npy(hs_train, CHECKPOINT_DIR / "base_hs_train.npy")
     _save_npy(hs_val,   CHECKPOINT_DIR / "base_hs_val.npy")
     _save_npy(hs_test,  CHECKPOINT_DIR / "base_hs_test.npy")
     with open(CHECKPOINT_DIR / "base_probes.pkl", "wb") as f:
-        pickle.dump(probes, f)
+        pickle.dump(probe_set, f)
     with open(CHECKPOINT_DIR / "base_results.json", "w") as f:
         json.dump({
-            "best_layer":         best_layer,
             "test_answers":       test_answers,
             "retain_answers":     retain_answers,
             "gen_stats":          gen_stats,
-            "probe_stats":        probe_stats,
+            "all_probe_stats":    all_probe_stats,
             "logit_stats":        logit_stats,
             "logit_scores":       logit_scores,
             "retain_logit_stats": retain_logit_stats,
@@ -158,21 +171,10 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
 
 
 def load_base_checkpoint(load_hs: bool = True):
-    """
-    Returns a dict with keys: hs_train, hs_val, hs_test, probes, best_layer,
-    test_answers, retain_answers, gen_stats, probe_stats, logit_stats,
-    logit_scores, retain_logit_stats.
-    Returns None if the checkpoint is absent or incomplete.
-    When load_hs=False the hs_* keys are None (used by the summary stage).
-    """
     result_path = CHECKPOINT_DIR / "base_results.json"
-    if not result_path.exists():
+    probe_path  = CHECKPOINT_DIR / "base_probes.pkl"
+    if not result_path.exists() or not probe_path.exists():
         return None
-    for fname in ("base_probes.pkl",):
-        if not (CHECKPOINT_DIR / fname).exists():
-            print(f"[checkpoint] WARNING: {fname} missing — ignoring base checkpoint.",
-                  flush=True)
-            return None
     if load_hs:
         for fname in ("base_hs_train.npy", "base_hs_val.npy", "base_hs_test.npy"):
             if not (CHECKPOINT_DIR / fname).exists():
@@ -180,23 +182,38 @@ def load_base_checkpoint(load_hs: bool = True):
                       flush=True)
                 return None
 
-    print("[checkpoint] Loading base checkpoint...", flush=True)
-    with open(CHECKPOINT_DIR / "base_probes.pkl", "rb") as f:
-        probes = pickle.load(f)
+    with open(probe_path, "rb") as f:
+        probe_set = pickle.load(f)
+    # Detect old single-dict format and treat as missing
+    if not isinstance(probe_set, dict) or "per_layer" not in probe_set:
+        print("[checkpoint] Old probe format detected — probes will be retrained.", flush=True)
+        probe_set = None
+
     with open(result_path) as f:
         r = json.load(f)
+
+    # Detect old flat probe_stats format
+    if "all_probe_stats" not in r:
+        print("[checkpoint] Old probe_stats format detected — probes will be retrained.",
+              flush=True)
+        probe_set = None
+
+    if probe_set is None:
+        # Hidden states are still valid; force probe retraining by returning None
+        # for the probes field (caller handles this)
+        pass
 
     hs_train = _load_npy(CHECKPOINT_DIR / "base_hs_train.npy") if load_hs else None
     hs_val   = _load_npy(CHECKPOINT_DIR / "base_hs_val.npy")   if load_hs else None
     hs_test  = _load_npy(CHECKPOINT_DIR / "base_hs_test.npy")  if load_hs else None
 
-    print(f"[checkpoint] Base loaded. best_layer={r['best_layer']}, "
-          f"gen_acc={r['gen_stats']['accuracy']:.3f}", flush=True)
+    print("[checkpoint] Base checkpoint loaded.", flush=True)
     return dict(
         hs_train=hs_train, hs_val=hs_val, hs_test=hs_test,
-        probes=probes, best_layer=r["best_layer"],
+        probe_set=probe_set,
         test_answers=r["test_answers"], retain_answers=r["retain_answers"],
-        gen_stats=r["gen_stats"], probe_stats=r["probe_stats"],
+        gen_stats=r["gen_stats"],
+        all_probe_stats=r.get("all_probe_stats"),
         logit_stats=r.get("logit_stats"),
         logit_scores=r.get("logit_scores"),
         retain_logit_stats=r.get("retain_logit_stats"),
@@ -204,21 +221,20 @@ def load_base_checkpoint(load_hs: bool = True):
 
 
 # =============================================================================
-# Method checkpoint  (complete results)
+# Method checkpoint
 # =============================================================================
 
 def save_method_checkpoint(method_name, hs_train, hs_val, hs_test,
-                           method_probes, method_best_layer, results: dict):
+                           method_probe_set, results: dict):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     sn = safe_name(method_name)
     _save_npy(hs_train, CHECKPOINT_DIR / f"{sn}_hs_train.npy")
     _save_npy(hs_val,   CHECKPOINT_DIR / f"{sn}_hs_val.npy")
     _save_npy(hs_test,  CHECKPOINT_DIR / f"{sn}_hs_test.npy")
     with open(CHECKPOINT_DIR / f"{sn}_probes.pkl", "wb") as f:
-        pickle.dump(method_probes, f)
-    payload = {"method_best_layer": method_best_layer, **results}
+        pickle.dump(method_probe_set, f)
     with open(CHECKPOINT_DIR / f"{sn}_results.json", "w") as f:
-        json.dump(payload, f)
+        json.dump(results, f)
     print(f"[checkpoint] {method_name} checkpoint saved.", flush=True)
 
 
@@ -229,20 +245,33 @@ def load_method_results(method_name) -> dict | None:
     if not path.exists():
         return None
     with open(path) as f:
-        return json.load(f)
+        r = json.load(f)
+    # Detect old format
+    if "base_probe_stats" in r and "all_base_probe_stats" not in r:
+        print(f"[checkpoint] Old format for {method_name} — will be recomputed.", flush=True)
+        return None
+    return r
 
 
 def load_method_checkpoint(method_name, load_hs: bool = True):
-    """
-    Returns (hs_train, hs_val, hs_test, method_probes, method_best_layer, results_dict)
-    or None if incomplete.  When load_hs=False the hs arrays are None.
-    """
     sn   = safe_name(method_name)
     path = CHECKPOINT_DIR / f"{sn}_results.json"
     if not path.exists():
         return None
-    if not (CHECKPOINT_DIR / f"{sn}_probes.pkl").exists():
+
+    r = load_method_results(method_name)
+    if r is None:
         return None
+
+    probe_path = CHECKPOINT_DIR / f"{sn}_probes.pkl"
+    if not probe_path.exists():
+        return None
+    with open(probe_path, "rb") as f:
+        method_probe_set = pickle.load(f)
+    if not isinstance(method_probe_set, dict) or "per_layer" not in method_probe_set:
+        print(f"[checkpoint] Old probe format for {method_name} — will retrain.", flush=True)
+        return None
+
     if load_hs:
         for fname in (f"{sn}_hs_train.npy", f"{sn}_hs_val.npy", f"{sn}_hs_test.npy"):
             if not (CHECKPOINT_DIR / fname).exists():
@@ -252,11 +281,7 @@ def load_method_checkpoint(method_name, load_hs: bool = True):
     hs_train = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_train.npy") if load_hs else None
     hs_val   = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_val.npy")   if load_hs else None
     hs_test  = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_test.npy")  if load_hs else None
-    with open(CHECKPOINT_DIR / f"{sn}_probes.pkl", "rb") as f:
-        method_probes = pickle.load(f)
-    with open(path) as f:
-        r = json.load(f)
-    return hs_train, hs_val, hs_test, method_probes, r["method_best_layer"], r
+    return hs_train, hs_val, hs_test, method_probe_set, r
 
 
 # =============================================================================
@@ -280,7 +305,6 @@ def load_datasets(rng):
     retain_pairs_raw = [(selected[i], selected[i + N_RETAIN_PASSAGES])
                         for i in range(N_RETAIN_PASSAGES)]
     print(f"Retain set: {N_RETAIN_PASSAGES} passage pairs")
-
     return train_q, val_q, test_q, retain_pairs_raw
 
 
@@ -325,12 +349,12 @@ def make_forget_pairs(questions, rng):
         choices = ex["choices"]
         cor_idx = ex["answer"]
         wrg_idx = rng.choice([i for i in range(len(choices)) if i != cor_idx])
-        cor_txt = choices[cor_idx]
-        wrg_txt = choices[wrg_idx]
-        pairs.append({"prompt": make_yn_prompt(stem, cor_txt), "expected": "Yes",
-                      "question": stem, "answer": cor_txt, "pair_type": "pos"})
-        pairs.append({"prompt": make_yn_prompt(stem, wrg_txt), "expected": "No",
-                      "question": stem, "answer": wrg_txt, "pair_type": "neg"})
+        pairs.append({"prompt": make_yn_prompt(stem, choices[cor_idx]),
+                      "expected": "Yes", "question": stem,
+                      "answer": choices[cor_idx], "pair_type": "pos"})
+        pairs.append({"prompt": make_yn_prompt(stem, choices[wrg_idx]),
+                      "expected": "No",  "question": stem,
+                      "answer": choices[wrg_idx], "pair_type": "neg"})
     rng.shuffle(pairs)
     return pairs
 
@@ -390,7 +414,6 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
     texts     = _apply_template(pairs, tokenizer)
     answers   = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
-
     for b in range(n_batches):
         batch_texts = texts[b * batch_size:(b + 1) * batch_size]
         enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
@@ -403,20 +426,18 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
             answers.append(tokenizer.decode(row[inp_len:], skip_special_tokens=True).strip())
         print(f"  [{desc}] generation batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
-
     return answers
 
 
 @torch.no_grad()
 def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
     """
-    Forward-pass only.  Returns float32 numpy array of shape
-    (n_pairs, n_layers+1, hidden_dim).  Last token position (left-padded).
+    Returns float32 numpy array of shape (n_pairs, n_layers+1, hidden_dim).
+    Last token position (left-padded input).
     """
     texts     = _apply_template(pairs, tokenizer)
     all_hs    = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
-
     for b in range(n_batches):
         batch_texts = texts[b * batch_size:(b + 1) * batch_size]
         enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
@@ -427,7 +448,6 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
         all_hs.append(hs.cpu().float().numpy())
         print(f"  [{desc}] hidden-state batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
-
     return np.concatenate(all_hs, axis=0)
 
 
@@ -436,10 +456,6 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
 # =============================================================================
 
 def get_yn_token_ids(tokenizer):
-    """
-    Find single-token IDs that represent 'Yes' or 'No' (various surface forms).
-    Returns (yes_ids, no_ids) as sorted lists.
-    """
     yes_ids, no_ids = set(), set()
     for s in ["Yes", "yes", " Yes", " yes", "YES"]:
         ids = tokenizer.encode(s, add_special_tokens=False)
@@ -455,37 +471,27 @@ def get_yn_token_ids(tokenizer):
 
 
 @torch.no_grad()
-def logit_yn_scores(model, tokenizer, pairs, batch_size,
-                    yes_ids, no_ids, desc=""):
-    """
-    For each prompt, run a forward pass and record
-      (max logit over Yes-tokens, max logit over No-tokens)
-    at the last input position (= what the model would generate next).
-    Returns a list of [yes_logit, no_logit] (JSON-serialisable floats).
-    """
+def logit_yn_scores(model, tokenizer, pairs, batch_size, yes_ids, no_ids, desc=""):
     texts     = _apply_template(pairs, tokenizer)
     results   = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
-
     for b in range(n_batches):
         batch_texts = texts[b * batch_size:(b + 1) * batch_size]
         enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
                         truncation=True, max_length=MAX_INPUT_LENGTH)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model(**enc)
-        last_logits = out.logits[:, -1, :].float()   # (batch, vocab)
+        last_logits = out.logits[:, -1, :].float()
         for row in last_logits:
             y = max(row[i].item() for i in yes_ids) if yes_ids else float("-inf")
             n = max(row[i].item() for i in no_ids)  if no_ids  else float("-inf")
             results.append([y, n])
         print(f"  [{desc}] logit batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
-
     return results
 
 
 def logit_stats(scores, pairs):
-    """Accuracy metrics derived from raw (yes_logit, no_logit) pairs."""
     total = correct = yes_total = yes_correct = no_total = no_correct = 0
     for (y, n), p in zip(scores, pairs):
         pred     = "Yes" if y > n else "No"
@@ -509,31 +515,122 @@ def logit_stats(scores, pairs):
 
 
 # =============================================================================
-# Linear probes
+# Probes — per-layer (LR / RF / AdaBoost) and multi-layer
 # =============================================================================
 
-def pairs_to_labels(pairs):
-    return np.array([1 if p["expected"] == "Yes" else 0 for p in pairs])
+def _make_per_layer_pipeline(clf_name: str) -> Pipeline:
+    """
+    Per-layer pipeline for a single hidden-state vector (shape: hidden_dim).
+
+    LR:       StandardScaler → LogisticRegression
+    RF:       StandardScaler → PCA(PCA_DIMS_PER_LAYER) → RandomForest
+    AdaBoost: StandardScaler → PCA(PCA_DIMS_PER_LAYER) → AdaBoost
+    """
+    if clf_name == "LR":
+        return Pipeline([
+            ("sc",  StandardScaler()),
+            ("clf", LogisticRegression(max_iter=1000, C=1.0, random_state=42)),
+        ])
+    elif clf_name == "RF":
+        return Pipeline([
+            ("sc",  StandardScaler()),
+            ("pca", PCA(n_components=PCA_DIMS_PER_LAYER, random_state=42)),
+            ("clf", RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)),
+        ])
+    elif clf_name == "AdaBoost":
+        return Pipeline([
+            ("sc",  StandardScaler()),
+            ("pca", PCA(n_components=PCA_DIMS_PER_LAYER, random_state=42)),
+            ("clf", AdaBoostClassifier(n_estimators=100, random_state=42)),
+        ])
+    raise ValueError(f"Unknown clf_name: {clf_name}")
 
 
-def train_probes(hs_train, y_train):
-    n_layers = hs_train.shape[1]
-    probes   = {}
+def _make_multi_layer_pipeline(clf_name: str) -> Pipeline:
+    """
+    Multi-layer pipeline for a flattened all-layers vector
+    (shape: n_layers * hidden_dim).
+
+    All types: StandardScaler → PCA(PCA_DIMS_MULTI) → Classifier
+    """
+    if clf_name == "LR":
+        clf = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
+    elif clf_name == "RF":
+        clf = RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)
+    elif clf_name == "AdaBoost":
+        clf = AdaBoostClassifier(n_estimators=100, random_state=42)
+    else:
+        raise ValueError(f"Unknown clf_name: {clf_name}")
+    return Pipeline([
+        ("sc",  StandardScaler()),
+        ("pca", PCA(n_components=PCA_DIMS_MULTI, random_state=42)),
+        ("clf", clf),
+    ])
+
+
+def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
+                    hs_val:   np.ndarray, y_val:   np.ndarray,
+                    label: str = "") -> dict:
+    """
+    Train all per-layer (LR, RF, AdaBoost) and multi-layer (LR, RF, AdaBoost)
+    probes.
+
+    Returns a ProbeSet dict:
+    {
+      "per_layer":   {"LR": {l: pipe, ...}, "RF": {...}, "AdaBoost": {...}},
+      "multi_layer": {"LR": pipe, "RF": pipe, "AdaBoost": pipe},
+      "best_layers": {"LR": int, "RF": int, "AdaBoost": int},
+    }
+    """
+    n_train, n_layers, hidden_dim = hs_train.shape
+    prefix = f"[{label}] " if label else ""
+
+    # ── Per-layer probes ────────────────────────────────────────────────────
+    per_layer = {clf_name: {} for clf_name in CLF_NAMES}
+
     for l in range(n_layers):
-        clf = Pipeline([("sc", StandardScaler()),
-                        ("lr", LogisticRegression(max_iter=1000, C=1.0))])
-        clf.fit(hs_train[:, l, :], y_train)
-        probes[l] = clf
-    print(f"  Trained {n_layers} probes (one per layer).", flush=True)
-    return probes
+        X_tr  = hs_train[:, l, :]
+        X_val = hs_val[:,   l, :]
+        for clf_name in CLF_NAMES:
+            pipe = _make_per_layer_pipeline(clf_name)
+            pipe.fit(X_tr, y_train)
+            per_layer[clf_name][l] = pipe
+        print(f"  {prefix}Per-layer probes: layer {l+1}/{n_layers}", end="\r", flush=True)
+    print(f"  {prefix}Per-layer probes: {n_layers} layers × {len(CLF_NAMES)} classifiers done.",
+          flush=True)
+
+    # ── Best layer per classifier (validation set) ──────────────────────────
+    best_layers = {}
+    for clf_name in CLF_NAMES:
+        val_accs = {l: per_layer[clf_name][l].score(hs_val[:, l, :], y_val)
+                    for l in range(n_layers)}
+        best_l   = max(val_accs, key=val_accs.get)
+        best_layers[clf_name] = best_l
+        print(f"  {prefix}{clf_name} best layer: {best_l:2d}  "
+              f"val acc: {val_accs[best_l]:.3f}", flush=True)
+
+    # ── Multi-layer probes ──────────────────────────────────────────────────
+    X_flat_tr  = hs_train.reshape(n_train, -1)
+    X_flat_val = hs_val.reshape(len(hs_val), -1)
+
+    multi_layer = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_multi_layer_pipeline(clf_name)
+        pipe.fit(X_flat_tr, y_train)
+        val_acc = pipe.score(X_flat_val, y_val)
+        multi_layer[clf_name] = pipe
+        print(f"  {prefix}Multi-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
+
+    return {
+        "per_layer":   per_layer,
+        "multi_layer": multi_layer,
+        "best_layers": best_layers,
+    }
 
 
-def eval_probes(probes, hs, y):
-    return {l: float(clf.score(hs[:, l, :], y)) for l, clf in probes.items()}
-
-
-def probe_stats(probe, hs, layer_idx, labels):
-    preds    = probe.predict(hs[:, layer_idx, :])
+def _pipe_stats(pipe: Pipeline, X: np.ndarray, labels: np.ndarray) -> dict:
+    """Accuracy / yes-accuracy / no-accuracy for one fitted pipeline."""
+    preds    = pipe.predict(X)
     yes_mask = labels == 1
     no_mask  = labels == 0
     return {
@@ -543,8 +640,50 @@ def probe_stats(probe, hs, layer_idx, labels):
     }
 
 
+def compute_all_probe_stats(probe_set: dict,
+                            hs_test:   np.ndarray,
+                            y_test:    np.ndarray) -> dict:
+    """
+    Evaluate all probes in probe_set on hs_test / y_test.
+
+    Returns:
+    {
+      "per_layer": {
+        "LR":       {"accuracy": f, "yes_accuracy": f, "no_accuracy": f, "best_layer": i},
+        "RF":       {...},
+        "AdaBoost": {...},
+      },
+      "multi_layer": {
+        "LR":       {"accuracy": f, "yes_accuracy": f, "no_accuracy": f},
+        "RF":       {...},
+        "AdaBoost": {...},
+      }
+    }
+    """
+    n_test = len(hs_test)
+    result = {"per_layer": {}, "multi_layer": {}}
+
+    best_layers = probe_set["best_layers"]
+    for clf_name in CLF_NAMES:
+        l    = best_layers[clf_name]
+        pipe = probe_set["per_layer"][clf_name][l]
+        s    = _pipe_stats(pipe, hs_test[:, l, :], y_test)
+        result["per_layer"][clf_name] = {**s, "best_layer": l}
+
+    X_flat = hs_test.reshape(n_test, -1)
+    for clf_name in CLF_NAMES:
+        pipe = probe_set["multi_layer"][clf_name]
+        result["multi_layer"][clf_name] = _pipe_stats(pipe, X_flat, y_test)
+
+    return result
+
+
+def pairs_to_labels(pairs):
+    return np.array([1 if p["expected"] == "Yes" else 0 for p in pairs])
+
+
 # =============================================================================
-# Output helpers
+# Generation stats
 # =============================================================================
 
 def extract_yn(answer):
@@ -578,19 +717,16 @@ def generation_stats(answers, pairs):
     }
 
 
+# =============================================================================
+# Pretty-print helpers
+# =============================================================================
+
 def print_gen_stats(label, stats):
     print(f"  [{label}]")
     print(f"    Overall accuracy : {stats['accuracy']:.3f}")
-    print(f"    Yes accuracy     : {stats['yes_accuracy']:.3f}  (correct-answer prompts)")
-    print(f"    No accuracy      : {stats['no_accuracy']:.3f}  (wrong-answer prompts)")
-    print(f"    Gibberish rate   : {stats['gibberish_rate']:.3f}")
-
-
-def print_probe_stats(label, stats):
-    print(f"  [{label}]")
-    print(f"    Probe accuracy   : {stats['accuracy']:.3f}")
     print(f"    Yes accuracy     : {stats['yes_accuracy']:.3f}")
     print(f"    No accuracy      : {stats['no_accuracy']:.3f}")
+    print(f"    Gibberish rate   : {stats['gibberish_rate']:.3f}")
 
 
 def print_logit_stats(label, stats):
@@ -603,6 +739,24 @@ def print_logit_stats(label, stats):
     print(f"    No  logit acc    : {stats.get('no_accuracy', 0):.3f}")
 
 
+def print_probe_stats_all(label, all_ps):
+    """Print per-layer and multi-layer probe stats for all classifier types."""
+    print(f"  [{label}] Per-layer probes (at each clf's best layer):")
+    for clf_name in CLF_NAMES:
+        s = all_ps["per_layer"].get(clf_name, {})
+        print(f"    {clf_name:<8} layer {s.get('best_layer','?'):>2}  "
+              f"acc {s.get('accuracy',0):.3f}  "
+              f"yes {s.get('yes_accuracy',0):.3f}  "
+              f"no {s.get('no_accuracy',0):.3f}")
+    print(f"  [{label}] Multi-layer probes:")
+    for clf_name in CLF_NAMES:
+        s = all_ps["multi_layer"].get(clf_name, {})
+        print(f"    {clf_name:<8}"
+              f"acc {s.get('accuracy',0):.3f}  "
+              f"yes {s.get('yes_accuracy',0):.3f}  "
+              f"no {s.get('no_accuracy',0):.3f}")
+
+
 def print_yn_result(label, pos_answer, neg_answer):
     pos_yn = extract_yn(pos_answer)
     neg_yn = extract_yn(neg_answer)
@@ -611,62 +765,103 @@ def print_yn_result(label, pos_answer, neg_answer):
     print(f"    Wrong answer   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
 
 
-def print_summary_table(base_gen, base_probe, base_logit, all_results):
-    W = 115
+def _prow(d, key, default=0.0):
+    return d.get(key, default) if d else default
+
+
+def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results):
+    W   = 120
     sep = "=" * W
 
-    # ── Table 1: Generation + Base Probe + Logit (forget set, test) ─────────
+    # ── Table 1: Generation + Logit ─────────────────────────────────────────
     print(f"\n{sep}")
-    print("SUMMARY — FORGET SET (test) — Generation / Base-model Probe / Logit")
+    print("TABLE 1 — FORGET SET (test): Generation accuracy + Logit-based metric")
     print(sep)
-    print(f"{'Method':<12} {'GenAcc':>7} {'GYes':>6} {'GNo':>6} {'Gib':>5}"
-          f"  {'BaseProbe':>9} {'BPYes':>7} {'BPNo':>6}"
-          f"  {'LogitAcc':>8} {'LYes':>7} {'LNo':>6}")
+    print(f"{'Method':<12} {'GenAcc':>7} {'GYes':>6} {'GNo':>5} {'Gib':>5}"
+          f"  {'LogitAcc':>9} {'LYes':>7} {'LNo':>6}")
     print("-" * W)
-
-    def _row(name, g, bp, lo):
+    def _row1(name, g, lo):
         lo = lo or {}
         print(f"{name:<12} {g['accuracy']:7.3f} {g['yes_accuracy']:6.3f}"
-              f" {g['no_accuracy']:6.3f} {g['gibberish_rate']:5.3f}"
-              f"  {bp['accuracy']:9.3f} {bp['yes_accuracy']:7.3f} {bp['no_accuracy']:6.3f}"
-              f"  {lo.get('accuracy',0):8.3f} {lo.get('yes_accuracy',0):7.3f}"
-              f" {lo.get('no_accuracy',0):6.3f}")
-
-    _row("Base", base_gen, base_probe, base_logit)
+              f" {g['no_accuracy']:5.3f} {g['gibberish_rate']:5.3f}"
+              f"  {_prow(lo,'accuracy'):9.3f} {_prow(lo,'yes_accuracy'):7.3f}"
+              f" {_prow(lo,'no_accuracy'):6.3f}")
+    _row1("Base", base_gen, base_logit)
     print("-" * W)
     for method, r in all_results.items():
-        _row(method, r["gen"], r["base_probe"], r.get("logit"))
+        _row1(method, r["gen"], r.get("logit"))
     print(sep)
 
-    # ── Table 2: Method-specific probes (forget set) ─────────────────────────
+    # ── Table 2: BASE probes on each model's test hs ─────────────────────────
     print(f"\n{sep}")
-    print("SUMMARY — FORGET SET (test) — Method-Specific Probes")
-    print("         (probes trained on the UNLEARNED model's own hidden states)")
+    print("TABLE 2 — FORGET SET (test): BASE-model probes applied to test hidden states")
+    print("          Per-layer probes use each classifier's own best layer.")
     print(sep)
-    print(f"{'Method':<12} {'BestLyr':>7} {'MProbe':>8} {'MPYes':>7} {'MPNo':>6}")
-    print("-" * 50)
+    hdr = (f"{'Method':<12}"
+           + "".join(f"  {clf+' Acc':>10} {clf+' Yes':>9} {clf+' No':>8} {'Lyr':>4}"
+                     for clf in CLF_NAMES)
+           + "".join(f"  {clf+' ML':>8} {'Yes':>7} {'No':>6}"
+                     for clf in CLF_NAMES))
+    print(f"{'Method':<12}"
+          + "  PL-LR  Acc  Yes   No Lyr"
+          + "  PL-RF  Acc  Yes   No Lyr"
+          + "  PL-Ada Acc  Yes   No Lyr"
+          + "  ML-LR  Yes   No"
+          + "  ML-RF  Yes   No"
+          + "  ML-Ada Yes   No")
+    print("-" * W)
+
+    def _row2(name, aps):
+        pl = aps.get("per_layer", {}) if aps else {}
+        ml = aps.get("multi_layer", {}) if aps else {}
+        row = f"{name:<12}"
+        for clf in CLF_NAMES:
+            s = pl.get(clf, {})
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'yes_accuracy'):5.3f}"
+                    f" {_prow(s,'no_accuracy'):5.3f} {s.get('best_layer','?'):>3}")
+        for clf in CLF_NAMES:
+            s = ml.get(clf, {})
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'yes_accuracy'):5.3f}"
+                    f" {_prow(s,'no_accuracy'):5.3f}")
+        print(row)
+
+    _row2("Base", base_all_probe_stats)
+    print("-" * W)
     for method, r in all_results.items():
-        mp = r.get("method_probe", {})
-        print(f"{method:<12} {r.get('method_best_layer', '?'):>7}"
-              f" {mp.get('accuracy', 0):8.3f}"
-              f" {mp.get('yes_accuracy', 0):7.3f}"
-              f" {mp.get('no_accuracy', 0):6.3f}")
+        _row2(method, r.get("all_base_probe_stats"))
     print(sep)
 
-    # ── Table 3: Retain set ───────────────────────────────────────────────────
+    # ── Table 3: METHOD-SPECIFIC probes ──────────────────────────────────────
     print(f"\n{sep}")
-    print("SUMMARY — RETAIN SET — Generation / Logit  (should stay near 1.0)")
+    print("TABLE 3 — FORGET SET (test): METHOD-SPECIFIC probes")
+    print("          Probes trained on the unlearned model's own train hidden states.")
     print(sep)
-    print(f"{'Method':<12} {'RetainAcc':>9} {'RYes':>6} {'RNo':>5}"
+    print(f"{'Method':<12}"
+          + "  PL-LR  Acc  Yes   No Lyr"
+          + "  PL-RF  Acc  Yes   No Lyr"
+          + "  PL-Ada Acc  Yes   No Lyr"
+          + "  ML-LR  Yes   No"
+          + "  ML-RF  Yes   No"
+          + "  ML-Ada Yes   No")
+    print("-" * W)
+    for method, r in all_results.items():
+        _row2(method, r.get("all_method_probe_stats"))
+    print(sep)
+
+    # ── Table 4: Retain set ───────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("TABLE 4 — RETAIN SET: Generation + Logit  (should stay near 1.0)")
+    print(sep)
+    print(f"{'Method':<12} {'RetAcc':>7} {'RYes':>6} {'RNo':>5}"
           f"  {'RLogit':>7} {'RLYes':>7} {'RLNo':>6}")
     print("-" * 60)
     for method, r in all_results.items():
         rt = r["retain"]
         rl = r.get("retain_logit", {})
-        print(f"{method:<12} {rt['accuracy']:9.3f} {rt['yes_accuracy']:6.3f}"
+        print(f"{method:<12} {rt['accuracy']:7.3f} {rt['yes_accuracy']:6.3f}"
               f" {rt['no_accuracy']:5.3f}"
-              f"  {rl.get('accuracy',0):7.3f} {rl.get('yes_accuracy',0):7.3f}"
-              f" {rl.get('no_accuracy',0):6.3f}")
+              f"  {_prow(rl,'accuracy'):7.3f} {_prow(rl,'yes_accuracy'):7.3f}"
+              f" {_prow(rl,'no_accuracy'):6.3f}")
     print(sep)
 
 
@@ -682,11 +877,10 @@ def run_base():
     print("STAGE: base model")
     print("=" * 60)
 
-    # ── 1. Datasets ───────────────────────────────────────────────────────────
     print("Loading datasets...")
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
 
-    # ── Print one raw example + yes/no prompt for both sets ──────────────────
+    # ── Print one raw example + yes/no prompts ────────────────────────────────
     def _print_prompt(messages):
         for msg in messages:
             print(f"    [{msg['role'].upper()}] {msg['content']}")
@@ -698,8 +892,7 @@ def run_base():
     print("  -- RAW --")
     print(f"  Question : {ex0['question']}")
     for i, ch in enumerate(ex0["choices"]):
-        marker = " <-- correct" if i == ex0["answer"] else ""
-        print(f"  [{i}] {ch}{marker}")
+        print(f"  [{i}] {ch}{' <-- correct' if i == ex0['answer'] else ''}")
     cor_txt0 = ex0["choices"][ex0["answer"]]
     wrg_txt0 = ex0["choices"][
         [i for i in range(len(ex0["choices"])) if i != ex0["answer"]][0]]
@@ -740,27 +933,33 @@ def run_base():
     y_val   = pairs_to_labels(val_pairs)
     y_test  = pairs_to_labels(test_pairs)
 
-    # ── 2. Check for complete checkpoint ─────────────────────────────────────
+    # ── Check for complete checkpoint ─────────────────────────────────────────
     if (CHECKPOINT_DIR / "base_results.json").exists():
-        print("[base] Complete checkpoint found. Nothing to recompute.")
-        return
+        ck = load_base_checkpoint(load_hs=False)
+        if ck is not None and ck["probe_set"] is not None and ck["all_probe_stats"] is not None:
+            print("[base] Complete checkpoint found. Nothing to recompute.")
+            return
 
-    # ── 3. Load cached partial state (for resumed preempted jobs) ────────────
+    # ── Load partial state ────────────────────────────────────────────────────
     partial = _load_partial("base")
 
-    # ── 4. Hidden states (save immediately after each extraction) ────────────
+    # ── Hidden states ─────────────────────────────────────────────────────────
     hs_train = _load_npy(CHECKPOINT_DIR / "base_hs_train.npy")
     hs_val   = _load_npy(CHECKPOINT_DIR / "base_hs_val.npy")
     hs_test  = _load_npy(CHECKPOINT_DIR / "base_hs_test.npy")
-    probes, best_layer = None, None
-    if (CHECKPOINT_DIR / "base_probes.pkl").exists():
-        with open(CHECKPOINT_DIR / "base_probes.pkl", "rb") as f:
-            probes = pickle.load(f)
-        best_layer = partial.get("best_layer")
 
-    need_hs   = hs_train is None or hs_val is None or hs_test is None
-    need_gen  = "test_answers" not in partial or "retain_answers" not in partial
-    need_log  = "logit_scores" not in partial or "retain_logit_scores" not in partial
+    # ── Probes ────────────────────────────────────────────────────────────────
+    probe_set = None
+    probe_path = CHECKPOINT_DIR / "base_probes.pkl"
+    if probe_path.exists():
+        with open(probe_path, "rb") as f:
+            ps = pickle.load(f)
+        if isinstance(ps, dict) and "per_layer" in ps:
+            probe_set = ps
+
+    need_hs    = hs_train is None or hs_val is None or hs_test is None
+    need_gen   = "test_answers" not in partial or "retain_answers" not in partial
+    need_log   = "logit_scores" not in partial or "retain_logit_scores" not in partial
     need_model = need_hs or need_gen or need_log
 
     if need_model:
@@ -785,18 +984,16 @@ def run_base():
                 _save_npy(hs_test, CHECKPOINT_DIR / "base_hs_test.npy")
 
         if need_gen:
-            print("\n" + "=" * 60)
             if "test_answers" not in partial:
-                print("Running generation — BASE — test forget set")
+                print("\nRunning generation — BASE — test forget set")
                 test_answers = batch_generate(base_model, base_tok, test_pairs,
                                               GENERATION_BATCH_SIZE, "base/test")
                 _save_partial("base", {"test_answers": test_answers})
             else:
                 test_answers = partial["test_answers"]
                 print("[base] test_answers loaded from partial cache.")
-
             if "retain_answers" not in partial:
-                print("Running generation — BASE — retain set")
+                print("\nRunning generation — BASE — retain set")
                 retain_answers = batch_generate(base_model, base_tok, retain_pairs,
                                                 GENERATION_BATCH_SIZE, "base/retain")
                 _save_partial("base", {"retain_answers": retain_answers})
@@ -810,18 +1007,15 @@ def run_base():
         if need_log:
             yes_ids, no_ids = get_yn_token_ids(base_tok)
             if "logit_scores" not in partial:
-                print("\n" + "=" * 60)
-                print("Computing logit scores — BASE — test forget set")
+                print("\nComputing logit scores — BASE — test forget set")
                 logit_scores = logit_yn_scores(base_model, base_tok, test_pairs,
                                                LOGIT_BATCH_SIZE, yes_ids, no_ids,
                                                "base/test-logit")
                 _save_partial("base", {"logit_scores": logit_scores})
             else:
                 logit_scores = partial["logit_scores"]
-
             if "retain_logit_scores" not in partial:
-                print("\n" + "=" * 60)
-                print("Computing logit scores — BASE — retain set")
+                print("\nComputing logit scores — BASE — retain set")
                 retain_logit_scores = logit_yn_scores(base_model, base_tok, retain_pairs,
                                                        LOGIT_BATCH_SIZE, yes_ids, no_ids,
                                                        "base/retain-logit")
@@ -841,46 +1035,36 @@ def run_base():
         logit_scores        = partial["logit_scores"]
         retain_logit_scores = partial["retain_logit_scores"]
 
-    # ── 5. Probes ─────────────────────────────────────────────────────────────
-    if probes is None:
+    # ── Train probes ──────────────────────────────────────────────────────────
+    if probe_set is None:
         print("\n" + "=" * 60)
-        print("Training linear probes (one per layer)...")
-        probes   = train_probes(hs_train, y_train)
-        val_accs = eval_probes(probes, hs_val, y_val)
-        best_layer = max(val_accs, key=val_accs.get)
-        print(f"\nValidation accuracies per layer (top 5):")
-        for l, acc in sorted(val_accs.items(), key=lambda x: -x[1])[:5]:
-            marker = " <- BEST" if l == best_layer else ""
-            print(f"  Layer {l:2d}: {acc:.3f}{marker}")
-        print(f"\nBest layer: {best_layer}  (val accuracy: {val_accs[best_layer]:.3f})")
+        print("Training probe set — BASE model")
+        print("  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print("  Multi-layer: LR / RF / AdaBoost  on flattened all-layer vector (PCA-256)")
+        print("=" * 60)
+        probe_set = train_probe_set(hs_train, y_train, hs_val, y_val, label="base")
         CHECKPOINT_DIR.mkdir(exist_ok=True)
         with open(CHECKPOINT_DIR / "base_probes.pkl", "wb") as f:
-            pickle.dump(probes, f)
-        _save_partial("base", {"best_layer": best_layer})
-    else:
-        if best_layer is None:
-            val_accs   = eval_probes(probes, hs_val, y_val)
-            best_layer = max(val_accs, key=val_accs.get)
-        print(f"[base] Probes loaded from cache. best_layer={best_layer}")
+            pickle.dump(probe_set, f)
+        print("[base] Probes saved.")
 
-    # ── 6. Compute stats ──────────────────────────────────────────────────────
+    # ── Compute stats ─────────────────────────────────────────────────────────
     gen_stats_v          = generation_stats(test_answers, test_pairs)
-    probe_stats_v        = probe_stats(probes[best_layer], hs_test, best_layer, y_test)
+    all_probe_stats_v    = compute_all_probe_stats(probe_set, hs_test, y_test)
     logit_stats_v        = logit_stats(logit_scores, test_pairs)
     retain_logit_stats_v = logit_stats(retain_logit_scores, retain_pairs)
 
     print("\n  BASE — GENERATION STATS (test forget set):")
     print_gen_stats("Base", gen_stats_v)
-    print("\n  BASE — PROBE STATS (best layer):")
-    print_probe_stats("Base", probe_stats_v)
-    print("\n  BASE — LOGIT STATS (test forget set):")
+    print("\n  BASE — PROBE STATS:")
+    print_probe_stats_all("Base", all_probe_stats_v)
+    print("\n  BASE — LOGIT STATS:")
     print_logit_stats("Base", logit_stats_v)
 
-    save_base_checkpoint(hs_train, hs_val, hs_test, probes, best_layer,
+    save_base_checkpoint(hs_train, hs_val, hs_test, probe_set,
                          test_answers, retain_answers,
-                         gen_stats_v, probe_stats_v,
-                         logit_stats_v, logit_scores,
-                         retain_logit_stats_v)
+                         gen_stats_v, all_probe_stats_v,
+                         logit_stats_v, logit_scores, retain_logit_stats_v)
     print("\n[base] Done.")
 
 
@@ -896,15 +1080,15 @@ def run_method(method_name: str):
     sn       = safe_name(method_name)
 
     # ── Require base checkpoint ───────────────────────────────────────────────
-    base = load_base_checkpoint(load_hs=True)
-    if base is None:
-        raise RuntimeError("Base checkpoint not found. Run --stage base first.")
-    base_probes  = base["probes"]
-    best_layer   = base["best_layer"]
-    base_gen     = base["gen_stats"]
-    base_probe_s = base["probe_stats"]
-    base_logit_s = base["logit_stats"]
-    base_retain  = base["retain_answers"]
+    base = load_base_checkpoint(load_hs=False)
+    if base is None or base["probe_set"] is None:
+        raise RuntimeError("Base checkpoint (with new probe format) not found. "
+                           "Run --stage base first.")
+    base_probe_set   = base["probe_set"]
+    base_gen         = base["gen_stats"]
+    base_all_probe_s = base["all_probe_stats"]
+    base_logit_s     = base["logit_stats"]
+    base_retain      = base["retain_answers"]
 
     # ── Datasets (deterministic) ──────────────────────────────────────────────
     rng = random.Random(RANDOM_SEED)
@@ -922,27 +1106,30 @@ def run_method(method_name: str):
     y_test  = pairs_to_labels(test_pairs)
 
     # ── Complete checkpoint? ──────────────────────────────────────────────────
-    if (CHECKPOINT_DIR / f"{sn}_results.json").exists():
+    if load_method_checkpoint(method_name, load_hs=False) is not None:
         print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
         return
 
     # ── Partial state ─────────────────────────────────────────────────────────
     partial = _load_partial(sn)
 
-    # ── Determine what's missing ──────────────────────────────────────────────
+    # ── Existing numpy arrays ─────────────────────────────────────────────────
     hs_train_un = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_train.npy")
     hs_val_un   = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_val.npy")
     hs_test_un  = _load_npy(CHECKPOINT_DIR / f"{sn}_hs_test.npy")
 
-    method_probes, method_best_layer = None, None
-    if (CHECKPOINT_DIR / f"{sn}_probes.pkl").exists():
-        with open(CHECKPOINT_DIR / f"{sn}_probes.pkl", "rb") as f:
-            method_probes = pickle.load(f)
-        method_best_layer = partial.get("method_best_layer")
+    # ── Method probes ─────────────────────────────────────────────────────────
+    method_probe_set = None
+    method_probe_path = CHECKPOINT_DIR / f"{sn}_probes.pkl"
+    if method_probe_path.exists():
+        with open(method_probe_path, "rb") as f:
+            ps = pickle.load(f)
+        if isinstance(ps, dict) and "per_layer" in ps:
+            method_probe_set = ps
 
-    need_hs   = hs_train_un is None or hs_val_un is None or hs_test_un is None
-    need_gen  = "test_answers" not in partial or "retain_answers" not in partial
-    need_log  = "logit_scores" not in partial or "retain_logit_scores" not in partial
+    need_hs    = hs_train_un is None or hs_val_un is None or hs_test_un is None
+    need_gen   = "test_answers" not in partial or "retain_answers" not in partial
+    need_log   = "logit_scores" not in partial or "retain_logit_scores" not in partial
     need_model = need_hs or need_gen or need_log
 
     if need_model:
@@ -971,13 +1158,11 @@ def run_method(method_name: str):
             if "test_answers" not in partial:
                 print(f"\nGenerating answers — {method_name} — test forget set")
                 test_answers = batch_generate(un_model, un_tok, test_pairs,
-                                              GENERATION_BATCH_SIZE,
-                                              f"{method_name}/test")
+                                              GENERATION_BATCH_SIZE, f"{method_name}/test")
                 _save_partial(sn, {"test_answers": test_answers})
             else:
                 test_answers = partial["test_answers"]
                 print(f"[{method_name}] test_answers loaded from partial cache.")
-
             if "retain_answers" not in partial:
                 print(f"\nGenerating answers — {method_name} — retain set")
                 retain_answers = batch_generate(un_model, un_tok, retain_pairs,
@@ -1001,7 +1186,6 @@ def run_method(method_name: str):
                 _save_partial(sn, {"logit_scores": logit_scores})
             else:
                 logit_scores = partial["logit_scores"]
-
             if "retain_logit_scores" not in partial:
                 print(f"\nComputing logit scores — {method_name} — retain set")
                 retain_logit_scores = logit_yn_scores(un_model, un_tok, retain_pairs,
@@ -1023,45 +1207,39 @@ def run_method(method_name: str):
         logit_scores        = partial["logit_scores"]
         retain_logit_scores = partial["retain_logit_scores"]
 
-    # ── Method-specific probes ────────────────────────────────────────────────
-    if method_probes is None:
-        print(f"\nTraining method-specific probes — {method_name}...")
-        method_probes    = train_probes(hs_train_un, y_train)
-        method_val_accs  = eval_probes(method_probes, hs_val_un, y_val)
-        method_best_layer = max(method_val_accs, key=method_val_accs.get)
-        print(f"  Method probe best layer : {method_best_layer}"
-              f"  (val acc: {method_val_accs[method_best_layer]:.3f})")
-        print(f"  Base probe best layer   : {best_layer}")
+    # ── Train method-specific probes ──────────────────────────────────────────
+    if method_probe_set is None:
+        print(f"\n" + "=" * 60)
+        print(f"Training method-specific probe set — {method_name}")
+        print(f"  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print(f"  Multi-layer: LR / RF / AdaBoost  (PCA-256)")
+        print("=" * 60)
+        method_probe_set = train_probe_set(hs_train_un, y_train,
+                                           hs_val_un,   y_val,
+                                           label=method_name)
         CHECKPOINT_DIR.mkdir(exist_ok=True)
         with open(CHECKPOINT_DIR / f"{sn}_probes.pkl", "wb") as f:
-            pickle.dump(method_probes, f)
-        _save_partial(sn, {"method_best_layer": method_best_layer})
-    else:
-        if method_best_layer is None:
-            method_val_accs   = eval_probes(method_probes, hs_val_un, y_val)
-            method_best_layer = max(method_val_accs, key=method_val_accs.get)
-        print(f"[{method_name}] Method probes loaded. best_layer={method_best_layer}")
+            pickle.dump(method_probe_set, f)
+        print(f"[{method_name}] Method probes saved.")
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
-    un_gen_stats          = generation_stats(test_answers, test_pairs)
-    un_base_probe_stats   = probe_stats(base_probes[best_layer],
-                                        hs_test_un, best_layer, y_test)
-    un_method_probe_stats = probe_stats(method_probes[method_best_layer],
-                                        hs_test_un, method_best_layer, y_test)
-    un_logit_stats        = logit_stats(logit_scores, test_pairs)
-    un_retain_stats       = generation_stats(retain_answers, retain_pairs)
-    un_retain_logit_stats = logit_stats(retain_logit_scores, retain_pairs)
+    # ── Compute stats ─────────────────────────────────────────────────────────
+    un_gen_stats              = generation_stats(test_answers, test_pairs)
+    all_base_probe_stats_v    = compute_all_probe_stats(base_probe_set, hs_test_un, y_test)
+    all_method_probe_stats_v  = compute_all_probe_stats(method_probe_set, hs_test_un, y_test)
+    un_logit_stats            = logit_stats(logit_scores, test_pairs)
+    un_retain_stats           = generation_stats(retain_answers, retain_pairs)
+    un_retain_logit_stats     = logit_stats(retain_logit_scores, retain_pairs)
 
     print(f"\n  FORGET SET — GENERATION STATS ({method_name}):")
     print_gen_stats("Base     ", base_gen)
     print_gen_stats(method_name, un_gen_stats)
 
-    print(f"\n  FORGET SET — BASE PROBE STATS (layer {best_layer}):")
-    print_probe_stats("Base     ", base_probe_s)
-    print_probe_stats(method_name, un_base_probe_stats)
+    print(f"\n  FORGET SET — BASE PROBE STATS ({method_name}):")
+    print_probe_stats_all("Base     ", base_all_probe_s)
+    print_probe_stats_all(method_name, all_base_probe_stats_v)
 
-    print(f"\n  FORGET SET — METHOD PROBE STATS (layer {method_best_layer}):")
-    print_probe_stats(method_name, un_method_probe_stats)
+    print(f"\n  FORGET SET — METHOD PROBE STATS ({method_name}):")
+    print_probe_stats_all(method_name, all_method_probe_stats_v)
 
     print(f"\n  FORGET SET — LOGIT STATS ({method_name}):")
     print_logit_stats("Base     ", base_logit_s)
@@ -1072,17 +1250,17 @@ def run_method(method_name: str):
     print_gen_stats(method_name, un_retain_stats)
 
     results = {
-        "gen":            un_gen_stats,
-        "base_probe":     un_base_probe_stats,
-        "method_probe":   un_method_probe_stats,
-        "logit":          un_logit_stats,
-        "retain":         un_retain_stats,
-        "retain_logit":   un_retain_logit_stats,
-        "test_answers":   test_answers,
-        "retain_answers": retain_answers,
+        "gen":                   un_gen_stats,
+        "all_base_probe_stats":  all_base_probe_stats_v,
+        "all_method_probe_stats":all_method_probe_stats_v,
+        "logit":                 un_logit_stats,
+        "retain":                un_retain_stats,
+        "retain_logit":          un_retain_logit_stats,
+        "test_answers":          test_answers,
+        "retain_answers":        retain_answers,
     }
     save_method_checkpoint(method_name, hs_train_un, hs_val_un, hs_test_un,
-                           method_probes, method_best_layer, results)
+                           method_probe_set, results)
     print(f"\n[{method_name}] Done.")
 
 
@@ -1101,13 +1279,11 @@ def run_summary():
     base = load_base_checkpoint(load_hs=False)
     if base is None:
         raise RuntimeError("Base checkpoint not found.")
-
-    base_gen     = base["gen_stats"]
-    base_probe_s = base["probe_stats"]
-    base_logit_s = base["logit_stats"]
-    base_retain  = base["retain_answers"]
-    best_layer   = base["best_layer"]
-    base_test    = base["test_answers"]
+    base_gen         = base["gen_stats"]
+    base_all_probe_s = base["all_probe_stats"]
+    base_logit_s     = base["logit_stats"]
+    base_retain      = base["retain_answers"]
+    base_test        = base["test_answers"]
 
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
     train_pairs  = make_forget_pairs(train_q,  rng)
@@ -1119,7 +1295,8 @@ def run_summary():
     for method_name in UNLEARNED_MODELS:
         r = load_method_results(method_name)
         if r is None:
-            print(f"  WARNING: {method_name} checkpoint not found — skipping.", flush=True)
+            print(f"  WARNING: {method_name} checkpoint not found or outdated — skipping.",
+                  flush=True)
             continue
         all_results[method_name] = r
 
@@ -1139,19 +1316,18 @@ def run_summary():
             print_yn_result(method_name, un_ans_map.get((q, "pos"), ""),
                                          un_ans_map.get((q, "neg"), ""))
 
-        print(f"\n  FORGET SET — GENERATION STATS ({method_name}):")
+        print(f"\n  FORGET SET — GENERATION ({method_name}):")
         print_gen_stats("Base     ", base_gen)
         print_gen_stats(method_name, r["gen"])
 
-        print(f"\n  FORGET SET — BASE PROBE STATS ({method_name}, layer {best_layer}):")
-        print_probe_stats("Base     ", base_probe_s)
-        print_probe_stats(method_name, r["base_probe"])
+        print(f"\n  FORGET SET — BASE PROBES ({method_name}):")
+        print_probe_stats_all("Base     ", base_all_probe_s)
+        print_probe_stats_all(method_name, r.get("all_base_probe_stats", {}))
 
-        print(f"\n  FORGET SET — METHOD PROBE STATS "
-              f"({method_name}, layer {r.get('method_best_layer','?')}):")
-        print_probe_stats(method_name, r.get("method_probe", {}))
+        print(f"\n  FORGET SET — METHOD PROBES ({method_name}):")
+        print_probe_stats_all(method_name, r.get("all_method_probe_stats", {}))
 
-        print(f"\n  FORGET SET — LOGIT STATS ({method_name}):")
+        print(f"\n  FORGET SET — LOGIT ({method_name}):")
         print_logit_stats("Base     ", base_logit_s)
         print_logit_stats(method_name, r.get("logit"))
 
@@ -1159,7 +1335,7 @@ def run_summary():
         print_gen_stats("Base     ", generation_stats(base_retain, retain_pairs))
         print_gen_stats(method_name, r["retain"])
 
-    # ── Retain set: base model passage display ────────────────────────────────
+    # ── Retain passages (base model) ──────────────────────────────────────────
     print("\n" + "=" * 60)
     print(f"RETAIN SET — {N_RETAIN_PASSAGES} diverse passages (base model answers)")
     print("=" * 60)
@@ -1175,7 +1351,7 @@ def run_summary():
         print(f"  Wrong continuation: {p_neg['continuation'][:80]}")
         print_yn_result("Base", ret_base_map[(j, "pos")], ret_base_map[(j, "neg")])
 
-    print_summary_table(base_gen, base_probe_s, base_logit_s, all_results)
+    print_summary_table(base_gen, base_all_probe_s, base_logit_s, all_results)
 
 
 # =============================================================================
@@ -1188,18 +1364,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument(
-        "--stage",
-        choices=["base", "method", "summary"],
-        required=True,
-        help="Pipeline stage to run",
-    )
-    parser.add_argument(
-        "--method",
-        default=None,
-        help="Unlearning method name for --stage method "
-             f"(one of: {', '.join(UNLEARNED_MODELS)})",
-    )
+    parser.add_argument("--stage", choices=["base", "method", "summary"],
+                        required=True, help="Pipeline stage to run")
+    parser.add_argument("--method", default=None,
+                        help="Unlearning method name for --stage method "
+                             f"(one of: {', '.join(UNLEARNED_MODELS)})")
     args = parser.parse_args()
 
     if args.stage == "base":
