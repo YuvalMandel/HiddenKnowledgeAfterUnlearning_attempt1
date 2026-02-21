@@ -400,10 +400,10 @@ def unload_model(model):
     torch.cuda.empty_cache()
 
 
-def _apply_template(pairs, tokenizer):
+def _apply_template(pairs, tokenizer, add_generation_prompt: bool):
     return [
         tokenizer.apply_chat_template(p["prompt"], tokenize=False,
-                                      add_generation_prompt=True)
+                                      add_generation_prompt=add_generation_prompt)
         if isinstance(p["prompt"], list) else p["prompt"]
         for p in pairs
     ]
@@ -411,7 +411,8 @@ def _apply_template(pairs, tokenizer):
 
 @torch.no_grad()
 def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
-    texts     = _apply_template(pairs, tokenizer)
+    # add_generation_prompt=True so the model continues from the assistant turn.
+    texts     = _apply_template(pairs, tokenizer, add_generation_prompt=True)
     answers   = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
     for b in range(n_batches):
@@ -421,9 +422,12 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model.generate(**enc, max_new_tokens=MAX_NEW_TOKENS,
                              do_sample=False, pad_token_id=tokenizer.eos_token_id)
-        inp_len = enc["input_ids"].shape[1]
-        for row in out:
-            answers.append(tokenizer.decode(row[inp_len:], skip_special_tokens=True).strip())
+        # Per-example input lengths via attention_mask (correct under left-padding).
+        in_lens = enc["attention_mask"].sum(dim=1)
+        for i, gen_ids in enumerate(out):
+            answers.append(
+                tokenizer.decode(gen_ids[in_lens[i]:], skip_special_tokens=True).strip()
+            )
         print(f"  [{desc}] generation batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
     return answers
@@ -433,9 +437,15 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
 def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
     """
     Returns float32 numpy array of shape (n_pairs, n_layers+1, hidden_dim).
-    Last token position (left-padded input).
+
+    add_generation_prompt=False: hidden states are extracted from the last real
+    input token (the final token of the user message), not from a generation
+    prompt token that the model hasn't seen as context.
+
+    Last *non-pad* token is located per example via attention_mask so that
+    left-padded batches are handled correctly.
     """
-    texts     = _apply_template(pairs, tokenizer)
+    texts     = _apply_template(pairs, tokenizer, add_generation_prompt=False)
     all_hs    = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
     for b in range(n_batches):
@@ -444,7 +454,12 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
                         truncation=True, max_length=MAX_INPUT_LENGTH)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True)
-        hs  = torch.stack([h[:, -1, :] for h in out.hidden_states], dim=1)
+        # Index the last non-pad token for each example.
+        last_idx = enc["attention_mask"].sum(dim=1) - 1   # shape (B,)
+        rows     = torch.arange(last_idx.shape[0], device=model.device)
+        hs = torch.stack(
+            [h[rows, last_idx, :] for h in out.hidden_states], dim=1
+        )  # (B, n_layers+1, hidden_dim)
         all_hs.append(hs.cpu().float().numpy())
         print(f"  [{desc}] hidden-state batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
@@ -472,7 +487,9 @@ def get_yn_token_ids(tokenizer):
 
 @torch.no_grad()
 def logit_yn_scores(model, tokenizer, pairs, batch_size, yes_ids, no_ids, desc=""):
-    texts     = _apply_template(pairs, tokenizer)
+    # add_generation_prompt=True: the last token is the generation-prompt boundary,
+    # so logits[:, -1, :] predicts what the model would output first (Yes / No).
+    texts     = _apply_template(pairs, tokenizer, add_generation_prompt=True)
     results   = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
     for b in range(n_batches):
@@ -481,6 +498,7 @@ def logit_yn_scores(model, tokenizer, pairs, batch_size, yes_ids, no_ids, desc="
                         truncation=True, max_length=MAX_INPUT_LENGTH)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model(**enc)
+        # Left-padded: position -1 is always the last real token after the generation prompt.
         last_logits = out.logits[:, -1, :].float()
         for row in last_logits:
             y = max(row[i].item() for i in yes_ids) if yes_ids else float("-inf")
@@ -1414,6 +1432,175 @@ def run_summary():
 
 
 # =============================================================================
+# Sanity checks
+# =============================================================================
+
+def _sanity_hs(model, tok):
+    """
+    Sanity check 1 — extract_hidden_states padding behaviour.
+
+    Layout reminder for a batch with N total positions and R_i real tokens
+    for example i:
+
+      RIGHT-padding: [T1, T2, ..., T_R, PAD, PAD, ..., PAD]
+        last real token at absolute index R_i - 1 = attention_mask.sum()-1  ✓
+
+      LEFT-padding:  [PAD, PAD, ..., PAD, T1, T2, ..., T_R]
+        last real token at absolute index N-1 (always the final column).
+        attention_mask.sum()-1 = R_i - 1, which for heavily padded examples
+        still points into the PAD region  ✗  (a bug if used with left-padding).
+        input_ids[:, -1] is ALWAYS a real token with left-padding  ✓
+
+    This check logs what each formula actually selects so you can verify
+    the implementation matches the intent.
+    """
+    print("\n" + "=" * 60)
+    print("SANITY CHECK 1 — extract_hidden_states padding behaviour")
+    print("=" * 60)
+
+    # Three prompts of very different lengths so the batch will be left-padded.
+    prompts = [
+        "Hi.",
+        "What is the capital of France, and what is its population?",
+        "Please explain in detail the mechanisms by which mRNA vaccines work, "
+        "including how the lipid nanoparticles help deliver the payload into "
+        "human cells and trigger an immune response.",
+    ]
+
+    # Wrap as minimal chat messages so the chat template applies.
+    pairs = [{"prompt": [{"role": "user", "content": p}], "label": 1}
+             for p in prompts]
+
+    texts = _apply_template(pairs, tok, add_generation_prompt=False)
+    enc   = tok(texts, return_tensors="pt", padding=True,
+                truncation=True, max_length=MAX_INPUT_LENGTH)
+
+    pad_id  = tok.pad_token_id
+    N       = enc["input_ids"].shape[1]   # total sequence length (with padding)
+
+    print(f"\n  Tokenizer padding_side : {tok.padding_side!r}")
+    print(f"  pad_token_id           : {pad_id}")
+    print(f"  Batch shape            : {list(enc['input_ids'].shape)}  (B x N={N})")
+    print()
+
+    last_real_by_mask = enc["attention_mask"].sum(dim=1) - 1   # shape (B,)
+
+    for i in range(len(prompts)):
+        last_col_tok   = enc["input_ids"][i, -1].item()        # absolute position N-1
+        sel_idx        = last_real_by_mask[i].item()           # index chosen by A2 fix
+        sel_tok        = enc["input_ids"][i, sel_idx].item()
+
+        is_pad_last_col = (last_col_tok == pad_id)
+        is_pad_selected = (sel_tok      == pad_id)
+        num_real        = int(enc["attention_mask"][i].sum().item())
+
+        print(f"  Example {i}: {len(prompts[i].split()):>3d}-word prompt")
+        print(f"    num_real_tokens              = {num_real} / {N}")
+        print(f"    input_ids[:, -1] (pos N-1)   = tok {last_col_tok}"
+              f"  → is_pad? {is_pad_last_col}")
+        print(f"    attention_mask.sum()-1 index = {sel_idx}"
+              f"  → tok {sel_tok}  → is_pad? {is_pad_selected}")
+        if is_pad_last_col:
+            print(f"    *** WARNING: last column IS a pad token — "
+                  f"old code ([:, -1, :]) would read padding! ***")
+        else:
+            print(f"    OK: last column is a real token (left-padding confirmed).")
+        if is_pad_selected:
+            print(f"    *** ERROR: attention_mask.sum()-1 selected a pad token! ***")
+        else:
+            print(f"    OK: attention_mask.sum()-1 selects a real token.")
+        print()
+
+    # Now run the actual function and check output shape.
+    hs = extract_hidden_states(model, tok, pairs,
+                               batch_size=len(pairs), desc="sanity-hs")
+    expected_layers = model.config.num_hidden_layers + 1   # embedding + N transformer layers
+
+    print(f"  extract_hidden_states output shape: {list(hs.shape)}")
+    print(f"  Expected: ({len(pairs)}, {expected_layers}, hidden_dim)")
+    assert hs.shape[0] == len(pairs),    f"Batch dim mismatch: {hs.shape[0]} != {len(pairs)}"
+    assert hs.shape[1] == expected_layers, f"Layer dim mismatch: {hs.shape[1]} != {expected_layers}"
+    print("  PASS: output shape is correct.\n")
+
+
+def _sanity_gen(model, tok):
+    """
+    Sanity check 2 — batch_generate produces non-empty outputs for all
+    examples, including short prompts that get heavily left-padded.
+    """
+    print("\n" + "=" * 60)
+    print("SANITY CHECK 2 — batch_generate decoding under left-padding")
+    print("=" * 60)
+
+    prompts = [
+        "Hi.",
+        "What is 2 + 2?",
+        "Name one planet in the solar system.",
+        "In one sentence, what is the capital of Germany?",
+    ]
+
+    pairs = [{"prompt": [{"role": "user", "content": p}], "label": 1}
+             for p in prompts]
+
+    texts = _apply_template(pairs, tok, add_generation_prompt=True)
+    enc   = tok(texts, return_tensors="pt", padding=True,
+                truncation=True, max_length=MAX_INPUT_LENGTH)
+
+    N       = enc["input_ids"].shape[1]
+    pad_id  = tok.pad_token_id
+    in_lens = enc["attention_mask"].sum(dim=1)
+
+    print(f"\n  Tokenizer padding_side : {tok.padding_side!r}")
+    print(f"  Batch shape (before generate): {list(enc['input_ids'].shape)}")
+    print()
+    for i in range(len(prompts)):
+        num_real = int(in_lens[i].item())
+        print(f"  Example {i}: prompt={prompts[i]!r}")
+        print(f"    num_real_tokens = {num_real} / {N}   "
+              f"(will decode from position {num_real})")
+
+    print()
+    answers = batch_generate(model, tok, pairs,
+                             batch_size=len(pairs), desc="sanity-gen")
+
+    all_ok = True
+    for i, (p, a) in enumerate(zip(prompts, answers)):
+        empty = (len(a.strip()) == 0)
+        status = "FAIL (empty!)" if empty else "OK"
+        print(f"  [{status}] prompt={p!r}")
+        print(f"           answer={a!r}")
+        if empty:
+            all_ok = False
+
+    print()
+    if all_ok:
+        print("  PASS: all outputs are non-empty.\n")
+    else:
+        print("  FAIL: some outputs were empty — check in_lens decoding logic.\n")
+
+
+def run_sanity_checks():
+    """Load the base model and run both sanity checks."""
+    print("Loading base model for sanity checks …")
+    tok = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tok.padding_side = "left"
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        torch_dtype=torch.float16,
+        device_map="auto",
+    )
+    model.eval()
+
+    _sanity_hs(model, tok)
+    _sanity_gen(model, tok)
+
+    print("All sanity checks complete.")
+
+
+# =============================================================================
 # Entry point
 # =============================================================================
 
@@ -1423,7 +1610,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--stage", choices=["base", "method", "summary"],
+    parser.add_argument("--stage", choices=["base", "method", "summary", "sanity"],
                         required=True, help="Pipeline stage to run")
     parser.add_argument("--method", default=None,
                         help="Unlearning method name for --stage method "
@@ -1438,6 +1625,8 @@ def main():
         run_method(args.method)
     elif args.stage == "summary":
         run_summary()
+    elif args.stage == "sanity":
+        run_sanity_checks()
 
 
 if __name__ == "__main__":

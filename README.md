@@ -17,7 +17,7 @@ Stage 1: base      ──► Stage 2: methods (×8, parallel) ──► Stage 3:
 #### Stage 1 — Base model (`--stage base`)
 1. Load and split WMDP-bio questions into **train / val / test** (500 / 200 / rest).
 2. Each question becomes two yes/no prompts: one with the *correct* answer (→ "Yes") and one with a *wrong* answer (→ "No").  WikiText passages are similarly turned into correct/wrong continuation pairs.
-3. Extract **hidden states** (all transformer layers, last token) for train/val/test pairs.
+3. Extract **hidden states** (all transformer layers, last non-pad token via `attention_mask`) for train/val/test pairs.  The chat template is applied *without* the generation-prompt suffix so the probed token is the final user-message token, not an assistant-turn marker.
 4. Train a **linear probe** (logistic regression) per layer; pick the best layer on the validation set.
 5. Run **generation** on test and retain sets; record the first word (Yes/No).
 6. Run a **logit-based metric**: a forward pass at the last input token records the max logit over Yes-tokens vs No-tokens — no decoding required.
@@ -72,7 +72,7 @@ Method probes │  Table 5  ★        │  Table 3
 | **Generation accuracy** | Does the model *say* the right Yes/No? |
 | **Base probe (LR/RF/AdaBoost)** | Do directions learned from the base model still classify Yes/No in the unlearned model's hidden states? |
 | **Method probe (LR/RF/AdaBoost)** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
-| **Logit accuracy** | Is the logit for the correct Yes/No token higher than the wrong one, without any generation? |
+| **Logit accuracy** | Is the logit for the correct Yes/No token higher than the wrong one, without generation?  The generation prompt *is* included so the last token position predicts the first output token. |
 
 A gap between generation ↓ and probe/logit accuracy ↑ is evidence of **residual hidden knowledge** after unlearning.
 Tree-based probes (RF, AdaBoost) can detect non-linear residual structure that LR would miss.

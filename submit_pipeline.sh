@@ -1,15 +1,17 @@
 #!/bin/bash
 # submit_pipeline.sh
 #
-# Submit the full hidden-knowledge pipeline as three dependent SLURM jobs:
+# Submit the full hidden-knowledge pipeline as four dependent SLURM jobs:
 #
+#   Stage 0 (sanity)  — one job         — quick padding/decoding sanity checks
 #   Stage 1 (base)    — one job         — processes the base LLaMA model
 #   Stage 2 (methods) — job array [0-7] — one task per unlearning method
 #   Stage 3 (summary) — one job         — aggregates results and prints table
 #
 # Usage:
-#   bash submit_pipeline.sh            # submit all three stages
-#   bash submit_pipeline.sh --base-only  # only (re-)submit the base stage
+#   bash submit_pipeline.sh              # submit all four stages
+#   bash submit_pipeline.sh --base-only  # only (re-)submit base (no sanity)
+#   bash submit_pipeline.sh --skip-sanity  # skip sanity, submit base→methods→summary
 #
 # If a stage is already done (its checkpoint exists) the Python script exits
 # immediately without recomputing, so it is safe to re-submit after failure.
@@ -20,17 +22,30 @@ mkdir -p logs
 
 # ── Parse arguments ────────────────────────────────────────────────────────
 BASE_ONLY=false
+SKIP_SANITY=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --base-only) BASE_ONLY=true ;;
+        --base-only)    BASE_ONLY=true ;;
+        --skip-sanity)  SKIP_SANITY=true ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
 done
 
+# ── Stage 0: sanity ────────────────────────────────────────────────────────
+if $SKIP_SANITY || $BASE_ONLY; then
+    SANITY_DEP=""
+    echo "Skipping sanity stage."
+else
+    echo "Submitting sanity stage..."
+    SANITY_JOB=$(sbatch --parsable slurm_sanity.sh)
+    echo "  Sanity job ID : ${SANITY_JOB}"
+    SANITY_DEP="--dependency=afterok:${SANITY_JOB}"
+fi
+
 # ── Stage 1: base ──────────────────────────────────────────────────────────
 echo "Submitting base stage..."
-BASE_JOB=$(sbatch --parsable slurm_base.sh)
+BASE_JOB=$(sbatch --parsable ${SANITY_DEP} slurm_base.sh)
 echo "  Base job ID : ${BASE_JOB}"
 
 if $BASE_ONLY; then
@@ -52,6 +67,9 @@ echo "  Summary job ID : ${SUMMARY_JOB}"
 
 echo ""
 echo "Pipeline submitted successfully:"
+if ! $SKIP_SANITY; then
+    echo "  Stage 0 — sanity  : ${SANITY_JOB}"
+fi
 echo "  Stage 1 — base    : ${BASE_JOB}"
 echo "  Stage 2 — methods : ${METHOD_JOB} (array 0–7)"
 echo "  Stage 3 — summary : ${SUMMARY_JOB}"
@@ -60,6 +78,9 @@ echo "Monitor progress with:"
 echo "  squeue -u \$USER"
 echo ""
 echo "Logs are written to: logs/"
+if ! $SKIP_SANITY; then
+    echo "  Sanity  : logs/sanity_${SANITY_JOB}.out"
+fi
 echo "  Base    : logs/base_${BASE_JOB}.out"
 echo "  Methods : logs/method_<task>_<jobid>.out"
 echo "  Summary : logs/summary_${SUMMARY_JOB}.out"
