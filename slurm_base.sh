@@ -17,6 +17,7 @@ source $HOME/miniconda3/etc/profile.d/conda.sh
 conda activate unlearning
 
 export HF_HOME=$HOME/.cache/huggingface
+export HF_TOKEN=$(cat $HF_HOME/token 2>/dev/null)
 
 mkdir -p logs
 
