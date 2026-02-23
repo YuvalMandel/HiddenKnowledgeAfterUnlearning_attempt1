@@ -788,12 +788,14 @@ def print_probe_stats_all(label, all_ps):
               f"no {s.get('no_accuracy',0):.3f}")
 
 
-def print_yn_result(label, pos_answer, neg_answer):
-    pos_yn = extract_yn(pos_answer)
-    neg_yn = extract_yn(neg_answer)
+def print_yn_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
+    pos_yn  = extract_yn(pos_answer)
+    neg_yn  = extract_yn(neg_answer)
+    pos_tag = f" [{pos_proposed}]" if pos_proposed else ""
+    neg_tag = f" [{neg_proposed}]" if neg_proposed else ""
     print(f"  [{label}]")
-    print(f"    Correct answer -> {'OK' if pos_yn=='Yes' else 'XX'} {pos_yn or '?'}  {pos_answer}")
-    print(f"    Wrong answer   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
+    print(f"    Correct answer{pos_tag} -> {'OK' if pos_yn=='Yes' else 'XX'} {pos_yn or '?'}  {pos_answer}")
+    print(f"    Wrong answer{neg_tag}   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
 
 
 def _prow(d, key, default=0.0):
@@ -1374,6 +1376,11 @@ def run_summary():
     test_pairs   = make_forget_pairs(test_q,   rng)
     retain_pairs = make_retain_pairs(retain_pairs_raw, rng)
 
+    # Map (question, pair_type) → proposed-answer text, for display in per-question samples.
+    pair_map = {(p["question"], p["pair_type"]): p["answer"] for p in test_pairs}
+    base_ans_map = {(p["question"], p["pair_type"]): a
+                    for p, a in zip(test_pairs, base_test)}
+
     all_results = {}
     for method_name in UNLEARNED_MODELS:
         r = load_method_results(method_name)
@@ -1384,8 +1391,6 @@ def run_summary():
         all_results[method_name] = r
 
         un_test_answers = r["test_answers"]
-        base_ans_map    = {(p["question"], p["pair_type"]): a
-                           for p, a in zip(test_pairs, base_test)}
         un_ans_map      = {(p["question"], p["pair_type"]): a
                            for p, a in zip(test_pairs, un_test_answers)}
 
@@ -1393,11 +1398,15 @@ def run_summary():
         print(f"--- Sample per-question results ({method_name}, first 5 questions) ---")
         for ex in test_q[:5]:
             q = ex["question"]
+            pos_prop = pair_map.get((q, "pos"), "")
+            neg_prop = pair_map.get((q, "neg"), "")
             print(f"\n  Q: {q}")
             print_yn_result("Base     ", base_ans_map.get((q, "pos"), ""),
-                                         base_ans_map.get((q, "neg"), ""))
+                                         base_ans_map.get((q, "neg"), ""),
+                                         pos_prop, neg_prop)
             print_yn_result(method_name, un_ans_map.get((q, "pos"), ""),
-                                         un_ans_map.get((q, "neg"), ""))
+                                         un_ans_map.get((q, "neg"), ""),
+                                         pos_prop, neg_prop)
 
         print(f"\n  FORGET SET — GENERATION ({method_name}):")
         print_gen_stats("Base     ", base_gen)
