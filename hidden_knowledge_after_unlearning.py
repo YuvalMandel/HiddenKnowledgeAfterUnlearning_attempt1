@@ -422,12 +422,18 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model.generate(**enc, max_new_tokens=MAX_NEW_TOKENS,
                              do_sample=False, pad_token_id=tokenizer.eos_token_id)
-        # Per-example input lengths via attention_mask (correct under left-padding).
-        in_lens = enc["attention_mask"].sum(dim=1)
-        for i, gen_ids in enumerate(out):
-            answers.append(
-                tokenizer.decode(gen_ids[in_lens[i]:], skip_special_tokens=True).strip()
-            )
+
+        # IMPORTANT (padding-aware decoding):
+        # HuggingFace generate() returns sequences of length N + max_new_tokens,
+        # where the first N positions are always the (padded) input prompt.
+        # With left-padding N is the same for all examples in the batch, so
+        # slicing from N gives exactly the newly generated tokens for every
+        # example — regardless of how many real prompt tokens each one had.
+        # Using attention_mask.sum() instead would start the slice too early
+        # for padded examples, leaking prompt tokens into the decoded answer.
+        N = enc["input_ids"].shape[1]
+        for gen_ids in out:
+            answers.append(tokenizer.decode(gen_ids[N:], skip_special_tokens=True).strip())
         print(f"  [{desc}] generation batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
     return answers
@@ -442,8 +448,11 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
     input token (the final token of the user message), not from a generation
     prompt token that the model hasn't seen as context.
 
-    Last *non-pad* token is located per example via attention_mask so that
-    left-padded batches are handled correctly.
+    NOTE on padding-side-aware last-token selection:
+      RIGHT-padding: last real token is at attention_mask.sum()-1 (varies per example).
+      LEFT-padding : last real token is always at absolute index N-1 (same for all).
+    Using attention_mask.sum()-1 with left-padding would index into the padding
+    region for short examples, reading garbage hidden states.
     """
     texts     = _apply_template(pairs, tokenizer, add_generation_prompt=False)
     all_hs    = []
@@ -454,13 +463,17 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
                         truncation=True, max_length=MAX_INPUT_LENGTH)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True)
-        # Index the last non-pad token for each example.
-        last_idx = enc["attention_mask"].sum(dim=1) - 1   # shape (B,)
-        rows     = torch.arange(last_idx.shape[0], device=model.device)
-        hs = torch.stack(
-            [h[rows, last_idx, :] for h in out.hidden_states], dim=1
-        )  # (B, n_layers+1, hidden_dim)
-        all_hs.append(hs.cpu().float().numpy())
+
+        attn = enc["attention_mask"]
+        B, N = attn.shape
+        if tokenizer.padding_side == "right":
+            last_idx = attn.sum(dim=1) - 1                                      # shape (B,)
+        else:  # "left"
+            last_idx = torch.full((B,), N - 1, device=attn.device, dtype=torch.long)
+
+        rows = torch.arange(B, device=attn.device)
+        hs = torch.stack([h[rows, last_idx, :] for h in out.hidden_states], dim=1)
+        all_hs.append(hs.detach().cpu().float().numpy())
         print(f"  [{desc}] hidden-state batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
     return np.concatenate(all_hs, axis=0)
@@ -1439,26 +1452,20 @@ def _sanity_hs(model, tok):
     """
     Sanity check 1 — extract_hidden_states padding behaviour.
 
-    Layout reminder for a batch with N total positions and R_i real tokens
-    for example i:
+    IMPORTANT:
+      In many Llama tokenizers, pad_token_id is set to eos_token_id.  The chat
+      template also ends with <|eot_id|> which has the same token ID.  Therefore
+      you cannot reliably detect padding by comparing token ids to pad_token_id.
+      Use attention_mask instead (mask==0 => padding position).
 
-      RIGHT-padding: [T1, T2, ..., T_R, PAD, PAD, ..., PAD]
-        last real token at absolute index R_i - 1 = attention_mask.sum()-1  ✓
-
-      LEFT-padding:  [PAD, PAD, ..., PAD, T1, T2, ..., T_R]
-        last real token at absolute index N-1 (always the final column).
-        attention_mask.sum()-1 = R_i - 1, which for heavily padded examples
-        still points into the PAD region  ✗  (a bug if used with left-padding).
-        input_ids[:, -1] is ALWAYS a real token with left-padding  ✓
-
-    This check logs what each formula actually selects so you can verify
-    the implementation matches the intent.
+    Indexing rules:
+      RIGHT-padding: last real token at attention_mask.sum()-1
+      LEFT-padding : last real token at absolute index N-1
     """
     print("\n" + "=" * 60)
     print("SANITY CHECK 1 — extract_hidden_states padding behaviour")
     print("=" * 60)
 
-    # Three prompts of very different lengths so the batch will be left-padded.
     prompts = [
         "Hi.",
         "What is the capital of France, and what is its population?",
@@ -1467,7 +1474,6 @@ def _sanity_hs(model, tok):
         "human cells and trigger an immune response.",
     ]
 
-    # Wrap as minimal chat messages so the chat template applies.
     pairs = [{"prompt": [{"role": "user", "content": p}], "label": 1}
              for p in prompts]
 
@@ -1475,40 +1481,44 @@ def _sanity_hs(model, tok):
     enc   = tok(texts, return_tensors="pt", padding=True,
                 truncation=True, max_length=MAX_INPUT_LENGTH)
 
-    pad_id  = tok.pad_token_id
-    N       = enc["input_ids"].shape[1]   # total sequence length (with padding)
+    N    = enc["input_ids"].shape[1]
+    attn = enc["attention_mask"]
 
     print(f"\n  Tokenizer padding_side : {tok.padding_side!r}")
-    print(f"  pad_token_id           : {pad_id}")
+    print(f"  pad_token_id           : {tok.pad_token_id} (may equal eos_token_id)")
+    print(f"  eos_token_id           : {tok.eos_token_id}")
     print(f"  Batch shape            : {list(enc['input_ids'].shape)}  (B x N={N})")
     print()
 
-    last_real_by_mask = enc["attention_mask"].sum(dim=1) - 1   # shape (B,)
+    mask_idx = attn.sum(dim=1) - 1  # valid for right-padding
 
     for i in range(len(prompts)):
-        last_col_tok   = enc["input_ids"][i, -1].item()        # absolute position N-1
-        sel_idx        = last_real_by_mask[i].item()           # index chosen by A2 fix
-        sel_tok        = enc["input_ids"][i, sel_idx].item()
+        num_real = int(attn[i].sum().item())
 
-        is_pad_last_col = (last_col_tok == pad_id)
-        is_pad_selected = (sel_tok      == pad_id)
-        num_real        = int(enc["attention_mask"][i].sum().item())
+        # "Is padding?" must use attention_mask, not token ids (pad_id == eos_id in Llama).
+        last_col_is_pad = (attn[i, -1].item() == 0)
+
+        # Index that our fixed extract_hidden_states selects:
+        if tok.padding_side == "right":
+            sel_idx = int(mask_idx[i].item())
+        else:
+            sel_idx = N - 1
+
+        sel_is_pad = (attn[i, sel_idx].item() == 0)
 
         print(f"  Example {i}: {len(prompts[i].split()):>3d}-word prompt")
-        print(f"    num_real_tokens              = {num_real} / {N}")
-        print(f"    input_ids[:, -1] (pos N-1)   = tok {last_col_tok}"
-              f"  → is_pad? {is_pad_last_col}")
-        print(f"    attention_mask.sum()-1 index = {sel_idx}"
-              f"  → tok {sel_tok}  → is_pad? {is_pad_selected}")
-        if is_pad_last_col:
-            print(f"    *** WARNING: last column IS a pad token — "
-                  f"old code ([:, -1, :]) would read padding! ***")
+        print(f"    num_real_tokens            = {num_real} / {N}")
+        print(f"    attention_mask[i, -1]      = {int(attn[i, -1].item())}"
+              f"  → is_pad? {last_col_is_pad}")
+        print(f"    selected index (expected)  = {sel_idx}"
+              f"  → attention_mask={int(attn[i, sel_idx].item())}  → is_pad? {sel_is_pad}")
+
+        if last_col_is_pad and tok.padding_side == "left":
+            print("    *** ERROR: left-padding but last column is padding (unexpected). ***")
+        if sel_is_pad:
+            print("    *** ERROR: selected index points to padding! ***")
         else:
-            print(f"    OK: last column is a real token (left-padding confirmed).")
-        if is_pad_selected:
-            print(f"    *** ERROR: attention_mask.sum()-1 selected a pad token! ***")
-        else:
-            print(f"    OK: attention_mask.sum()-1 selects a real token.")
+            print("    OK: selected index is a real token.")
         print()
 
     # Now run the actual function and check output shape.
