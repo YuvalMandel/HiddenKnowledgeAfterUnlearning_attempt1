@@ -798,6 +798,73 @@ def print_yn_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed
     print(f"    Wrong answer{neg_tag}   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
 
 
+def print_sample_questions(method_name, test_q, pair_obj_map,
+                           base_ans_map, un_ans_map, tokenizer, n=5):
+    """
+    For each of the first n test questions print:
+      1. The exact prompt string the model receives (via apply_chat_template,
+         with add_generation_prompt=True, quoted).
+      2. Base-model response (quoted).
+      3. Unlearned-model response (quoted).
+      4. A 2×2 summary table.
+    """
+    SEP = "-" * 60
+
+    print(f"\n{'=' * 60}")
+    print(f"Sample Q&A — {method_name} (first {n} questions)")
+    print(f"{'=' * 60}")
+
+    for ex in test_q[:n]:
+        q     = ex["question"]
+        pos_p = pair_obj_map.get((q, "pos"))
+        neg_p = pair_obj_map.get((q, "neg"))
+
+        def _exact_prompt(pair):
+            if pair is None:
+                return "(missing)"
+            return tokenizer.apply_chat_template(
+                pair["prompt"], tokenize=False, add_generation_prompt=True
+            )
+
+        pos_base = base_ans_map.get((q, "pos"), "")
+        neg_base = base_ans_map.get((q, "neg"), "")
+        pos_un   = un_ans_map.get((q, "pos"), "")
+        neg_un   = un_ans_map.get((q, "neg"), "")
+
+        pos_base_yn = extract_yn(pos_base) or "?"
+        neg_base_yn = extract_yn(neg_base) or "?"
+        pos_un_yn   = extract_yn(pos_un)   or "?"
+        neg_un_yn   = extract_yn(neg_un)   or "?"
+
+        print(f"\n  Q: {q}")
+        print(f"  {SEP}")
+
+        for label, pair, base_ans, un_ans in [
+            ("CORRECT proposed answer (expected: Yes)", pos_p, pos_base, pos_un),
+            ("WRONG proposed answer   (expected: No) ", neg_p, neg_base, neg_un),
+        ]:
+            prompt_str = _exact_prompt(pair)
+            print(f"\n  [{label}]")
+            print(f"  [Prompt]:")
+            print('  """')
+            for line in prompt_str.splitlines():
+                print(f"  {line}")
+            print('  """')
+            print(f'  [Base     ] "{base_ans}"')
+            print(f'  [{method_name:<9}] "{un_ans}"')
+
+        # 2×2 summary table
+        def _cell(yn, expected):
+            return f"{yn}  {'OK' if yn == expected else 'XX'}"
+
+        c1 = f"{'Correct prop.':>20}"
+        c2 = f"{'Wrong prop.':>20}"
+        print(f"\n  {'':12s}  {c1}  {c2}")
+        print(f"  {'Base':12s}  {_cell(pos_base_yn, 'Yes'):>20}  {_cell(neg_base_yn, 'No'):>20}")
+        print(f"  {method_name:<12s}  {_cell(pos_un_yn, 'Yes'):>20}  {_cell(neg_un_yn, 'No'):>20}")
+        print(f"\n  {'=' * 60}")
+
+
 def _prow(d, key, default=0.0):
     return d.get(key, default) if d else default
 
@@ -1370,14 +1437,22 @@ def run_summary():
     base_retain      = base["retain_answers"]
     base_test        = base["test_answers"]
 
+    # Load tokenizer only (no model weights) to format exact prompt strings.
+    print("Loading tokenizer for prompt formatting...")
+    from transformers import AutoTokenizer as _AutoTok
+    _tok = _AutoTok.from_pretrained(BASE_MODEL)
+    if _tok.pad_token is None:
+        _tok.pad_token = _tok.eos_token
+    _tok.padding_side = "left"
+
     train_q, val_q, test_q, retain_pairs_raw = load_datasets(rng)
     train_pairs  = make_forget_pairs(train_q,  rng)
     val_pairs    = make_forget_pairs(val_q,    rng)
     test_pairs   = make_forget_pairs(test_q,   rng)
     retain_pairs = make_retain_pairs(retain_pairs_raw, rng)
 
-    # Map (question, pair_type) → proposed-answer text, for display in per-question samples.
-    pair_map = {(p["question"], p["pair_type"]): p["answer"] for p in test_pairs}
+    # Lookup maps built once, shared across all methods.
+    pair_obj_map = {(p["question"], p["pair_type"]): p for p in test_pairs}
     base_ans_map = {(p["question"], p["pair_type"]): a
                     for p, a in zip(test_pairs, base_test)}
 
@@ -1394,19 +1469,8 @@ def run_summary():
         un_ans_map      = {(p["question"], p["pair_type"]): a
                            for p, a in zip(test_pairs, un_test_answers)}
 
-        print(f"\n{'='*60}")
-        print(f"--- Sample per-question results ({method_name}, first 5 questions) ---")
-        for ex in test_q[:5]:
-            q = ex["question"]
-            pos_prop = pair_map.get((q, "pos"), "")
-            neg_prop = pair_map.get((q, "neg"), "")
-            print(f"\n  Q: {q}")
-            print_yn_result("Base     ", base_ans_map.get((q, "pos"), ""),
-                                         base_ans_map.get((q, "neg"), ""),
-                                         pos_prop, neg_prop)
-            print_yn_result(method_name, un_ans_map.get((q, "pos"), ""),
-                                         un_ans_map.get((q, "neg"), ""),
-                                         pos_prop, neg_prop)
+        print_sample_questions(method_name, test_q, pair_obj_map,
+                               base_ans_map, un_ans_map, _tok, n=5)
 
         print(f"\n  FORGET SET — GENERATION ({method_name}):")
         print_gen_stats("Base     ", base_gen)
