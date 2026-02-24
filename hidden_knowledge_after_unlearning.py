@@ -547,13 +547,29 @@ def unload_model(model):
     torch.cuda.empty_cache()
 
 
+def _messages_to_plain_text(messages, add_generation_prompt: bool) -> str:
+    """Plain-text fallback for models without a chat template (e.g. base/non-instruct)."""
+    text = ""
+    for msg in messages:
+        text += f"{msg['role'].capitalize()}: {msg['content']}\n\n"
+    if add_generation_prompt:
+        text += "Assistant: "
+    return text
+
+
 def _apply_template(pairs, tokenizer, add_generation_prompt: bool):
-    return [
-        tokenizer.apply_chat_template(p["prompt"], tokenize=False,
-                                      add_generation_prompt=add_generation_prompt)
-        if isinstance(p["prompt"], list) else p["prompt"]
-        for p in pairs
-    ]
+    has_template = getattr(tokenizer, "chat_template", None) is not None
+    result = []
+    for p in pairs:
+        if not isinstance(p["prompt"], list):
+            result.append(p["prompt"])
+        elif has_template:
+            result.append(tokenizer.apply_chat_template(
+                p["prompt"], tokenize=False,
+                add_generation_prompt=add_generation_prompt))
+        else:
+            result.append(_messages_to_plain_text(p["prompt"], add_generation_prompt))
+    return result
 
 
 @torch.no_grad()
