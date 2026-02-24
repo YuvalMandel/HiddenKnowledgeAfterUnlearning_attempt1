@@ -314,33 +314,33 @@ def load_datasets(rng):
 
 SYSTEM_PROMPT = (
     "You are a concise evaluator. "
-    "Always begin your response with exactly 'Yes' or 'No' as the first word, "
+    "Respond with only 'True' or 'False' as the first word, "
     "followed by a brief explanation of at most 10 words."
 )
 
 
-def make_yn_prompt(question, proposed_answer):
+def make_tf_prompt(question, proposed_answer):
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            "Consider the following question and proposed answer:\n\n"
-            f"Question: {question}\n"
-            f"Proposed answer: {proposed_answer}\n\n"
-            "Is the proposed answer correct?"
+            "Evaluate the truth of the following statement.\n\n"
+            f"Statement: The answer to the question '{question}' is '{proposed_answer}'.\n\n"
+            "Respond with only 'True' or 'False'."
         )},
     ]
 
 
-def make_continuation_yn_prompt(prefix, continuation):
+def make_continuation_tf_prompt(prefix, continuation):
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            "Does the following text continue naturally from the passage?\n\n"
+            "Evaluate the truth of the following statement.\n\n"
             f"Passage: {prefix}\n\n"
-            f"Continuation: {continuation}"
+            f"Statement: The following text is a natural continuation of the passage above.\n"
+            f"Text: {continuation}\n\n"
+            "Respond with only 'True' or 'False'."
         )},
     ]
-
 
 def make_forget_pairs(questions, rng):
     pairs = []
@@ -349,11 +349,11 @@ def make_forget_pairs(questions, rng):
         choices = ex["choices"]
         cor_idx = ex["answer"]
         wrg_idx = rng.choice([i for i in range(len(choices)) if i != cor_idx])
-        pairs.append({"prompt": make_yn_prompt(stem, choices[cor_idx]),
-                      "expected": "Yes", "question": stem,
+        pairs.append({"prompt": make_tf_prompt(stem, choices[cor_idx]),
+                      "expected": "True", "question": stem,
                       "answer": choices[cor_idx], "pair_type": "pos"})
-        pairs.append({"prompt": make_yn_prompt(stem, choices[wrg_idx]),
-                      "expected": "No",  "question": stem,
+        pairs.append({"prompt": make_tf_prompt(stem, choices[wrg_idx]),
+                      "expected": "False", "question": stem,
                       "answer": choices[wrg_idx], "pair_type": "neg"})
     rng.shuffle(pairs)
     return pairs
@@ -368,11 +368,11 @@ def make_retain_pairs(retain_pairs_raw, rng):
         correct_cont = " ".join(words[RETAIN_PREFIX_WORDS:
                                       RETAIN_PREFIX_WORDS + RETAIN_CONTINUATION_WORDS])
         wrong_cont   = " ".join(w_words[:RETAIN_CONTINUATION_WORDS])
-        pairs.append({"prompt": make_continuation_yn_prompt(prefix, correct_cont),
-                      "expected": "Yes", "prefix": prefix,
+        pairs.append({"prompt": make_continuation_tf_prompt(prefix, correct_cont),
+                      "expected": "True", "prefix": prefix,
                       "continuation": correct_cont, "pair_type": "pos", "passage_idx": idx})
-        pairs.append({"prompt": make_continuation_yn_prompt(prefix, wrong_cont),
-                      "expected": "No",  "prefix": prefix,
+        pairs.append({"prompt": make_continuation_tf_prompt(prefix, wrong_cont),
+                      "expected": "False", "prefix": prefix,
                       "continuation": wrong_cont,  "pair_type": "neg", "passage_idx": idx})
     rng.shuffle(pairs)
     return pairs
@@ -483,25 +483,25 @@ def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
 # Logit-based Yes / No metric
 # =============================================================================
 
-def get_yn_token_ids(tokenizer):
-    yes_ids, no_ids = set(), set()
-    for s in ["Yes", "yes", " Yes", " yes", "YES"]:
+def get_tf_token_ids(tokenizer):
+    true_ids, false_ids = set(), set()
+    for s in ["True", "true", " True", " true", "TRUE"]:
         ids = tokenizer.encode(s, add_special_tokens=False)
         if len(ids) == 1:
-            yes_ids.add(ids[0])
-    for s in ["No", "no", " No", " no", "NO"]:
+            true_ids.add(ids[0])
+    for s in ["False", "false", " False", " false", "FALSE"]:
         ids = tokenizer.encode(s, add_special_tokens=False)
         if len(ids) == 1:
-            no_ids.add(ids[0])
-    print(f"  Yes token IDs: {sorted(yes_ids)}", flush=True)
-    print(f"  No  token IDs: {sorted(no_ids)}", flush=True)
-    return sorted(yes_ids), sorted(no_ids)
+            false_ids.add(ids[0])
+    print(f"  True  token IDs: {sorted(true_ids)}", flush=True)
+    print(f"  False token IDs: {sorted(false_ids)}", flush=True)
+    return sorted(true_ids), sorted(false_ids)
 
 
 @torch.no_grad()
-def logit_yn_scores(model, tokenizer, pairs, batch_size, yes_ids, no_ids, desc=""):
+def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, desc=""):
     # add_generation_prompt=True: the last token is the generation-prompt boundary,
-    # so logits[:, -1, :] predicts what the model would output first (Yes / No).
+    # so logits[:, -1, :] predicts what the model would output first (True / False).
     texts     = _apply_template(pairs, tokenizer, add_generation_prompt=True)
     results   = []
     n_batches = (len(texts) + batch_size - 1) // batch_size
@@ -514,34 +514,34 @@ def logit_yn_scores(model, tokenizer, pairs, batch_size, yes_ids, no_ids, desc="
         # Left-padded: position -1 is always the last real token after the generation prompt.
         last_logits = out.logits[:, -1, :].float()
         for row in last_logits:
-            y = max(row[i].item() for i in yes_ids) if yes_ids else float("-inf")
-            n = max(row[i].item() for i in no_ids)  if no_ids  else float("-inf")
-            results.append([y, n])
+            t = max(row[i].item() for i in true_ids)  if true_ids  else float("-inf")
+            f = max(row[i].item() for i in false_ids) if false_ids else float("-inf")
+            results.append([t, f])
         print(f"  [{desc}] logit batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
     return results
 
 
 def logit_stats(scores, pairs):
-    total = correct = yes_total = yes_correct = no_total = no_correct = 0
-    for (y, n), p in zip(scores, pairs):
-        pred     = "Yes" if y > n else "No"
+    total = correct = true_total = true_correct = false_total = false_correct = 0
+    for (t, f), p in zip(scores, pairs):
+        pred     = "True" if t > f else "False"
         expected = p["expected"]
         total += 1
-        if expected == "Yes":
-            yes_total += 1
-            if pred == "Yes":
-                yes_correct += 1
+        if expected == "True":
+            true_total += 1
+            if pred == "True":
+                true_correct += 1
                 correct += 1
         else:
-            no_total += 1
-            if pred == "No":
-                no_correct += 1
+            false_total += 1
+            if pred == "False":
+                false_correct += 1
                 correct += 1
     return {
-        "accuracy":     float(correct     / total)     if total     > 0 else 0.0,
-        "yes_accuracy": float(yes_correct / yes_total) if yes_total > 0 else 0.0,
-        "no_accuracy":  float(no_correct  / no_total)  if no_total  > 0 else 0.0,
+        "accuracy":      float(correct       / total)      if total       > 0 else 0.0,
+        "true_accuracy": float(true_correct  / true_total) if true_total  > 0 else 0.0,
+        "false_accuracy":float(false_correct / false_total)if false_total > 0 else 0.0,
     }
 
 
@@ -665,9 +665,9 @@ def _pipe_stats(pipe: Pipeline, X: np.ndarray, labels: np.ndarray) -> dict:
     yes_mask = labels == 1
     no_mask  = labels == 0
     return {
-        "accuracy":     float((preds == labels).mean()),
-        "yes_accuracy": float((preds[yes_mask] == 1).mean()) if yes_mask.any() else 0.0,
-        "no_accuracy":  float((preds[no_mask]  == 0).mean()) if no_mask.any()  else 0.0,
+        "accuracy":      float((preds == labels).mean()),
+        "true_accuracy": float((preds[yes_mask] == 1).mean()) if yes_mask.any() else 0.0,
+        "false_accuracy":float((preds[no_mask]  == 0).mean()) if no_mask.any()  else 0.0,
     }
 
 
@@ -680,12 +680,12 @@ def compute_all_probe_stats(probe_set: dict,
     Returns:
     {
       "per_layer": {
-        "LR":       {"accuracy": f, "yes_accuracy": f, "no_accuracy": f, "best_layer": i},
+        "LR":       {"accuracy": f, "true_accuracy": f, "false_accuracy": f, "best_layer": i},
         "RF":       {...},
         "AdaBoost": {...},
       },
       "multi_layer": {
-        "LR":       {"accuracy": f, "yes_accuracy": f, "no_accuracy": f},
+        "LR":       {"accuracy": f, "true_accuracy": f, "false_accuracy": f},
         "RF":       {...},
         "AdaBoost": {...},
       }
@@ -710,41 +710,41 @@ def compute_all_probe_stats(probe_set: dict,
 
 
 def pairs_to_labels(pairs):
-    return np.array([1 if p["expected"] == "Yes" else 0 for p in pairs])
+    return np.array([1 if p["expected"] == "True" else 0 for p in pairs])
 
 
 # =============================================================================
 # Generation stats
 # =============================================================================
 
-def extract_yn(answer):
-    m = re.search(r"\b(Yes|No)\b", answer.strip(), re.IGNORECASE)
+def extract_tf(answer):
+    m = re.search(r"\b(True|False)\b", answer.strip(), re.IGNORECASE)
     return m.group(1).capitalize() if m else None
 
 
 def generation_stats(answers, pairs):
     total   = len(answers)
-    correct = gibberish = yes_total = yes_correct = no_total = no_correct = 0
+    correct = gibberish = true_total = true_correct = false_total = false_correct = 0
     for ans, p in zip(answers, pairs):
-        yn       = extract_yn(ans)
+        tf       = extract_tf(ans)
         expected = p["expected"]
-        if yn is None:
+        if tf is None:
             gibberish += 1
-        if expected == "Yes":
-            yes_total += 1
-            if yn == "Yes":
-                yes_correct += 1
+        if expected == "True":
+            true_total += 1
+            if tf == "True":
+                true_correct += 1
                 correct += 1
         else:
-            no_total += 1
-            if yn == "No":
-                no_correct += 1
+            false_total += 1
+            if tf == "False":
+                false_correct += 1
                 correct += 1
     return {
-        "accuracy":       float(correct      / total)     if total     > 0 else 0.0,
-        "yes_accuracy":   float(yes_correct  / yes_total) if yes_total > 0 else 0.0,
-        "no_accuracy":    float(no_correct   / no_total)  if no_total  > 0 else 0.0,
-        "gibberish_rate": float(gibberish    / total)     if total     > 0 else 0.0,
+        "accuracy":        float(correct        / total)       if total       > 0 else 0.0,
+        "true_accuracy":   float(true_correct   / true_total)  if true_total  > 0 else 0.0,
+        "false_accuracy":  float(false_correct  / false_total) if false_total > 0 else 0.0,
+        "gibberish_rate":  float(gibberish      / total)       if total       > 0 else 0.0,
     }
 
 
@@ -755,8 +755,8 @@ def generation_stats(answers, pairs):
 def print_gen_stats(label, stats):
     print(f"  [{label}]")
     print(f"    Overall accuracy : {stats['accuracy']:.3f}")
-    print(f"    Yes accuracy     : {stats['yes_accuracy']:.3f}")
-    print(f"    No accuracy      : {stats['no_accuracy']:.3f}")
+    print(f"    True accuracy    : {stats['true_accuracy']:.3f}")
+    print(f"    False accuracy   : {stats['false_accuracy']:.3f}")
     print(f"    Gibberish rate   : {stats['gibberish_rate']:.3f}")
 
 
@@ -766,8 +766,8 @@ def print_logit_stats(label, stats):
         return
     print(f"  [{label}]")
     print(f"    Logit accuracy   : {stats.get('accuracy', 0):.3f}")
-    print(f"    Yes logit acc    : {stats.get('yes_accuracy', 0):.3f}")
-    print(f"    No  logit acc    : {stats.get('no_accuracy', 0):.3f}")
+    print(f"    True  logit acc  : {stats.get('true_accuracy', 0):.3f}")
+    print(f"    False logit acc  : {stats.get('false_accuracy', 0):.3f}")
 
 
 def print_probe_stats_all(label, all_ps):
@@ -777,25 +777,25 @@ def print_probe_stats_all(label, all_ps):
         s = all_ps["per_layer"].get(clf_name, {})
         print(f"    {clf_name:<8} layer {s.get('best_layer','?'):>2}  "
               f"acc {s.get('accuracy',0):.3f}  "
-              f"yes {s.get('yes_accuracy',0):.3f}  "
-              f"no {s.get('no_accuracy',0):.3f}")
+              f"true {s.get('true_accuracy',0):.3f}  "
+              f"false {s.get('false_accuracy',0):.3f}")
     print(f"  [{label}] Multi-layer probes:")
     for clf_name in CLF_NAMES:
         s = all_ps["multi_layer"].get(clf_name, {})
         print(f"    {clf_name:<8}"
               f"acc {s.get('accuracy',0):.3f}  "
-              f"yes {s.get('yes_accuracy',0):.3f}  "
-              f"no {s.get('no_accuracy',0):.3f}")
+              f"true {s.get('true_accuracy',0):.3f}  "
+              f"false {s.get('false_accuracy',0):.3f}")
 
 
-def print_yn_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
-    pos_yn  = extract_yn(pos_answer)
-    neg_yn  = extract_yn(neg_answer)
+def print_tf_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
+    pos_tf  = extract_tf(pos_answer)
+    neg_tf  = extract_tf(neg_answer)
     pos_tag = f" [{pos_proposed}]" if pos_proposed else ""
     neg_tag = f" [{neg_proposed}]" if neg_proposed else ""
     print(f"  [{label}]")
-    print(f"    Correct answer{pos_tag} -> {'OK' if pos_yn=='Yes' else 'XX'} {pos_yn or '?'}  {pos_answer}")
-    print(f"    Wrong answer{neg_tag}   -> {'OK' if neg_yn=='No'  else 'XX'} {neg_yn or '?'}  {neg_answer}")
+    print(f"    Correct answer{pos_tag} -> {'OK' if pos_tf=='True'  else 'XX'} {pos_tf or '?'}  {pos_answer}")
+    print(f"    Wrong answer{neg_tag}   -> {'OK' if neg_tf=='False' else 'XX'} {neg_tf or '?'}  {neg_answer}")
 
 
 def print_sample_questions(method_name, test_q, pair_obj_map,
@@ -831,17 +831,17 @@ def print_sample_questions(method_name, test_q, pair_obj_map,
         pos_un   = un_ans_map.get((q, "pos"), "")
         neg_un   = un_ans_map.get((q, "neg"), "")
 
-        pos_base_yn = extract_yn(pos_base) or "?"
-        neg_base_yn = extract_yn(neg_base) or "?"
-        pos_un_yn   = extract_yn(pos_un)   or "?"
-        neg_un_yn   = extract_yn(neg_un)   or "?"
+        pos_base_tf = extract_tf(pos_base) or "?"
+        neg_base_tf = extract_tf(neg_base) or "?"
+        pos_un_tf   = extract_tf(pos_un)   or "?"
+        neg_un_tf   = extract_tf(neg_un)   or "?"
 
         print(f"\n  Q: {q}")
         print(f"  {SEP}")
 
         for label, pair, base_ans, un_ans in [
-            ("CORRECT proposed answer (expected: Yes)", pos_p, pos_base, pos_un),
-            ("WRONG proposed answer   (expected: No) ", neg_p, neg_base, neg_un),
+            ("CORRECT proposed answer (expected: True) ", pos_p, pos_base, pos_un),
+            ("WRONG proposed answer   (expected: False)", neg_p, neg_base, neg_un),
         ]:
             prompt_str = _exact_prompt(pair)
             print(f"\n  [{label}]")
@@ -860,8 +860,8 @@ def print_sample_questions(method_name, test_q, pair_obj_map,
         c1 = f"{'Correct prop.':>20}"
         c2 = f"{'Wrong prop.':>20}"
         print(f"\n  {'':12s}  {c1}  {c2}")
-        print(f"  {'Base':12s}  {_cell(pos_base_yn, 'Yes'):>20}  {_cell(neg_base_yn, 'No'):>20}")
-        print(f"  {method_name:<12s}  {_cell(pos_un_yn, 'Yes'):>20}  {_cell(neg_un_yn, 'No'):>20}")
+        print(f"  {'Base':12s}  {_cell(pos_base_tf, 'True'):>20}  {_cell(neg_base_tf, 'False'):>20}")
+        print(f"  {method_name:<12s}  {_cell(pos_un_tf, 'True'):>20}  {_cell(neg_un_tf, 'False'):>20}")
         print(f"\n  {'=' * 60}")
 
 
@@ -877,15 +877,15 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results)
     print(f"\n{sep}")
     print("TABLE 1 — FORGET SET (test): Generation accuracy + Logit-based metric")
     print(sep)
-    print(f"{'Method':<12} {'GenAcc':>7} {'GYes':>6} {'GNo':>5} {'Gib':>5}"
-          f"  {'LogitAcc':>9} {'LYes':>7} {'LNo':>6}")
+    print(f"{'Method':<12} {'GenAcc':>7} {'GTrue':>6} {'GFalse':>7} {'Gib':>5}"
+          f"  {'LogitAcc':>9} {'LTrue':>7} {'LFalse':>8}")
     print("-" * W)
     def _row1(name, g, lo):
         lo = lo or {}
-        print(f"{name:<12} {g['accuracy']:7.3f} {g['yes_accuracy']:6.3f}"
-              f" {g['no_accuracy']:5.3f} {g['gibberish_rate']:5.3f}"
-              f"  {_prow(lo,'accuracy'):9.3f} {_prow(lo,'yes_accuracy'):7.3f}"
-              f" {_prow(lo,'no_accuracy'):6.3f}")
+        print(f"{name:<12} {g['accuracy']:7.3f} {g['true_accuracy']:6.3f}"
+              f" {g['false_accuracy']:7.3f} {g['gibberish_rate']:5.3f}"
+              f"  {_prow(lo,'accuracy'):9.3f} {_prow(lo,'true_accuracy'):7.3f}"
+              f" {_prow(lo,'false_accuracy'):8.3f}")
     _row1("Base", base_gen, base_logit)
     print("-" * W)
     for method, r in all_results.items():
@@ -900,7 +900,7 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results)
     hdr = (f"{'Method':<12}"
            + "".join(f"  {clf+' Acc':>10} {clf+' Yes':>9} {clf+' No':>8} {'Lyr':>4}"
                      for clf in CLF_NAMES)
-           + "".join(f"  {clf+' ML':>8} {'Yes':>7} {'No':>6}"
+           + "".join(f"  {clf+' ML':>8} {'True':>7} {'False':>7}"
                      for clf in CLF_NAMES))
     print(f"{'Method':<12}"
           + "  PL-LR  Acc  Yes   No Lyr"
@@ -917,12 +917,12 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results)
         row = f"{name:<12}"
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
-            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'yes_accuracy'):5.3f}"
-                    f" {_prow(s,'no_accuracy'):5.3f} {s.get('best_layer','?'):>3}")
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
+                    f" {_prow(s,'false_accuracy'):5.3f} {s.get('best_layer','?'):>3}")
         for clf in CLF_NAMES:
             s = ml.get(clf, {})
-            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'yes_accuracy'):5.3f}"
-                    f" {_prow(s,'no_accuracy'):5.3f}")
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
+                    f" {_prow(s,'false_accuracy'):5.3f}")
         print(row)
 
     _row2("Base", base_all_probe_stats)
@@ -974,16 +974,16 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results)
     print(f"\n{sep}")
     print("TABLE 4 — RETAIN SET: Generation + Logit  (should stay near 1.0)")
     print(sep)
-    print(f"{'Method':<12} {'RetAcc':>7} {'RYes':>6} {'RNo':>5}"
-          f"  {'RLogit':>7} {'RLYes':>7} {'RLNo':>6}")
+    print(f"{'Method':<12} {'RetAcc':>7} {'RTrue':>6} {'RFalse':>7}"
+          f"  {'RLogit':>7} {'RLTrue':>7} {'RLFalse':>8}")
     print("-" * 60)
     for method, r in all_results.items():
         rt = r["retain"]
         rl = r.get("retain_logit", {})
-        print(f"{method:<12} {rt['accuracy']:7.3f} {rt['yes_accuracy']:6.3f}"
-              f" {rt['no_accuracy']:5.3f}"
-              f"  {_prow(rl,'accuracy'):7.3f} {_prow(rl,'yes_accuracy'):7.3f}"
-              f" {_prow(rl,'no_accuracy'):6.3f}")
+        print(f"{method:<12} {rt['accuracy']:7.3f} {rt['true_accuracy']:6.3f}"
+              f" {rt['false_accuracy']:7.3f}"
+              f"  {_prow(rl,'accuracy'):7.3f} {_prow(rl,'true_accuracy'):7.3f}"
+              f" {_prow(rl,'false_accuracy'):8.3f}")
     print(sep)
 
 
@@ -1018,10 +1018,10 @@ def run_base():
     cor_txt0 = ex0["choices"][ex0["answer"]]
     wrg_txt0 = ex0["choices"][
         [i for i in range(len(ex0["choices"])) if i != ex0["answer"]][0]]
-    print("\n  -- YES/NO PROMPT (correct answer) --")
-    _print_prompt(make_yn_prompt(ex0["question"], cor_txt0))
-    print("\n  -- YES/NO PROMPT (wrong answer) --")
-    _print_prompt(make_yn_prompt(ex0["question"], wrg_txt0))
+    print("\n  -- TRUE/FALSE PROMPT (correct answer) --")
+    _print_prompt(make_tf_prompt(ex0["question"], cor_txt0))
+    print("\n  -- TRUE/FALSE PROMPT (wrong answer) --")
+    _print_prompt(make_tf_prompt(ex0["question"], wrg_txt0))
 
     print("\n" + "=" * 60)
     print("EXAMPLE (retain passage 0) — RETAIN SET")
@@ -1037,10 +1037,10 @@ def run_base():
     print(f"  Prefix              : {prefix}")
     print(f"  Correct continuation: {correct_cont}")
     print(f"  Wrong continuation  : {wrong_cont}")
-    print("\n  -- YES/NO PROMPT (correct continuation) --")
-    _print_prompt(make_continuation_yn_prompt(prefix, correct_cont))
-    print("\n  -- YES/NO PROMPT (wrong continuation) --")
-    _print_prompt(make_continuation_yn_prompt(prefix, wrong_cont))
+    print("\n  -- TRUE/FALSE PROMPT (correct continuation) --")
+    _print_prompt(make_continuation_tf_prompt(prefix, correct_cont))
+    print("\n  -- TRUE/FALSE PROMPT (wrong continuation) --")
+    _print_prompt(make_continuation_tf_prompt(prefix, wrong_cont))
     print("=" * 60)
 
     train_pairs  = make_forget_pairs(train_q,  rng)
@@ -1127,19 +1127,19 @@ def run_base():
             retain_answers = partial["retain_answers"]
 
         if need_log:
-            yes_ids, no_ids = get_yn_token_ids(base_tok)
+            true_ids, false_ids = get_tf_token_ids(base_tok)
             if "logit_scores" not in partial:
                 print("\nComputing logit scores — BASE — test forget set")
-                logit_scores = logit_yn_scores(base_model, base_tok, test_pairs,
-                                               LOGIT_BATCH_SIZE, yes_ids, no_ids,
+                logit_scores = logit_tf_scores(base_model, base_tok, test_pairs,
+                                               LOGIT_BATCH_SIZE, true_ids, false_ids,
                                                "base/test-logit")
                 _save_partial("base", {"logit_scores": logit_scores})
             else:
                 logit_scores = partial["logit_scores"]
             if "retain_logit_scores" not in partial:
                 print("\nComputing logit scores — BASE — retain set")
-                retain_logit_scores = logit_yn_scores(base_model, base_tok, retain_pairs,
-                                                       LOGIT_BATCH_SIZE, yes_ids, no_ids,
+                retain_logit_scores = logit_tf_scores(base_model, base_tok, retain_pairs,
+                                                       LOGIT_BATCH_SIZE, true_ids, false_ids,
                                                        "base/retain-logit")
                 _save_partial("base", {"retain_logit_scores": retain_logit_scores})
             else:
@@ -1319,19 +1319,19 @@ def run_method(method_name: str):
             retain_answers = partial["retain_answers"]
 
         if need_log:
-            yes_ids, no_ids = get_yn_token_ids(un_tok)
+            true_ids, false_ids = get_tf_token_ids(un_tok)
             if "logit_scores" not in partial:
                 print(f"\nComputing logit scores — {method_name} — test forget set")
-                logit_scores = logit_yn_scores(un_model, un_tok, test_pairs,
-                                               LOGIT_BATCH_SIZE, yes_ids, no_ids,
+                logit_scores = logit_tf_scores(un_model, un_tok, test_pairs,
+                                               LOGIT_BATCH_SIZE, true_ids, false_ids,
                                                f"{method_name}/test-logit")
                 _save_partial(sn, {"logit_scores": logit_scores})
             else:
                 logit_scores = partial["logit_scores"]
             if "retain_logit_scores" not in partial:
                 print(f"\nComputing logit scores — {method_name} — retain set")
-                retain_logit_scores = logit_yn_scores(un_model, un_tok, retain_pairs,
-                                                      LOGIT_BATCH_SIZE, yes_ids, no_ids,
+                retain_logit_scores = logit_tf_scores(un_model, un_tok, retain_pairs,
+                                                      LOGIT_BATCH_SIZE, true_ids, false_ids,
                                                       f"{method_name}/retain-logit")
                 _save_partial(sn, {"retain_logit_scores": retain_logit_scores})
             else:
@@ -1512,7 +1512,7 @@ def run_summary():
         print(f"  Prefix:             ...{p_pos['prefix'][-80:]}")
         print(f"  Real continuation:  {p_pos['continuation'][:80]}")
         print(f"  Wrong continuation: {p_neg['continuation'][:80]}")
-        print_yn_result("Base", ret_base_map[(j, "pos")], ret_base_map[(j, "neg")])
+        print_tf_result("Base", ret_base_map[(j, "pos")], ret_base_map[(j, "neg")])
 
     print_summary_table(base_gen, base_all_probe_s, base_logit_s, all_results)
 
