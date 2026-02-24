@@ -16,28 +16,31 @@ Stage 1: base      ──► Stage 2: methods (×8, parallel) ──► Stage 3:
 
 #### Stage 1 — Base model (`--stage base`)
 1. Load and split WMDP-bio questions into **train / val / test** (500 / 200 / rest).
-2. Each question becomes two True/False prompts: one with the *correct* answer (→ "True") and one with a *wrong* answer (→ "False").  The prompt is a semantic statement ("The answer to the question '…' is '…'.") rather than a surface question, making the label a truth-value rather than a surface token.  WikiText passages are similarly turned into correct/wrong continuation pairs.
+2. Each question becomes two True/False prompts: one with the *correct* answer (→ "True") and one with a *wrong* answer (→ "False").  The prompt is a semantic statement ("The answer to the question '…' is '…'.") rather than a surface question, making the label a truth-value rather than a surface token.  WikiText passages are similarly turned into correct/wrong continuation pairs.  All three splits are saved to `checkpoints/wmdp_tf_pairs.csv` on first run; subsequent runs load from the CSV to skip re-downloading and ensure reproducible splits.
 3. Extract **hidden states** (all transformer layers, last non-pad token via `attention_mask`) for train/val/test pairs.  The chat template is applied *without* the generation-prompt suffix so the probed token is the final user-message token, not an assistant-turn marker.
 4. Train a **linear probe** (logistic regression) per layer; pick the best layer on the validation set.
 5. Run **generation** on test and retain sets; record the first word (True/False).
 6. Run a **logit-based metric**: a forward pass at the last input token records the max logit over True-tokens vs False-tokens — no decoding required.
-7. Save everything to `checkpoints/`.
+7. Run **MCQ direct evaluation**: give the model each original multiple-choice question with all four answer options and record the A/B/C/D letter response (Table 6).
+8. Save everything to `checkpoints/`.
 
 #### Stage 2 — Unlearned models (`--stage method --method <NAME>`)
 Runs independently for each of the 8 LLM-GAT unlearning methods (all in parallel via SLURM job array):
 
-1. Extract hidden states of **train / val / test** using the *unlearned* model.
-2. Train a **method-specific probe** on those hidden states (same train set, different model).  Find its best layer on the unlearned model's val hidden states.
-3. Run generation and logit scoring on test and retain sets.
-4. Evaluate with **two probe sets**:
+1. Load forget pairs from `checkpoints/wmdp_tf_pairs.csv` (created by stage 1).
+2. Extract hidden states of **train / val / test** using the *unlearned* model.
+3. Train a **method-specific probe** on those hidden states (same train set, different model).  Find its best layer on the unlearned model's val hidden states.
+4. Run generation and logit scoring on test and retain sets.
+5. Run **MCQ direct evaluation** on the test questions (Table 6).
+6. Evaluate with **two probe sets**:
    - **Base probes** (trained on base-model hs) — do the base-model's learned directions transfer?
    - **Method probes** (trained on unlearned-model hs) — is a *new* direction still detectable?
-5. Save to `checkpoints/`.
+7. Save to `checkpoints/`.
 
 #### Stage 3 — Summary (`--stage summary`)
 Loads all checkpoints (no GPU needed) and prints:
 - Per-method sample Q&A comparisons
-- Three summary tables (generation + base probe + logit, method-specific probes, retain set)
+- Six summary tables (see Output section)
 
 ### Probe types
 
@@ -73,6 +76,7 @@ Method probes │  Table 5  ★        │  Table 3
 | **Base probe (LR/RF/AdaBoost)** | Do directions learned from the base model still classify True/False in the unlearned model's hidden states? |
 | **Method probe (LR/RF/AdaBoost)** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
 | **Logit accuracy** | Is the logit for the correct True/False token higher than the wrong one, without generation?  The generation prompt *is* included so the last token position predicts the first output token. |
+| **MCQ direct accuracy** | Given the original multiple-choice question with all four options, does the model pick the correct letter (A/B/C/D)? |
 
 A gap between generation ↓ and probe/logit accuracy ↑ is evidence of **residual hidden knowledge** after unlearning.
 Tree-based probes (RF, AdaBoost) can detect non-linear residual structure that LR would miss.
@@ -93,14 +97,15 @@ Respond with only 'True' or 'False'.
 ## File structure
 
 ```
-hidden_knowledge_after_unlearning.py   Main Python script (all stages)
-submit_pipeline.sh                     Submit all jobs with SLURM dependencies
-run_hidden_knowledge.sh                Convenience alias for submit_pipeline.sh
-slurm_base.sh                          SLURM script for stage 1 (base model)
-slurm_methods.sh                       SLURM job array for stage 2 (8 methods)
-slurm_summary.sh                       SLURM script for stage 3 (summary)
-checkpoints/                           Auto-created; holds .npy, .pkl, .json
-logs/                                  Auto-created; SLURM stdout/stderr
+hidden_knowledge_after_unlearning.py       Main Python script (all stages)
+submit_pipeline.sh                         Submit all jobs with SLURM dependencies
+run_hidden_knowledge.sh                    Convenience alias for submit_pipeline.sh
+slurm_base.sh                              SLURM script for stage 1 (base model)
+slurm_methods.sh                           SLURM job array for stage 2 (8 methods)
+slurm_summary.sh                           SLURM script for stage 3 (summary)
+checkpoints/                               Auto-created; holds .npy, .pkl, .json
+checkpoints/wmdp_tf_pairs.csv              Cached WMDP train/val/test pairs (created on first run)
+logs/                                      Auto-created; SLURM stdout/stderr
 ```
 
 ---
@@ -187,6 +192,7 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | Constant | Default | Description |
 |---|---|---|
 | `BASE_MODEL` | `meta-llama/Meta-Llama-3-8B-Instruct` | Base (un-unlearned) model |
+| `WMDP_CSV_PATH` | `checkpoints/wmdp_tf_pairs.csv` | Cached WMDP pairs; delete to force rebuild |
 | `UNLEARNED_MODELS` | 8 LLM-GAT checkpoints | Dict of method name → HF model ID |
 | `FORGET_SUBSET` | `wmdp-bio` | WMDP subset to treat as forget set |
 | `TRAIN_SIZE` | 500 | Questions used to train probes |
@@ -203,7 +209,7 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 
 ## Output
 
-The summary stage prints four tables:
+The summary stage prints six tables:
 
 ```
 TABLE 1 — FORGET SET (test): Generation accuracy + Logit-based metric
@@ -214,16 +220,25 @@ GradDiff       ...
 ...
 
 TABLE 2 — FORGET SET (test): BASE-model probes applied to test hidden states
-Method   PL-LR Acc True False Lyr  PL-RF ...  ML-LR ...
+Method   PL-LR Acc True Fals Lyr  PL-RF ...  ML-LR ...
 ...
 
 TABLE 3 — FORGET SET (test): METHOD-SPECIFIC probes
   (probes trained on the unlearned model's own hidden states)
-Method   PL-LR Acc True False Lyr  ...
+Method   PL-LR Acc True Fals Lyr  ...
 ...
 
 TABLE 4 — RETAIN SET: Generation + Logit  (should stay near 1.0)
 Method       RetAcc  RTrue  RFalse   RLogit  RLTrue  RLFalse
+...
+
+TABLE 5 — FORGET SET (test): METHOD probes applied to BASE-model hidden states
+  (cross-quadrant: do unlearned-model directions transfer back to the base model?)
+Method   PL-LR Acc True Fals Lyr  ...
+...
+
+TABLE 6 — MCQ DIRECT: Original multiple-choice questions (A/B/C/D)
+Method         Acc   Acc_A  Acc_B  Acc_C  Acc_D    Gib
 ...
 ```
 
@@ -233,7 +248,8 @@ Method       RetAcc  RTrue  RFalse   RLogit  RLTrue  RLFalse
 - `PL-{clf}` — per-layer probe at that classifier's independently chosen best validation layer
 - `ML-{clf}` — multi-layer probe (all layers concatenated, then PCA-256)
 - `Ret*` — retain-set metrics (should stay high)
-- `Gibberish` — fraction of outputs containing neither "True" nor "False"
+- `Gibberish` — fraction of outputs containing neither "True"/"False" (Tables 1–5) or a valid letter A–D (Table 6)
+- `Acc_A/B/C/D` — per-answer-letter accuracy for MCQ questions whose correct answer is that letter
 
 **Tables 2, 3, 5** all share the same column layout — per-layer (PL) and multi-layer (ML) results for LR, RF, and AdaBoost. The distinction is which probes are applied to which hidden states (see the 2×2 matrix above).
 
