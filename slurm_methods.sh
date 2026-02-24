@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:A40:1
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
-#SBATCH --array=0-7
+#SBATCH --array=0-8
 
 echo "Job started at $(date)"
 echo "Running on node: $(hostname), array task: ${SLURM_ARRAY_TASK_ID}"
@@ -24,7 +24,7 @@ mkdir -p logs
 
 # Map array index to method name.
 # Order must match UNLEARNED_MODELS in hidden_knowledge_after_unlearning.py.
-METHODS=("GradDiff" "RMU" "RMU-LAT" "RepNoise" "ELM" "RR" "TAR" "PB&J")
+METHODS=("GradDiff" "RMU" "RMU-LAT" "RepNoise" "ELM" "RR" "TAR" "PB&J" "Llama3-8B")
 METHOD="${METHODS[$SLURM_ARRAY_TASK_ID]}"
 
 echo ""

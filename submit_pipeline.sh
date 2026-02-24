@@ -5,7 +5,7 @@
 #
 #   Stage 0 (sanity)  — one job         — quick padding/decoding sanity checks
 #   Stage 1 (base)    — one job         — processes the base LLaMA model
-#   Stage 2 (methods) — job array [0-7] — one task per unlearning method
+#   Stage 2 (methods) — job array [0-8] — one task per unlearning method + Llama3-8B reference
 #   Stage 3 (summary) — one job         — aggregates results and prints table
 #
 # Usage:
@@ -58,7 +58,7 @@ fi
 # ── Stage 2: methods (job array, depends on base) ─────────────────────────
 echo "Submitting method array (depends on base job ${BASE_JOB})..."
 METHOD_JOB=$(sbatch --parsable --dependency=afterok:${BASE_JOB} slurm_methods.sh)
-echo "  Method array job ID : ${METHOD_JOB}  (tasks 0–7)"
+echo "  Method array job ID : ${METHOD_JOB}  (tasks 0–8)"
 
 # ── Stage 3: summary (depends on all method tasks) ────────────────────────
 echo "Submitting summary stage (depends on method array ${METHOD_JOB})..."
@@ -71,7 +71,7 @@ if ! $SKIP_SANITY; then
     echo "  Stage 0 — sanity  : ${SANITY_JOB}"
 fi
 echo "  Stage 1 — base    : ${BASE_JOB}"
-echo "  Stage 2 — methods : ${METHOD_JOB} (array 0–7)"
+echo "  Stage 2 — methods : ${METHOD_JOB} (array 0–8)"
 echo "  Stage 3 — summary : ${SUMMARY_JOB}"
 echo ""
 echo "Monitor progress with:"
