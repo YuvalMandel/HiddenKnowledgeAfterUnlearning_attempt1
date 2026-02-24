@@ -11,7 +11,7 @@ The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosec
 ### Pipeline overview
 
 ```
-Stage 1: base      ──► Stage 2: methods (×8, parallel) ──► Stage 3: summary
+Stage 1: base      ──► Stage 2: methods (×9, parallel) ──► Stage 3: summary
 ```
 
 #### Stage 1 — Base model (`--stage base`)
@@ -25,7 +25,7 @@ Stage 1: base      ──► Stage 2: methods (×8, parallel) ──► Stage 3:
 8. Save everything to `checkpoints/`.
 
 #### Stage 2 — Unlearned models (`--stage method --method <NAME>`)
-Runs independently for each of the 8 LLM-GAT unlearning methods (all in parallel via SLURM job array):
+Runs independently for each of the 8 LLM-GAT unlearning methods plus the raw `Llama3-8B` reference (9 jobs total, all in parallel via SLURM job array):
 
 1. Load forget pairs from `checkpoints/wmdp_tf_pairs.csv` (created by stage 1).
 2. Extract hidden states of **train / val / test** using the *unlearned* model.
@@ -103,9 +103,15 @@ run_hidden_knowledge.sh                    Convenience alias for submit_pipeline
 slurm_base.sh                              SLURM script for stage 1 (base model)
 slurm_methods.sh                           SLURM job array for stage 2 (8 methods)
 slurm_summary.sh                           SLURM script for stage 3 (summary)
-checkpoints/                               Auto-created; holds .npy, .pkl, .json
-checkpoints/wmdp_tf_pairs.csv              Cached WMDP train/val/test pairs (created on first run)
-logs/                                      Auto-created; SLURM stdout/stderr
+checkpoints/                                 Auto-created; holds .npy, .pkl, .json
+checkpoints/wmdp_tf_pairs.csv               Cached WMDP train/val/test pairs (created on first run)
+checkpoints/summary_table1_gen_logit.csv    Table 1 CSV (generation + logit)
+checkpoints/summary_table2_base_probes.csv  Table 2 CSV (base probes)
+checkpoints/summary_table3_method_probes.csv Table 3 CSV (method-specific probes)
+checkpoints/summary_table4_retain.csv       Table 4 CSV (retain set)
+checkpoints/summary_table5_cross_probes.csv Table 5 CSV (cross-probe quadrant)
+checkpoints/summary_table6_mcq.csv          Table 6 CSV (MCQ direct A/B/C/D)
+logs/                                        Auto-created; SLURM stdout/stderr
 ```
 
 ---
@@ -152,7 +158,7 @@ tail -f logs/summary_<JOBID>.out
 
 The three stages run as:
 - `slurm_base.sh` — 1 × A40, up to 8 h
-- `slurm_methods.sh` — 8 × A40 in parallel (job array), up to 10 h each
+- `slurm_methods.sh` — 9 × A40 in parallel (job array), up to 10 h each
 - `slurm_summary.sh` — CPU-only, 30 min
 
 Stage 2 starts automatically once stage 1 succeeds; stage 3 starts once all stage-2 tasks succeed.
@@ -193,7 +199,7 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 |---|---|---|
 | `BASE_MODEL` | `meta-llama/Meta-Llama-3-8B-Instruct` | Base (un-unlearned) model |
 | `WMDP_CSV_PATH` | `checkpoints/wmdp_tf_pairs.csv` | Cached WMDP pairs; delete to force rebuild |
-| `UNLEARNED_MODELS` | 8 LLM-GAT checkpoints | Dict of method name → HF model ID |
+| `UNLEARNED_MODELS` | 8 LLM-GAT checkpoints + `Llama3-8B` | Dict of method name → HF model ID; includes raw `meta-llama/Meta-Llama-3-8B` as a reference |
 | `FORGET_SUBSET` | `wmdp-bio` | WMDP subset to treat as forget set |
 | `TRAIN_SIZE` | 500 | Questions used to train probes |
 | `VAL_SIZE` | 200 | Questions used to select best probe layer |
@@ -209,7 +215,7 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 
 ## Output
 
-The summary stage prints six tables:
+The summary stage prints six tables and saves each as a CSV under `checkpoints/`:
 
 ```
 TABLE 1 — FORGET SET (test): Generation accuracy + Logit-based metric

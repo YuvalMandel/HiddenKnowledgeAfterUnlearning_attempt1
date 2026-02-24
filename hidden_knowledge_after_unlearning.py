@@ -63,6 +63,7 @@ except ImportError:
 BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 UNLEARNED_MODELS = {
+    # Unlearned variants (LLM-GAT checkpoints, all fine-tuned from the Instruct model)
     "GradDiff": "LLM-GAT/llama-3-8b-instruct-graddiff-checkpoint-8",
     "RMU":      "LLM-GAT/llama-3-8b-instruct-rmu-checkpoint-8",
     "RMU-LAT":  "LLM-GAT/llama-3-8b-instruct-rmu-lat-checkpoint-8",
@@ -71,6 +72,10 @@ UNLEARNED_MODELS = {
     "RR":       "LLM-GAT/llama-3-8b-instruct-rr-checkpoint-8",
     "TAR":      "LLM-GAT/llama-3-8b-instruct-tar-checkpoint-8",
     "PB&J":     "LLM-GAT/llama-3-8b-instruct-pbj-checkpoint-8",
+    # Raw pre-trained model (no instruction fine-tuning) — included as a reference:
+    # generation accuracy will reflect raw continuation rather than instruction following,
+    # but hidden-state probes reveal whether factual knowledge is encoded in representations.
+    "Llama3-8B": "meta-llama/Meta-Llama-3-8B",
 }
 
 RANDOM_SEED = 42
@@ -1011,6 +1016,110 @@ def _prow(d, key, default=0.0):
     return d.get(key, default) if d else default
 
 
+def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
+                      base_mcq=None):
+    """Save all six summary tables as CSV files under CHECKPOINT_DIR."""
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ── Table 1: Generation + Logit ──────────────────────────────────────────
+    t1 = CHECKPOINT_DIR / "summary_table1_gen_logit.csv"
+    with open(t1, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "gen_acc", "gen_true", "gen_false", "gibberish",
+                    "logit_acc", "logit_true", "logit_false"])
+        def _r1(name, g, lo):
+            lo = lo or {}
+            w.writerow([name,
+                        round(g["accuracy"], 4), round(g["true_accuracy"], 4),
+                        round(g["false_accuracy"], 4), round(g["gibberish_rate"], 4),
+                        round(_prow(lo, "accuracy"), 4),
+                        round(_prow(lo, "true_accuracy"), 4),
+                        round(_prow(lo, "false_accuracy"), 4)])
+        _r1("Base", base_gen, base_logit)
+        for method, r in all_results.items():
+            _r1(method, r["gen"], r.get("logit"))
+    print(f"  [CSV] {t1}")
+
+    # ── Tables 2 / 3 / 5: Probe tables (shared schema) ───────────────────────
+    _probe_cols = (
+        ["method"]
+        + [f"pl_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "lyr")]
+        + [f"ml_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+    )
+
+    def _probe_row(name, aps):
+        pl  = aps.get("per_layer",   {}) if aps else {}
+        ml  = aps.get("multi_layer", {}) if aps else {}
+        row = [name]
+        for clf in CLF_NAMES:
+            s = pl.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    s.get("best_layer", "")]
+        for clf in CLF_NAMES:
+            s = ml.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4)]
+        return row
+
+    for tnum, fname, inc_base, key in [
+        (2, "summary_table2_base_probes.csv",   True,  "all_base_probe_stats"),
+        (3, "summary_table3_method_probes.csv",  False, "all_method_probe_stats"),
+        (5, "summary_table5_cross_probes.csv",   False, "all_method_probe_on_base_stats"),
+    ]:
+        path = CHECKPOINT_DIR / fname
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(_probe_cols)
+            if inc_base:
+                w.writerow(_probe_row("Base", base_all_probe_stats))
+            for method, r in all_results.items():
+                w.writerow(_probe_row(method, r.get(key)))
+        print(f"  [CSV] {path}")
+
+    # ── Table 4: Retain set ───────────────────────────────────────────────────
+    t4 = CHECKPOINT_DIR / "summary_table4_retain.csv"
+    with open(t4, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "ret_acc", "ret_true", "ret_false",
+                    "ret_logit_acc", "ret_logit_true", "ret_logit_false"])
+        for method, r in all_results.items():
+            rt = r["retain"]
+            rl = r.get("retain_logit", {})
+            w.writerow([method,
+                        round(rt["accuracy"], 4),
+                        round(rt["true_accuracy"], 4),
+                        round(rt["false_accuracy"], 4),
+                        round(_prow(rl, "accuracy"), 4),
+                        round(_prow(rl, "true_accuracy"), 4),
+                        round(_prow(rl, "false_accuracy"), 4)])
+    print(f"  [CSV] {t4}")
+
+    # ── Table 6: MCQ direct ───────────────────────────────────────────────────
+    t6 = CHECKPOINT_DIR / "summary_table6_mcq.csv"
+    with open(t6, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "mcq_acc", "acc_a", "acc_b", "acc_c", "acc_d", "gibberish"])
+        def _r6(name, ms):
+            if ms is None:
+                w.writerow([name] + ["N/A"] * 6)
+                return
+            pl = ms.get("per_letter", {})
+            w.writerow([name,
+                        round(ms["accuracy"], 4),
+                        round(pl.get("A", 0), 4), round(pl.get("B", 0), 4),
+                        round(pl.get("C", 0), 4), round(pl.get("D", 0), 4),
+                        round(ms["gibberish_rate"], 4)])
+        _r6("Base", base_mcq)
+        for method, r in all_results.items():
+            _r6(method, r.get("mcq"))
+    print(f"  [CSV] {t6}")
+
+
 def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                         base_mcq=None):
     W   = 120
@@ -1138,6 +1247,11 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
     for method, r in all_results.items():
         _row6(method, r.get("mcq"))
     print(sep)
+
+    # ── Save all tables as CSV ────────────────────────────────────────────────
+    print(f"\nSaving summary CSVs to {CHECKPOINT_DIR}/...")
+    save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
+                      base_mcq=base_mcq)
 
 
 # =============================================================================
