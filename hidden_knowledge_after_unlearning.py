@@ -111,6 +111,20 @@ PCA_DIMS_MULTI     = 256   # for all multi-layer pipelines
 MULTI_LAYER_START = 12
 MULTI_LAYER_END   = 22
 
+# Checkpoint sweep — HF repo slug for each method.
+# Maps display name → the segment between "instruct-" and "-checkpoint-N" in the repo ID.
+SWEEP_SLUGS = {
+    "GradDiff": "graddiff",
+    "RMU":      "rmu",
+    "RMU-LAT":  "rmu-lat",
+    "RepNoise": "repnoise",
+    "ELM":      "elm",
+    "RR":       "rr",
+    "TAR":      "tar",
+    "PB&J":     "pbj",
+}
+N_SWEEP_CHECKPOINTS = 8   # checkpoints 1 … N (inclusive)
+
 CLF_NAMES = ["LR", "RF", "AdaBoost"]
 
 CHECKPOINT_DIR = Path("checkpoints")
@@ -2130,6 +2144,441 @@ def run_summary():
 
 
 # =============================================================================
+# Checkpoint sweep — unlearning evolution over training checkpoints
+# =============================================================================
+
+def sweep_model_id(method_name: str, ck_num: int) -> str:
+    """HuggingFace repo ID for a specific training checkpoint of a method."""
+    return f"LLM-GAT/llama-3-8b-instruct-{SWEEP_SLUGS[method_name]}-checkpoint-{ck_num}"
+
+
+def _ck_dir(method_name: str, ck_num: int) -> Path:
+    return CHECKPOINT_DIR / f"sweep_{safe_name(method_name)}" / f"ck{ck_num}"
+
+
+def _load_sweep_partial(ck_d: Path) -> dict:
+    path = ck_d / "partial.json"
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_sweep_partial(ck_d: Path, updates: dict):
+    ck_d.mkdir(parents=True, exist_ok=True)
+    path = ck_d / "partial.json"
+    state = _load_sweep_partial(ck_d)
+    state.update(updates)
+    with open(path, "w") as f:
+        json.dump(state, f)
+    print(f"  [sweep cache] {ck_d.name}/partial.json updated", flush=True)
+
+
+def _sweep_complete(r: dict) -> bool:
+    return {"gen", "logit", "all_base_probe_stats", "all_method_probe_stats", "mcq"}.issubset(
+        r.keys()
+    )
+
+
+def _sw(d, k):
+    """Safe float getter for a stats dict that may be None or missing a key."""
+    return float(d.get(k, 0.0)) if d else 0.0
+
+
+def print_sweep_table(method_name: str, results: list):
+    """Print a compact time-series table: rows = checkpoints, cols = key metrics."""
+    W      = 140
+    sep    = "=" * W
+    has_mp = any("all_method_probe_stats" in r for r in results)
+
+    print(f"\n{sep}")
+    print(f"SWEEP TABLE — {method_name}: unlearning evolution over {len(results)} checkpoints")
+    print(sep)
+    hdr = (
+        f"{'Ck':>3}  "
+        f"{'GenAcc':>6} {'GTru':>5} {'GFal':>5} {'Gib':>5}  "
+        f"{'LogAcc':>6} {'LTru':>5} {'LFal':>5}  "
+        f"{'MCQAcc':>6} {'MGib':>5}"
+        f"  BP-LR  Acc  True  Fals"
+        f"  BP-RF  Acc  True  Fals"
+        f"  BP-Ada Acc  True  Fals"
+    )
+    if has_mp:
+        hdr += (
+            f"  MP-LR  Acc  True  Fals"
+            f"  MP-RF  Acc  True  Fals"
+            f"  MP-Ada Acc  True  Fals"
+        )
+    print(hdr)
+    print("-" * W)
+
+    for r in results:
+        ck  = r["checkpoint"]
+        g   = r.get("gen",   {})
+        lo  = r.get("logit", {})
+        mcq = r.get("mcq",   {})
+        bp  = r.get("all_base_probe_stats", {})
+        row = (
+            f"{ck:>3}  "
+            f"{_sw(g,'accuracy'):6.3f} {_sw(g,'true_accuracy'):5.3f}"
+            f" {_sw(g,'false_accuracy'):5.3f} {_sw(g,'gibberish_rate'):5.3f}  "
+            f"{_sw(lo,'accuracy'):6.3f} {_sw(lo,'true_accuracy'):5.3f}"
+            f" {_sw(lo,'false_accuracy'):5.3f}  "
+            f"{_sw(mcq,'accuracy'):6.3f} {_sw(mcq,'gibberish_rate'):5.3f}"
+        )
+        for clf in CLF_NAMES:
+            s = bp.get("per_layer", {}).get(clf, {}) if bp else {}
+            row += (f"  {_sw(s,'accuracy'):5.3f} {_sw(s,'true_accuracy'):5.3f}"
+                    f" {_sw(s,'false_accuracy'):5.3f}")
+        if has_mp:
+            mp = r.get("all_method_probe_stats", {})
+            for clf in CLF_NAMES:
+                s = mp.get("per_layer", {}).get(clf, {}) if mp else {}
+                row += (f"  {_sw(s,'accuracy'):5.3f} {_sw(s,'true_accuracy'):5.3f}"
+                        f" {_sw(s,'false_accuracy'):5.3f}")
+        print(row)
+
+    print(sep)
+
+
+def save_sweep_csv(method_name: str, results: list):
+    """Save sweep results to checkpoints/sweep_{method}/{method}_sweep.csv."""
+    sweep_d = CHECKPOINT_DIR / f"sweep_{safe_name(method_name)}"
+    sweep_d.mkdir(parents=True, exist_ok=True)
+    path    = sweep_d / f"{safe_name(method_name)}_sweep.csv"
+    has_mp  = any("all_method_probe_stats" in r for r in results)
+
+    def _probe_block(aps):
+        row = []
+        for clf in CLF_NAMES:
+            s = aps.get("per_layer",     {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4), s.get("best_layer", "")]
+        for clf in CLF_NAMES:
+            s = aps.get("multi_layer",   {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("vote_ensemble", {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("avg_ensemble",  {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4)]
+        return row
+
+    def _probe_cols(pfx):
+        return (
+            [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+             for k in ("pl_acc", "pl_true", "pl_fals", "pl_lyr")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("ml_acc", "ml_true", "ml_fals")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("vote_acc", "vote_true", "vote_fals")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("avg_acc", "avg_true", "avg_fals")]
+        )
+
+    cols = (
+        ["checkpoint", "model_id",
+         "gen_acc", "gen_true", "gen_false", "gen_gib",
+         "logit_acc", "logit_true", "logit_false",
+         "mcq_acc", "mcq_gib"]
+        + _probe_cols("bp")
+        + (_probe_cols("mp") if has_mp else [])
+    )
+
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for r in results:
+            g   = r.get("gen",   {})
+            lo  = r.get("logit", {})
+            mcq = r.get("mcq",   {})
+            ck  = r["checkpoint"]
+            row = (
+                [ck, sweep_model_id(method_name, ck),
+                 round(_sw(g,  "accuracy"), 4), round(_sw(g,  "true_accuracy"), 4),
+                 round(_sw(g,  "false_accuracy"), 4), round(_sw(g, "gibberish_rate"), 4),
+                 round(_sw(lo, "accuracy"), 4), round(_sw(lo, "true_accuracy"), 4),
+                 round(_sw(lo, "false_accuracy"), 4),
+                 round(_sw(mcq,"accuracy"), 4), round(_sw(mcq,"gibberish_rate"), 4)]
+                + _probe_block(r.get("all_base_probe_stats", {}))
+                + (_probe_block(r.get("all_method_probe_stats", {})) if has_mp else [])
+            )
+            w.writerow(row)
+    print(f"  [sweep CSV] {path}", flush=True)
+
+
+def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
+                               base_probe_set: dict,
+                               train_pairs: list, val_pairs: list,
+                               test_pairs: list, mcq_pairs_v: list,
+                               y_train: np.ndarray, y_val: np.ndarray,
+                               y_test: np.ndarray,
+                               multi_layer_start: int,
+                               multi_layer_end: int) -> dict:
+    """
+    Run (or resume) a single sweep checkpoint.  Returns its results dict.
+    Always trains and evaluates both base probes and per-checkpoint method probes.
+    """
+    sn       = safe_name(method_name)
+    model_id = sweep_model_id(method_name, ck_num)
+    ck_d     = _ck_dir(method_name, ck_num)
+    ck_d.mkdir(parents=True, exist_ok=True)
+    results_path = ck_d / "results.json"
+
+    print(f"\n{'─'*60}")
+    print(f"  Checkpoint {ck_num}  — {model_id}")
+    print(f"{'─'*60}")
+
+    # Complete cache hit?
+    if results_path.exists():
+        with open(results_path) as f:
+            r = json.load(f)
+        if _sweep_complete(r):
+            print(f"  [sweep] ck{ck_num} complete — loading from cache.")
+            return r
+
+    # ── Load cached arrays & partial state ────────────────────────────────────
+    partial   = _load_sweep_partial(ck_d)
+    hs_test   = _load_npy(ck_d / "hs_test.npy")
+    hs_train  = _load_npy(ck_d / "hs_train.npy")
+    hs_val    = _load_npy(ck_d / "hs_val.npy")
+
+    # ── Load cached per-checkpoint probes ─────────────────────────────────────
+    probe_set  = None
+    probe_path = ck_d / "probes.pkl"
+    if probe_path.exists():
+        with open(probe_path, "rb") as f:
+            ps = pickle.load(f)
+        if isinstance(ps, dict) and "per_layer" in ps:
+            probe_set = ps
+
+    # ── Decide what still needs the model ──────────────────────────────────────
+    need_hs  = hs_test is None or hs_train is None or hs_val is None
+    need_gen = "test_answers"     not in partial
+    need_log = "logit_scores"     not in partial
+    need_mcq = "mcq_test_answers" not in partial
+
+    if need_hs or need_gen or need_log or need_mcq:
+        print(f"  Loading model  {model_id} …")
+        m_tok, m_model = load_model_and_tokenizer(model_id)
+
+        if need_hs:
+            if hs_train is None:
+                hs_train = extract_hidden_states(
+                    m_model, m_tok, train_pairs,
+                    HIDDEN_STATE_BATCH_SIZE, f"sweep/{sn}/ck{ck_num}/train")
+                np.save(ck_d / "hs_train.npy", hs_train)
+                print(f"  [sweep] ck{ck_num} hs_train saved.", flush=True)
+            if hs_val is None:
+                hs_val = extract_hidden_states(
+                    m_model, m_tok, val_pairs,
+                    HIDDEN_STATE_BATCH_SIZE, f"sweep/{sn}/ck{ck_num}/val")
+                np.save(ck_d / "hs_val.npy", hs_val)
+                print(f"  [sweep] ck{ck_num} hs_val saved.", flush=True)
+            if hs_test is None:
+                hs_test = extract_hidden_states(
+                    m_model, m_tok, test_pairs,
+                    HIDDEN_STATE_BATCH_SIZE, f"sweep/{sn}/ck{ck_num}/test")
+                np.save(ck_d / "hs_test.npy", hs_test)
+                print(f"  [sweep] ck{ck_num} hs_test saved.", flush=True)
+
+        if need_gen:
+            print(f"\n  Generating answers — ck{ck_num}")
+            test_answers = batch_generate(
+                m_model, m_tok, test_pairs,
+                GENERATION_BATCH_SIZE, f"sweep/{sn}/ck{ck_num}/gen")
+            _save_sweep_partial(ck_d, {"test_answers": test_answers})
+        else:
+            test_answers = partial["test_answers"]
+
+        if need_log:
+            true_ids, false_ids = get_tf_token_ids(m_tok)
+            print(f"\n  Logit scoring — ck{ck_num}")
+            logit_scores = logit_tf_scores(
+                m_model, m_tok, test_pairs,
+                LOGIT_BATCH_SIZE, true_ids, false_ids,
+                f"sweep/{sn}/ck{ck_num}/logit")
+            _save_sweep_partial(ck_d, {"logit_scores": logit_scores})
+        else:
+            logit_scores = partial["logit_scores"]
+
+        if need_mcq:
+            print(f"\n  MCQ scoring — ck{ck_num}")
+            mcq_answers = batch_generate(
+                m_model, m_tok, mcq_pairs_v,
+                GENERATION_BATCH_SIZE, f"sweep/{sn}/ck{ck_num}/mcq")
+            _save_sweep_partial(ck_d, {"mcq_test_answers": mcq_answers})
+        else:
+            mcq_answers = partial["mcq_test_answers"]
+
+        del m_model, m_tok
+        import gc as _gc; _gc.collect()
+        torch.cuda.empty_cache()
+
+    else:
+        test_answers = partial["test_answers"]
+        logit_scores = partial["logit_scores"]
+        mcq_answers  = partial["mcq_test_answers"]
+
+    # ── Train per-checkpoint probes if not already cached ─────────────────────
+    if probe_set is None:
+        print(f"\n  Training per-checkpoint probes — ck{ck_num}")
+        probe_set = train_probe_set(
+            hs_train, y_train, hs_val, y_val,
+            label=f"{sn}/ck{ck_num}",
+            multi_layer_start=multi_layer_start,
+            multi_layer_end=multi_layer_end)
+        with open(probe_path, "wb") as f:
+            pickle.dump(probe_set, f)
+        print(f"  [sweep] ck{ck_num} probes saved.", flush=True)
+
+    # ── Compute and save stats ─────────────────────────────────────────────────
+    r = {
+        "checkpoint":             ck_num,
+        "model_id":               model_id,
+        "gen":                    generation_stats(test_answers, test_pairs),
+        "logit":                  logit_stats(logit_scores,      test_pairs),
+        "mcq":                    mcq_gen_stats(mcq_answers,     mcq_pairs_v),
+        "all_base_probe_stats":   compute_all_probe_stats(base_probe_set, hs_test, y_test),
+        "all_method_probe_stats": compute_all_probe_stats(probe_set,      hs_test, y_test),
+    }
+    with open(results_path, "w") as f:
+        json.dump(r, f)
+    print(f"  [sweep] ck{ck_num} results saved.", flush=True)
+    return r
+
+
+def _sweep_load_shared(method_name: str):
+    """Load the shared inputs needed by every sweep checkpoint for one method."""
+    base = load_base_checkpoint(load_hs=False)
+    if base is None:
+        raise RuntimeError("Base checkpoint not found — run --stage base first.")
+
+    csv_result = load_tf_pairs_from_csv()
+    if csv_result is None:
+        raise RuntimeError(f"{WMDP_CSV_PATH} not found — run --stage base first.")
+    train_pairs, val_pairs, test_pairs = csv_result
+
+    seen_ids: set = set()
+    test_questions = []
+    for p in test_pairs:
+        oid = p.get("original_id", -1)
+        if oid not in seen_ids:
+            seen_ids.add(oid)
+            test_questions.append({
+                "question": p["question"],
+                "choices":  p["choices"],
+                "answer":   p["correct_idx"],
+            })
+
+    return (
+        base["probe_set"],
+        train_pairs, val_pairs, test_pairs,
+        make_mcq_pairs(test_questions),
+        pairs_to_labels(train_pairs),
+        pairs_to_labels(val_pairs),
+        pairs_to_labels(test_pairs),
+    )
+
+
+def run_sweep_checkpoint(method_name: str, ck_num: int,
+                          multi_layer_start: int = MULTI_LAYER_START,
+                          multi_layer_end:   int = MULTI_LAYER_END):
+    """
+    Evaluate a single training checkpoint for one unlearning method.
+    Probes: (1) base-model probes, (2) probes trained on this checkpoint's own hs.
+    Designed to be run as an independent parallel SLURM task.
+    """
+    if method_name not in SWEEP_SLUGS:
+        raise ValueError(f"No sweep slug for '{method_name}'. Available: {list(SWEEP_SLUGS)}")
+
+    print(f"\n{'='*60}")
+    print(f"CHECKPOINT SWEEP — {method_name}  checkpoint {ck_num}")
+    print(f"  multi_layer_range  = [{multi_layer_start}, {multi_layer_end}]")
+    print(f"{'='*60}\n")
+
+    (base_probe_set, train_pairs, val_pairs, test_pairs, mcq_pairs_v,
+     y_train, y_val, y_test) = _sweep_load_shared(method_name)
+
+    _run_one_sweep_checkpoint(
+        method_name, ck_num,
+        base_probe_set,
+        train_pairs, val_pairs, test_pairs, mcq_pairs_v,
+        y_train, y_val, y_test,
+        multi_layer_start, multi_layer_end,
+    )
+    print(f"\n[sweep] Checkpoint {ck_num} for {method_name} complete.")
+
+
+def run_sweep(method_name: str,
+              n_checkpoints: int = N_SWEEP_CHECKPOINTS,
+              multi_layer_start: int = MULTI_LAYER_START,
+              multi_layer_end:   int = MULTI_LAYER_END):
+    """
+    Evaluate all n_checkpoints for one method sequentially (local/fallback use).
+    Prints SWEEP TABLE and saves CSV when done.
+    """
+    if method_name not in SWEEP_SLUGS:
+        raise ValueError(f"No sweep slug for '{method_name}'. Available: {list(SWEEP_SLUGS)}")
+
+    sn = safe_name(method_name)
+    print(f"\n{'='*60}")
+    print(f"CHECKPOINT SWEEP — {method_name}  (checkpoints 1..{n_checkpoints})")
+    print(f"  multi_layer_range  = [{multi_layer_start}, {multi_layer_end}]")
+    print(f"{'='*60}\n")
+
+    (base_probe_set, train_pairs, val_pairs, test_pairs, mcq_pairs_v,
+     y_train, y_val, y_test) = _sweep_load_shared(method_name)
+
+    all_results = []
+    for ck_num in range(1, n_checkpoints + 1):
+        r = _run_one_sweep_checkpoint(
+            method_name, ck_num,
+            base_probe_set,
+            train_pairs, val_pairs, test_pairs, mcq_pairs_v,
+            y_train, y_val, y_test,
+            multi_layer_start, multi_layer_end,
+        )
+        all_results.append(r)
+
+    print_sweep_table(method_name, all_results)
+    save_sweep_csv(method_name, all_results)
+
+
+def run_sweep_summary(method_name: str, n_checkpoints: int = N_SWEEP_CHECKPOINTS):
+    """
+    Load cached sweep results for all checkpoints, print the SWEEP TABLE, and
+    save the CSV.  No GPU required — pure I/O and CPU stats.
+    """
+    if method_name not in SWEEP_SLUGS:
+        raise ValueError(f"No sweep slug for '{method_name}'. Available: {list(SWEEP_SLUGS)}")
+
+    print(f"\n{'='*60}")
+    print(f"CHECKPOINT SWEEP SUMMARY — {method_name}")
+    print(f"{'='*60}\n")
+
+    all_results = []
+    for ck_num in range(1, n_checkpoints + 1):
+        results_path = _ck_dir(method_name, ck_num) / "results.json"
+        if not results_path.exists():
+            print(f"  WARNING: ck{ck_num} results.json not found — skipping.")
+            continue
+        with open(results_path) as f:
+            all_results.append(json.load(f))
+
+    if not all_results:
+        print(f"  No sweep results found for {method_name}.")
+        return
+
+    print_sweep_table(method_name, all_results)
+    save_sweep_csv(method_name, all_results)
+
+
+# =============================================================================
 # Sanity checks
 # =============================================================================
 
@@ -2305,10 +2754,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--stage", choices=["base", "method", "summary", "sanity"],
+    parser.add_argument("--stage",
+                        choices=["base", "method", "summary", "sanity",
+                                 "sweep", "sweep_checkpoint", "sweep_summary"],
                         required=True, help="Pipeline stage to run")
     parser.add_argument("--method", default=None,
-                        help="Unlearning method name for --stage method "
+                        help="Unlearning method name for --stage method/sweep* "
                              f"(one of: {', '.join(UNLEARNED_MODELS)})")
     parser.add_argument("--multi_layer_start", type=int, default=MULTI_LAYER_START,
                         help=f"First layer index (inclusive) for multi-layer probe "
@@ -2316,6 +2767,12 @@ def main():
     parser.add_argument("--multi_layer_end", type=int, default=MULTI_LAYER_END,
                         help=f"Last layer index (inclusive) for multi-layer probe "
                              f"concatenation (default: {MULTI_LAYER_END})")
+    parser.add_argument("--n_checkpoints", type=int, default=N_SWEEP_CHECKPOINTS,
+                        help=f"Number of training checkpoints to evaluate in sweep "
+                             f"(default: {N_SWEEP_CHECKPOINTS})")
+    parser.add_argument("--checkpoint", type=int, default=None,
+                        help="Sweep: evaluate only this specific checkpoint number "
+                             "(used by the parallel SLURM job array; 1-based)")
     args = parser.parse_args()
 
     if args.stage == "base":
@@ -2331,6 +2788,25 @@ def main():
         run_summary()
     elif args.stage == "sanity":
         run_sanity_checks()
+    elif args.stage in ("sweep", "sweep_checkpoint"):
+        if args.method is None:
+            parser.error("--method is required when --stage sweep* is used.")
+        if args.checkpoint is not None:
+            # Single-checkpoint mode — designed for parallel SLURM tasks.
+            run_sweep_checkpoint(args.method,
+                                 ck_num=args.checkpoint,
+                                 multi_layer_start=args.multi_layer_start,
+                                 multi_layer_end=args.multi_layer_end)
+        else:
+            # Sequential mode — runs all checkpoints in one job.
+            run_sweep(args.method,
+                      n_checkpoints=args.n_checkpoints,
+                      multi_layer_start=args.multi_layer_start,
+                      multi_layer_end=args.multi_layer_end)
+    elif args.stage == "sweep_summary":
+        if args.method is None:
+            parser.error("--method is required when --stage sweep_summary is used.")
+        run_sweep_summary(args.method, n_checkpoints=args.n_checkpoints)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,10 @@ The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosec
 
 ```
 Stage 1: base      ──► Stage 2: methods (×9, parallel) ──► Stage 3: summary
+                   └── Stage 4: sweep  (×8, parallel)
 ```
+
+Stage 4 (sweep) is independent of stages 2–3 and only requires stage 1 to have finished.
 
 #### Stage 1 — Base model (`--stage base`)
 1. Load and split WMDP-bio questions into **train / val / test** (500 / 200 / rest).
@@ -41,6 +44,28 @@ Runs independently for each of the 8 LLM-GAT unlearning methods plus the raw `Ll
 Loads all checkpoints (no GPU needed) and prints:
 - Per-method sample Q&A comparisons
 - Six summary tables (see Output section)
+
+#### Stage 4 — Checkpoint sweep
+
+Three sweep sub-stages:
+
+| Sub-stage | CLI flag | GPU | Purpose |
+|---|---|---|---|
+| Single checkpoint | `--stage sweep --method M --checkpoint N` | Yes | Run one (method, checkpoint) pair — used by the parallel SLURM array |
+| Sequential sweep | `--stage sweep --method M` | Yes | Run all 8 checkpoints in one job (local / fallback) |
+| Summary | `--stage sweep_summary --method M` | No | Load cached results and print table / save CSV |
+
+For each checkpoint the sweep:
+1. Extracts **train, val, and test hidden states** from that checkpoint.
+2. Runs **generation**, **logit scoring**, and **MCQ** on the test set.
+3. Evaluates two probe sets:
+   - **Base probes** — trained on the base instruct model (loaded from stage 1, no retraining).
+   - **Per-checkpoint probes** — trained on this checkpoint's own hidden states.
+4. Caches all arrays and results under `checkpoints/sweep_{method}/ck{N}/` for safe resumption.
+
+Output (after `sweep_summary`):
+- **Printed SWEEP TABLE** — rows = checkpoints 1–8, columns = generation accuracy, logit accuracy, MCQ accuracy, base-probe and method-probe accuracies.
+- **`checkpoints/sweep_{method}/{method}_sweep.csv`** — same data as a CSV for plotting.
 
 ### Probe types
 
@@ -99,10 +124,13 @@ Respond with only 'True' or 'False'.
 ```
 hidden_knowledge_after_unlearning.py       Main Python script (all stages)
 submit_pipeline.sh                         Submit all jobs with SLURM dependencies
+submit_sweep.sh                            Submit checkpoint-sweep jobs (stage 4)
 run_hidden_knowledge.sh                    Convenience alias for submit_pipeline.sh
 slurm_base.sh                              SLURM script for stage 1 (base model)
 slurm_methods.sh                           SLURM job array for stage 2 (8 methods)
 slurm_summary.sh                           SLURM script for stage 3 (summary)
+slurm_sweep.sh                             SLURM job array for stage 4 (64 tasks: 8 methods × 8 checkpoints)
+slurm_sweep_summary.sh                     SLURM job array for sweep_summary (8 tasks, CPU-only)
 checkpoints/                                 Auto-created; holds .npy, .pkl, .json
 checkpoints/wmdp_tf_pairs.csv               Cached WMDP train/val/test pairs (created on first run)
 checkpoints/summary_table1_gen_logit.csv    Table 1 CSV (generation + logit)
@@ -111,6 +139,9 @@ checkpoints/summary_table3_method_probes.csv Table 3 CSV (method-specific probes
 checkpoints/summary_table4_retain.csv       Table 4 CSV (retain set)
 checkpoints/summary_table5_cross_probes.csv Table 5 CSV (cross-probe quadrant)
 checkpoints/summary_table6_mcq.csv          Table 6 CSV (MCQ direct A/B/C/D)
+checkpoints/sweep_METHOD/                      Sweep results for one method
+checkpoints/sweep_METHOD/ckN/                  Per-checkpoint cache: hs_train/val/test.npy, partial.json, probes.pkl, results.json
+checkpoints/sweep_METHOD/METHOD_sweep.csv      Time-series CSV (one row per checkpoint, written by sweep_summary)
 logs/                                        Auto-created; SLURM stdout/stderr
 ```
 
@@ -144,7 +175,7 @@ huggingface-cli login
 ### On a SLURM cluster (recommended)
 
 ```bash
-# Submit all three stages with automatic job dependencies:
+# Submit all three main stages with automatic job dependencies:
 bash submit_pipeline.sh
 
 # Monitor:
@@ -163,6 +194,36 @@ The three stages run as:
 
 Stage 2 starts automatically once stage 1 succeeds; stage 3 starts once all stage-2 tasks succeed.
 
+### Running the checkpoint sweep
+
+```bash
+# After stage 1 (base) has completed:
+
+# Submit all 64 parallel jobs (8 methods × 8 checkpoints):
+bash submit_sweep.sh
+
+# Submit + auto-submit summary jobs after all 64 complete:
+bash submit_sweep.sh --summary
+
+# One method only (8 parallel jobs):
+bash submit_sweep.sh --method GradDiff
+
+# Single (method, checkpoint) job:
+bash submit_sweep.sh --method GradDiff --checkpoint 3
+
+# After sweep jobs finish — print tables and save CSVs (no GPU):
+bash submit_sweep.sh --summary         # or submit summary array directly:
+sbatch --array=0-7 slurm_sweep_summary.sh
+
+# Logs:
+tail -f logs/sweep_<TASK>_<JOBID>.out
+tail -f logs/sweep_sum_<TASK>_<JOBID>.out
+```
+
+The sweep runs as a **64-task SLURM array** (`slurm_sweep.sh`, tasks 0–63).
+Each task handles one (method, checkpoint) pair independently — all 64 can run in parallel.
+After all sweep tasks finish, run `sweep_summary` (CPU-only) per method to produce the table and CSV.
+
 ### Running a single method manually
 
 ```bash
@@ -177,6 +238,14 @@ python hidden_knowledge_after_unlearning.py --stage base
 python hidden_knowledge_after_unlearning.py --stage method --method GradDiff
 # ... repeat for each method ...
 python hidden_knowledge_after_unlearning.py --stage summary
+
+# Checkpoint sweep (stage 4) — run after stage 1:
+# Sequential (all 8 checkpoints in one process):
+python hidden_knowledge_after_unlearning.py --stage sweep --method GradDiff
+# Single checkpoint only:
+python hidden_knowledge_after_unlearning.py --stage sweep --method GradDiff --checkpoint 3
+# Print table from cached results (no GPU):
+python hidden_knowledge_after_unlearning.py --stage sweep_summary --method GradDiff
 ```
 
 ### Resubmitting after preemption
@@ -210,6 +279,7 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | `MAX_NEW_TOKENS` | 64 | Max tokens generated per prompt |
 | `PCA_DIMS_PER_LAYER` | 64 | PCA components before RF/AdaBoost per-layer probes |
 | `PCA_DIMS_MULTI` | 256 | PCA components for all multi-layer probes |
+| `N_SWEEP_CHECKPOINTS` | 8 | Number of training checkpoints evaluated in `--stage sweep` |
 
 ---
 
@@ -260,3 +330,24 @@ Method         Acc   Acc_A  Acc_B  Acc_C  Acc_D    Gib
 **Tables 2, 3, 5** all share the same column layout — per-layer (PL) and multi-layer (ML) results for LR, RF, and AdaBoost. The distinction is which probes are applied to which hidden states (see the 2×2 matrix above).
 
 **Note on old checkpoints:** If a method checkpoint was created before Table 5 was added, the method stage will automatically compute the missing cross-probe stats from the saved probes and `base_hs_test.npy` without a full rerun.
+
+### Stage 4 — Sweep output
+
+```
+SWEEP TABLE — GradDiff: unlearning evolution over 8 checkpoints
+Ck  GenAcc  GTru  GFal   Gib  LogAcc  LTru  LFal  MCQAcc  MGib  BP-LR Acc True Fals  BP-RF ...
+─────────────────────────────────────────────────────────────────────────────────────────────
+ 1   0.XXX  0.XXX 0.XXX 0.XXX  0.XXX 0.XXX 0.XXX  0.XXX 0.XXX  0.XXX 0.XXX 0.XXX  ...
+ 2   ...
+ ...
+ 8   ...
+```
+
+**Column groups:**
+- `GenAcc / GTru / GFal / Gib` — generation accuracy (overall / true-label / false-label / gibberish)
+- `LogAcc / LTru / LFal` — logit-based accuracy (no decoding)
+- `MCQAcc / MGib` — multiple-choice (A/B/C/D) accuracy and gibberish rate
+- `BP-LR/RF/Ada` — base-probe per-layer accuracy for each classifier at its best validation layer
+- `MP-LR/RF/Ada` — method-probe per-layer accuracy (only when `--method_probes` is passed)
+
+The CSV (`checkpoints/sweep_<method>/<method>_sweep.csv`) also includes multi-layer, vote-ensemble, and avg-ensemble columns for each classifier and probe family.
