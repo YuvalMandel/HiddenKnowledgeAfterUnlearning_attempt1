@@ -233,17 +233,22 @@ def make_plot(checkpoint_dir: Path, out_path: Path, clf_filter: list):
     )
     legend_labels.append("Chance (0.5)")
 
+    # Reserve space on the right for the legend and at the bottom for x-axis labels.
+    # tight_layout() alone clips the bottom when a figure-level legend is placed
+    # outside the axes, so we use explicit margins instead.
+    right_margin = 0.78 if n_clfs == 3 else (0.72 if n_clfs == 2 else 0.65)
+    fig.subplots_adjust(left=0.06, right=right_margin, bottom=0.13, top=0.93)
+
     fig.legend(
         legend_handles, legend_labels,
         loc="center left",
-        bbox_to_anchor=(1.0, 0.5),
+        bbox_to_anchor=(right_margin + 0.01, 0.5),
         fontsize=9,
         framealpha=0.9,
         title="Model",
         title_fontsize=9,
     )
 
-    plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\nSaved → {out_path}")
 
