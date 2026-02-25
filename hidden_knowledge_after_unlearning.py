@@ -949,6 +949,74 @@ def _pipe_stats(pipe: Pipeline, X: np.ndarray, labels: np.ndarray) -> dict:
     }
 
 
+def _preds_stats(preds: np.ndarray, labels: np.ndarray) -> dict:
+    """Same as _pipe_stats but takes a pre-computed prediction array."""
+    yes_mask = labels == 1
+    no_mask  = labels == 0
+    return {
+        "accuracy":      float((preds == labels).mean()),
+        "true_accuracy": float((preds[yes_mask] == 1).mean()) if yes_mask.any() else 0.0,
+        "false_accuracy":float((preds[no_mask]  == 0).mean()) if no_mask.any()  else 0.0,
+    }
+
+
+def _ensemble_stats(probe_set: dict, hs_test: np.ndarray,
+                    y_test: np.ndarray) -> dict:
+    """
+    Two layer-ensemble classifiers over the multi_layer_range, per clf type.
+
+    vote  — majority vote: each per-layer probe casts a 0/1 vote;
+            final prediction = 1 iff more than half the layers vote 1.
+    avg   — average probability: average predict_proba (or sigmoid of
+            decision_function) across layers, then threshold at 0.5.
+
+    Returns:
+    {
+      "vote": {"LR": {accuracy, true_accuracy, false_accuracy}, ...},
+      "avg":  {"LR": {...}, ...},
+    }
+    """
+    ml_start, ml_end = probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1))
+    layer_range = range(ml_start, ml_end + 1)
+    empty = {"accuracy": 0.0, "true_accuracy": 0.0, "false_accuracy": 0.0}
+    result = {"vote": {}, "avg": {}}
+
+    for clf_name in CLF_NAMES:
+        layer_probes = probe_set["per_layer"].get(clf_name, {})
+        votes_list = []
+        proba_list = []
+
+        for l in layer_range:
+            pipe = layer_probes.get(l)
+            if pipe is None:
+                continue
+            X = hs_test[:, l, :]
+            votes_list.append(pipe.predict(X))
+            if hasattr(pipe, "predict_proba"):
+                proba_list.append(pipe.predict_proba(X)[:, 1])
+            else:
+                scores = pipe.decision_function(X)
+                proba_list.append(1.0 / (1.0 + np.exp(-scores)))
+
+        if not votes_list:
+            result["vote"][clf_name] = empty
+            result["avg"][clf_name]  = empty
+            continue
+
+        # Winner-takes-all: majority vote
+        votes_arr  = np.stack(votes_list, axis=0)          # (n_layers, n_test)
+        vote_preds = (votes_arr.sum(axis=0) > len(votes_list) / 2).astype(int)
+
+        # Average probability then threshold
+        avg_proba = np.stack(proba_list, axis=0).mean(axis=0)  # (n_test,)
+        avg_preds = (avg_proba >= 0.5).astype(int)
+
+        result["vote"][clf_name] = _preds_stats(vote_preds, y_test)
+        result["avg"][clf_name]  = _preds_stats(avg_preds,  y_test)
+
+    return result
+
+
 def compute_all_probe_stats(probe_set: dict,
                             hs_test:   np.ndarray,
                             y_test:    np.ndarray) -> dict:
@@ -966,7 +1034,15 @@ def compute_all_probe_stats(probe_set: dict,
         "LR":       {"accuracy": f, "true_accuracy": f, "false_accuracy": f},
         "RF":       {...},
         "AdaBoost": {...},
-      }
+      },
+      "vote_ensemble": {
+        "LR":       {"accuracy": f, "true_accuracy": f, "false_accuracy": f},
+        ...
+      },
+      "avg_ensemble": {
+        "LR":       {"accuracy": f, "true_accuracy": f, "false_accuracy": f},
+        ...
+      },
     }
     """
     n_test = len(hs_test)
@@ -984,6 +1060,10 @@ def compute_all_probe_stats(probe_set: dict,
     for clf_name in CLF_NAMES:
         pipe = probe_set["multi_layer"][clf_name]
         result["multi_layer"][clf_name] = _pipe_stats(pipe, X_flat, y_test)
+
+    ens = _ensemble_stats(probe_set, hs_test, y_test)
+    result["vote_ensemble"] = ens["vote"]
+    result["avg_ensemble"]  = ens["avg"]
 
     return result
 
@@ -1050,7 +1130,7 @@ def print_logit_stats(label, stats):
 
 
 def print_probe_stats_all(label, all_ps):
-    """Print per-layer and multi-layer probe stats for all classifier types."""
+    """Print per-layer, multi-layer, and ensemble probe stats for all classifier types."""
     print(f"  [{label}] Per-layer probes (at each clf's best layer):")
     for clf_name in CLF_NAMES:
         s = all_ps["per_layer"].get(clf_name, {})
@@ -1065,6 +1145,14 @@ def print_probe_stats_all(label, all_ps):
               f"acc {s.get('accuracy',0):.3f}  "
               f"true {s.get('true_accuracy',0):.3f}  "
               f"false {s.get('false_accuracy',0):.3f}")
+    for ens_key, ens_label in [("vote_ensemble", "Ensemble vote"), ("avg_ensemble", "Ensemble avg")]:
+        print(f"  [{label}] {ens_label} probes:")
+        for clf_name in CLF_NAMES:
+            s = all_ps.get(ens_key, {}).get(clf_name, {})
+            print(f"    {clf_name:<8}"
+                  f"acc {s.get('accuracy',0):.3f}  "
+                  f"true {s.get('true_accuracy',0):.3f}  "
+                  f"false {s.get('false_accuracy',0):.3f}")
 
 
 def print_tf_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
@@ -1182,11 +1270,17 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "lyr")]
         + [f"ml_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+        + [f"vote_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+        + [f"avg_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
     )
 
     def _probe_row(name, aps):
-        pl  = aps.get("per_layer",   {}) if aps else {}
-        ml  = aps.get("multi_layer", {}) if aps else {}
+        pl   = aps.get("per_layer",     {}) if aps else {}
+        ml   = aps.get("multi_layer",   {}) if aps else {}
+        vote = aps.get("vote_ensemble", {}) if aps else {}
+        avg  = aps.get("avg_ensemble",  {}) if aps else {}
         row = [name]
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
@@ -1196,6 +1290,16 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     s.get("best_layer", "")]
         for clf in CLF_NAMES:
             s = ml.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4)]
+        for clf in CLF_NAMES:
+            s = vote.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4)]
+        for clf in CLF_NAMES:
+            s = avg.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4)]
@@ -1292,13 +1396,21 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
         + "  ML-LR  Acc True Fals"
         + "  ML-RF  Acc True Fals"
         + "  ML-Ada Acc True Fals"
+        + "  VT-LR  Acc True Fals"
+        + "  VT-RF  Acc True Fals"
+        + "  VT-Ada Acc True Fals"
+        + "  AV-LR  Acc True Fals"
+        + "  AV-RF  Acc True Fals"
+        + "  AV-Ada Acc True Fals"
     )
     print(_PROBE_HDR)
     print("-" * W)
 
     def _row2(name, aps):
-        pl = aps.get("per_layer", {}) if aps else {}
-        ml = aps.get("multi_layer", {}) if aps else {}
+        pl   = aps.get("per_layer",     {}) if aps else {}
+        ml   = aps.get("multi_layer",   {}) if aps else {}
+        vote = aps.get("vote_ensemble", {}) if aps else {}
+        avg  = aps.get("avg_ensemble",  {}) if aps else {}
         row = f"{name:<12}"
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
@@ -1306,6 +1418,14 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                     f" {_prow(s,'false_accuracy'):5.3f} {s.get('best_layer','?'):>3}")
         for clf in CLF_NAMES:
             s = ml.get(clf, {})
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
+                    f" {_prow(s,'false_accuracy'):5.3f}")
+        for clf in CLF_NAMES:
+            s = vote.get(clf, {})
+            row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
+                    f" {_prow(s,'false_accuracy'):5.3f}")
+        for clf in CLF_NAMES:
+            s = avg.get(clf, {})
             row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
                     f" {_prow(s,'false_accuracy'):5.3f}")
         print(row)
