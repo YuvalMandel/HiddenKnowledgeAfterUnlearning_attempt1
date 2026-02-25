@@ -7,18 +7,30 @@ Per-layer probe accuracy plot for all 10 models:
   - Llama3-8B              — meta-llama/Meta-Llama-3-8B (non-instruct)
   - 8 unlearning methods   — GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, PB&J
 
+Two probe-source modes (--probe_source):
+  method  (default / Table 3)
+          Each model is evaluated with its own per-layer probes trained on its
+          own hidden states.  This is the standard unlearning-probe comparison.
+
+  base    (Table 2)
+          The base model's probes (trained on base hidden states) are applied to
+          every model's hidden states.  This tests whether the base model's linear
+          classifiers still transfer to unlearned representations.
+
 X axis: transformer layers 1–32  (embedding layer 0 is skipped)
 Y axis: probe metric on the forget-set test split
          lower = Y_MIN,  upper = max observed value + 5 % padding
 One subplot per classifier (LR / RF / AdaBoost), 10 lines each.
 
 Usage:
-    python plot_layer_accuracy.py [--checkpoint_dir checkpoints]
-                                  [--out layer_accuracy.png]
-                                  [--clf LR]                    # one classifier only
-                                  [--metric accuracy]           # accuracy (default)
-                                  [--metric true_accuracy]      # accuracy on True-label examples
-                                  [--metric false_accuracy]     # accuracy on False-label examples
+    # method probes (default, Table 3)
+    python plot_layer_accuracy.py
+
+    # base probes applied to all models
+    python plot_layer_accuracy.py --probe_source base --out layer_base_probes.png
+
+    # single classifier, true-accuracy metric
+    python plot_layer_accuracy.py --clf LR --metric true_accuracy
 """
 
 import argparse
@@ -48,8 +60,9 @@ ALL_MODELS = {
     "Llama3-8B":       "Llama3-8B",
 }
 
-CLF_NAMES    = ["LR", "RF", "AdaBoost"]
-METRIC_NAMES = ["accuracy", "true_accuracy", "false_accuracy"]
+CLF_NAMES         = ["LR", "RF", "AdaBoost"]
+METRIC_NAMES      = ["accuracy", "true_accuracy", "false_accuracy"]
+PROBE_SOURCE_NAMES = ["method", "base"]
 
 THICK_MODELS  = {"Base (Instruct)", "Llama3-8B"}
 DASHED_MODELS = {"Llama3-8B"}
@@ -79,6 +92,11 @@ METRIC_LABELS = {
     "false_accuracy": "Accuracy on False-label examples",
 }
 
+PROBE_SOURCE_TITLES = {
+    "method": "Method Probes (Table 3) — each model's own probes",
+    "base":   "Base Probes (Table 2) applied to all models",
+}
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -94,27 +112,32 @@ def load_y_test(csv_path: Path) -> np.ndarray:
     return np.array(labels, dtype=np.int32)
 
 
-def load_checkpoint(sn: str, checkpoint_dir: Path):
-    hs_path    = checkpoint_dir / f"{sn}_hs_test.npy"
-    probe_path = checkpoint_dir / f"{sn}_probes.pkl"
+def load_hs(sn: str, checkpoint_dir: Path) -> np.ndarray | None:
+    """Load test hidden states for a model; returns None if file missing."""
+    path = checkpoint_dir / f"{sn}_hs_test.npy"
+    if not path.exists():
+        print(f"  [skip] {path.name} not found")
+        return None
+    return np.load(path)
 
-    if not hs_path.exists():
-        print(f"  [skip] {hs_path.name} not found")
-        return None, None
-    if not probe_path.exists():
-        print(f"  [skip] {probe_path.name} not found")
-        return None, None
 
-    hs = np.load(hs_path)
-    with open(probe_path, "rb") as f:
-        probe_set = pickle.load(f)
+def load_probe_set(sn: str, checkpoint_dir: Path) -> dict | None:
+    """Load the probe set for a model; returns None if file missing or wrong format."""
+    path = checkpoint_dir / f"{sn}_probes.pkl"
+    if not path.exists():
+        print(f"  [skip] {path.name} not found")
+        return None
+    with open(path, "rb") as f:
+        ps = pickle.load(f)
+    if not isinstance(ps, dict) or "per_layer" not in ps:
+        print(f"  [skip] {path.name}: old probe format")
+        return None
+    return ps
 
-    if not isinstance(probe_set, dict) or "per_layer" not in probe_set:
-        print(f"  [skip] {probe_path.name}: old probe format")
-        return None, None
 
-    return hs, probe_set
-
+# ---------------------------------------------------------------------------
+# Metric computation
+# ---------------------------------------------------------------------------
 
 def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
                      y_test: np.ndarray, clf_name: str,
@@ -122,6 +145,8 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
                      layer_start: int = 1) -> list:
     """
     Return [(layer_idx, metric_value), ...] for layers layer_start … n_layers-1.
+    Uses probes from probe_set but hidden states from hs_test — these can come
+    from different models (e.g. base probes on an unlearned model's hs).
     metric: "accuracy" | "true_accuracy" | "false_accuracy"
     """
     n_layers     = hs_test.shape[1]
@@ -145,11 +170,64 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Data collection
+# ---------------------------------------------------------------------------
+
+def collect_data(checkpoint_dir: Path, clfs: list,
+                 y_test: np.ndarray, metric: str,
+                 probe_source: str) -> dict:
+    """
+    Returns data[clf_name][model_name] = (layers_list, values_list).
+
+    probe_source == "method":
+        Each model's probes are evaluated on that model's own hidden states.
+    probe_source == "base":
+        The base model's probes are evaluated on every model's hidden states.
+    """
+    data = {clf: {} for clf in clfs}
+
+    if probe_source == "base":
+        # Load the base probe set once.
+        base_probe_set = load_probe_set("base", checkpoint_dir)
+        if base_probe_set is None:
+            raise RuntimeError("base_probes.pkl not found — run --stage base first.")
+        print(f"  Base probe set loaded.")
+
+        for model_name, sn in ALL_MODELS.items():
+            print(f"  Loading hs for {model_name} ({sn}) ...")
+            hs = load_hs(sn, checkpoint_dir)
+            if hs is None:
+                continue
+            for clf_name in clfs:
+                pairs = per_layer_metric(base_probe_set, hs, y_test,
+                                         clf_name, metric=metric, layer_start=1)
+                if pairs:
+                    layers, vals = zip(*pairs)
+                    data[clf_name][model_name] = (list(layers), list(vals))
+
+    else:  # probe_source == "method"
+        for model_name, sn in ALL_MODELS.items():
+            print(f"  Loading {model_name} ({sn}) ...")
+            hs        = load_hs(sn, checkpoint_dir)
+            probe_set = load_probe_set(sn, checkpoint_dir)
+            if hs is None or probe_set is None:
+                continue
+            for clf_name in clfs:
+                pairs = per_layer_metric(probe_set, hs, y_test,
+                                         clf_name, metric=metric, layer_start=1)
+                if pairs:
+                    layers, vals = zip(*pairs)
+                    data[clf_name][model_name] = (list(layers), list(vals))
+
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
 def make_plot(checkpoint_dir: Path, out_path: Path,
-              clf_filter: list, metric: str):
+              clf_filter: list, metric: str, probe_source: str):
 
     csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
@@ -166,25 +244,13 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
     clfs = clf_filter if clf_filter else CLF_NAMES
 
     # ── First pass: collect all curve data & find global max ──────────────────
-    # data[clf_name][model_name] = (layers_list, values_list)
-    data       = {clf: {} for clf in clfs}
+    data       = collect_data(checkpoint_dir, clfs, y_test, metric, probe_source)
     global_max = Y_MIN
-
-    for model_name, sn in ALL_MODELS.items():
-        print(f"  Loading {model_name} ({sn}) ...")
-        hs, probe_set = load_checkpoint(sn, checkpoint_dir)
-        if hs is None:
-            continue
-        for clf_name in clfs:
-            pairs = per_layer_metric(probe_set, hs, y_test, clf_name,
-                                     metric=metric, layer_start=1)
-            if not pairs:
-                continue
-            layers, vals = zip(*pairs)
-            data[clf_name][model_name] = (list(layers), list(vals))
+    for clf_data in data.values():
+        for layers, vals in clf_data.values():
             global_max = max(global_max, max(vals))
 
-    y_max = min(global_max * (1 + Y_PAD), 1.0)   # never exceed 1.0
+    y_max = min(global_max * (1 + Y_PAD), 1.0)
 
     # ── Second pass: draw ─────────────────────────────────────────────────────
     n_clfs = len(clfs)
@@ -192,8 +258,9 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
                              figsize=(7 * n_clfs, 5),
                              sharey=True, squeeze=False)
     fig.suptitle(
-        f"Per-Layer Probe {METRIC_LABELS[metric]} — Forget Set (Test Split)",
-        fontsize=13,
+        f"{PROBE_SOURCE_TITLES[probe_source]}\n"
+        f"{METRIC_LABELS[metric]} — Forget Set (Test Split)",
+        fontsize=11,
     )
 
     legend_handles = []
@@ -206,23 +273,18 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
         if ax_idx == 0:
             ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
 
-        # Axes limits and ticks
         ax.set_xlim(0.5, N_LAYERS + 0.5)
         ax.set_ylim(Y_MIN, y_max)
         ax.set_xticks(range(1, N_LAYERS + 1))
         ax.tick_params(axis="x", labelsize=7)
         ax.tick_params(axis="y", labelsize=8)
-
-        # Grid
         ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.5)
-
-        # Chance line at 0.5
         ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.2, zorder=1)
 
         clf_data    = data.get(clf_name, {})
         any_plotted = False
 
-        for model_name in ALL_MODELS:      # consistent ordering
+        for model_name in ALL_MODELS:      # consistent colour ordering
             if model_name not in clf_data:
                 continue
             layers, vals = clf_data[model_name]
@@ -246,18 +308,14 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
             ax.text(0.5, 0.5, "No data",
                     ha="center", va="center", transform=ax.transAxes, fontsize=10)
 
-    # Chance line legend entry
     legend_handles.append(
         mlines.Line2D([], [], color="gray", linewidth=1.2,
                       linestyle=":", label="Chance (0.5)")
     )
     legend_labels.append("Chance (0.5)")
 
-    # ── Layout: subplots_adjust sets stable margins; do NOT call tight_layout
-    # afterwards (it would override the margins and collapse the bottom, making
-    # the lower part of the figure black / clipped).
     right_margin = 0.78 if n_clfs == 3 else (0.72 if n_clfs == 2 else 0.65)
-    fig.subplots_adjust(left=0.07, right=right_margin, bottom=0.13, top=0.91)
+    fig.subplots_adjust(left=0.07, right=right_margin, bottom=0.13, top=0.89)
 
     fig.legend(
         legend_handles, legend_labels,
@@ -279,7 +337,9 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot per-layer probe accuracy for all 10 models."
+        description="Plot per-layer probe accuracy for all 10 models.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
     parser.add_argument(
         "--checkpoint_dir", default="checkpoints",
@@ -295,9 +355,14 @@ def main():
     )
     parser.add_argument(
         "--metric", choices=METRIC_NAMES, default="accuracy",
+        help="Metric to plot: accuracy (default) | true_accuracy | false_accuracy"
+    )
+    parser.add_argument(
+        "--probe_source", choices=PROBE_SOURCE_NAMES, default="method",
         help=(
-            "Which metric to plot on the Y axis (default: accuracy). "
-            "Options: accuracy | true_accuracy | false_accuracy"
+            "Which probes to use (default: method).\n"
+            "  method — each model evaluated with its own probes (Table 3)\n"
+            "  base   — base model's probes applied to every model's hidden states"
         ),
     )
     args = parser.parse_args()
@@ -307,6 +372,7 @@ def main():
         out_path=Path(args.out),
         clf_filter=[args.clf] if args.clf else [],
         metric=args.metric,
+        probe_source=args.probe_source,
     )
 
 
