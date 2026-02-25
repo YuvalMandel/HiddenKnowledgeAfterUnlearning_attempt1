@@ -7,21 +7,20 @@ Per-layer probe accuracy plot for all 10 models:
   - Llama3-8B              — meta-llama/Meta-Llama-3-8B (non-instruct)
   - 8 unlearning methods   — GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, PB&J
 
-X axis: transformer layer index (0 = embedding layer, 1–32 = transformer layers)
+X axis: transformer layers 1–32  (embedding layer 0 is skipped)
 Y axis: probe accuracy on the forget-set test split
+         lower = 0.475,  upper = max observed accuracy + 5 % padding
 One subplot per classifier (LR / RF / AdaBoost), 10 lines each.
 
 Usage:
     python plot_layer_accuracy.py [--checkpoint_dir checkpoints]
                                   [--out layer_accuracy.png]
-                                  [--clf LR]        # only one classifier
-                                  [--skip_embed]    # skip layer 0 (embedding)
+                                  [--clf LR]   # only one classifier
 """
 
 import argparse
 import csv
 import pickle
-import re
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")          # headless; switch to "TkAgg" / "Qt5Agg" for interactive
@@ -34,7 +33,6 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 # Display name  →  safe-name prefix used in checkpoint filenames.
-# The base model uses the prefix "base"; methods use safe_name(method_name).
 ALL_MODELS = {
     "Base (Instruct)": "base",
     "GradDiff":        "GradDiff",
@@ -50,32 +48,33 @@ ALL_MODELS = {
 
 CLF_NAMES = ["LR", "RF", "AdaBoost"]
 
-# Visual style: models with a special style
 THICK_MODELS  = {"Base (Instruct)", "Llama3-8B"}
 DASHED_MODELS = {"Llama3-8B"}
 
-# Colour palette: 10 distinct colours
 _PALETTE = [
-    "#1f77b4",   # blue        — Base (Instruct)
-    "#ff7f0e",   # orange      — GradDiff
-    "#2ca02c",   # green       — RMU
-    "#d62728",   # red         — RMU-LAT
-    "#9467bd",   # purple      — RepNoise
-    "#8c564b",   # brown       — ELM
-    "#e377c2",   # pink        — RR
-    "#7f7f7f",   # grey        — TAR
-    "#bcbd22",   # yellow-green— PB&J
-    "#17becf",   # cyan        — Llama3-8B
+    "#1f77b4",   # blue         — Base (Instruct)
+    "#ff7f0e",   # orange       — GradDiff
+    "#2ca02c",   # green        — RMU
+    "#d62728",   # red          — RMU-LAT
+    "#9467bd",   # purple       — RepNoise
+    "#8c564b",   # brown        — ELM
+    "#e377c2",   # pink         — RR
+    "#7f7f7f",   # grey         — TAR
+    "#bcbd22",   # yellow-green — PB&J
+    "#17becf",   # cyan         — Llama3-8B
 ]
 
 MODEL_COLORS = {name: _PALETTE[i] for i, name in enumerate(ALL_MODELS)}
+
+Y_MIN = 0.475          # fixed lower bound
+Y_PAD = 0.05           # 5 % padding above the highest point
+N_LAYERS = 32          # transformer layers (indices 1–32; layer 0 = embedding, skipped)
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
 def load_y_test(csv_path: Path) -> np.ndarray:
-    """Read test-split labels from the WMDP True/False pairs CSV."""
     labels = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -87,10 +86,6 @@ def load_y_test(csv_path: Path) -> np.ndarray:
 
 
 def load_checkpoint(sn: str, checkpoint_dir: Path):
-    """
-    Load (hs_test, probe_set) for a model identified by its safe-name prefix.
-    Returns (None, None) if any file is missing.
-    """
     hs_path    = checkpoint_dir / f"{sn}_hs_test.npy"
     probe_path = checkpoint_dir / f"{sn}_probes.pkl"
 
@@ -101,7 +96,7 @@ def load_checkpoint(sn: str, checkpoint_dir: Path):
         print(f"  [skip] {probe_path.name} not found")
         return None, None
 
-    hs = np.load(hs_path)                       # (n_test, n_layers, hidden_dim)
+    hs = np.load(hs_path)
     with open(probe_path, "rb") as f:
         probe_set = pickle.load(f)
 
@@ -113,29 +108,29 @@ def load_checkpoint(sn: str, checkpoint_dir: Path):
 
 
 def per_layer_accuracy(probe_set: dict, hs_test: np.ndarray,
-                       y_test: np.ndarray, clf_name: str) -> list:
+                       y_test: np.ndarray, clf_name: str,
+                       layer_start: int = 1) -> list:
     """
-    Return a list of (layer_idx, accuracy) for every layer in hs_test.
-    Layers for which no probe was trained are silently skipped.
+    Return [(layer_idx, accuracy), ...] for layers layer_start … n_layers-1.
+    Layer 0 (embedding) is skipped by default.
     """
-    n_layers = hs_test.shape[1]
+    n_layers     = hs_test.shape[1]
     layer_probes = probe_set["per_layer"].get(clf_name, {})
-    pairs = []
-    for l in range(n_layers):
+    result = []
+    for l in range(layer_start, n_layers):
         pipe = layer_probes.get(l)
         if pipe is None:
             continue
         acc = pipe.score(hs_test[:, l, :], y_test)
-        pairs.append((l, float(acc)))
-    return pairs
+        result.append((l, float(acc)))
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
-def make_plot(checkpoint_dir: Path, out_path: Path,
-              clf_filter: list, skip_embed: bool):
+def make_plot(checkpoint_dir: Path, out_path: Path, clf_filter: list):
 
     csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
@@ -150,8 +145,29 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
           f"(pos={y_test.sum()}  neg={(y_test==0).sum()})")
 
     clfs = clf_filter if clf_filter else CLF_NAMES
-    n_clfs = len(clfs)
 
+    # ── First pass: collect all curve data & find global max accuracy ─────────
+    # data[clf_name][model_name] = (layers_list, accs_list)
+    data = {clf: {} for clf in clfs}
+    global_max = Y_MIN   # will be updated
+
+    for model_name, sn in ALL_MODELS.items():
+        print(f"  Loading {model_name} ({sn}) ...")
+        hs, probe_set = load_checkpoint(sn, checkpoint_dir)
+        if hs is None:
+            continue
+        for clf_name in clfs:
+            pairs = per_layer_accuracy(probe_set, hs, y_test, clf_name, layer_start=1)
+            if not pairs:
+                continue
+            layers, accs = zip(*pairs)
+            data[clf_name][model_name] = (list(layers), list(accs))
+            global_max = max(global_max, max(accs))
+
+    y_max = global_max * (1 + Y_PAD)
+
+    # ── Second pass: draw ─────────────────────────────────────────────────────
+    n_clfs = len(clfs)
     fig, axes = plt.subplots(1, n_clfs,
                              figsize=(7 * n_clfs, 5),
                              sharey=True, squeeze=False)
@@ -166,68 +182,57 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
     for ax_idx, clf_name in enumerate(clfs):
         ax = axes[0][ax_idx]
         ax.set_title(clf_name, fontsize=12)
-        ax.set_xlabel("Layer index", fontsize=10)
+        ax.set_xlabel("Layer", fontsize=10)
         if ax_idx == 0:
             ax.set_ylabel("Accuracy", fontsize=10)
-        ax.axhline(0.5, color="gray", linestyle="--",
-                   linewidth=0.9, label="Chance (0.5)")
-        ax.set_ylim(0.35, 1.02)
-        ax.grid(True, alpha=0.25, linewidth=0.5)
 
+        # Axes limits and ticks
+        ax.set_xlim(0.5, N_LAYERS + 0.5)
+        ax.set_ylim(Y_MIN, y_max)
+        ax.set_xticks(range(1, N_LAYERS + 1))
+        ax.tick_params(axis="x", labelsize=7)
+        ax.tick_params(axis="y", labelsize=8)
+
+        # Grid
+        ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.5)
+
+        # Chance line
+        ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.2, zorder=1)
+
+        clf_data = data.get(clf_name, {})
         any_plotted = False
-        for model_name, sn in ALL_MODELS.items():
-            color = MODEL_COLORS[model_name]
-            lw    = 2.4 if model_name in THICK_MODELS else 1.2
-            ls    = "--" if model_name in DASHED_MODELS else "-"
+
+        for model_name in ALL_MODELS:        # keep consistent ordering
+            if model_name not in clf_data:
+                continue
+            layers, accs = clf_data[model_name]
+            color  = MODEL_COLORS[model_name]
+            lw     = 2.4 if model_name in THICK_MODELS else 1.2
+            ls     = "--" if model_name in DASHED_MODELS else "-"
             zorder = 4 if model_name in THICK_MODELS else 2
-
-            print(f"  Loading {model_name} ({sn}) ...")
-            hs, probe_set = load_checkpoint(sn, checkpoint_dir)
-            if hs is None:
-                continue
-
-            pairs = per_layer_accuracy(probe_set, hs, y_test, clf_name)
-            if not pairs:
-                print(f"    No per-layer probes found for clf={clf_name}")
-                continue
-
-            layers, accs = zip(*pairs)
-            if skip_embed:
-                # Drop layer 0 (embedding layer output)
-                pairs = [(l, a) for l, a in zip(layers, accs) if l > 0]
-                if pairs:
-                    layers, accs = zip(*pairs)
-                else:
-                    continue
 
             ax.plot(layers, accs,
                     color=color, linewidth=lw, linestyle=ls, zorder=zorder)
             any_plotted = True
 
-            # Build legend entry on first subplot only (shared)
             if ax_idx == 0:
-                handle = mlines.Line2D(
-                    [], [], color=color, linewidth=lw, linestyle=ls,
-                    label=model_name
+                legend_handles.append(
+                    mlines.Line2D([], [], color=color, linewidth=lw,
+                                  linestyle=ls, label=model_name)
                 )
-                legend_handles.append(handle)
                 legend_labels.append(model_name)
 
         if not any_plotted:
             ax.text(0.5, 0.5, "No data",
-                    ha="center", va="center", transform=ax.transAxes)
+                    ha="center", va="center", transform=ax.transAxes, fontsize=10)
 
-        # Mark best-layer dots per method (only on last subplot to avoid clutter)
-        # (omitted for clarity)
-
-    # Add chance line to legend
-    chance_handle = mlines.Line2D(
-        [], [], color="gray", linewidth=0.9, linestyle="--", label="Chance (0.5)"
+    # Chance line legend entry
+    legend_handles.append(
+        mlines.Line2D([], [], color="gray", linewidth=1.2,
+                      linestyle=":", label="Chance (0.5)")
     )
-    legend_handles.append(chance_handle)
     legend_labels.append("Chance (0.5)")
 
-    # Place a single shared legend to the right of all subplots
     fig.legend(
         legend_handles, legend_labels,
         loc="center left",
@@ -253,7 +258,7 @@ def main():
     )
     parser.add_argument(
         "--checkpoint_dir", default="checkpoints",
-        help="Directory containing .npy and .pkl checkpoint files (default: checkpoints)"
+        help="Checkpoint directory (default: checkpoints)"
     )
     parser.add_argument(
         "--out", default="layer_accuracy.png",
@@ -263,17 +268,13 @@ def main():
         "--clf", choices=CLF_NAMES, default=None,
         help="Only plot one classifier (default: all three)"
     )
-    parser.add_argument(
-        "--skip_embed", action="store_true",
-        help="Skip layer 0 (embedding layer output) on the x-axis"
-    )
     args = parser.parse_args()
 
-    checkpoint_dir = Path(args.checkpoint_dir)
-    out_path       = Path(args.out)
-    clf_filter     = [args.clf] if args.clf else []
-
-    make_plot(checkpoint_dir, out_path, clf_filter, args.skip_embed)
+    make_plot(
+        checkpoint_dir=Path(args.checkpoint_dir),
+        out_path=Path(args.out),
+        clf_filter=[args.clf] if args.clf else [],
+    )
 
 
 if __name__ == "__main__":
