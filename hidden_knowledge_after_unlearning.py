@@ -104,6 +104,13 @@ MAX_INPUT_LENGTH        = 512
 PCA_DIMS_PER_LAYER = 64    # for RF / AdaBoost per-layer pipelines
 PCA_DIMS_MULTI     = 256   # for all multi-layer pipelines
 
+# Multi-layer probe: which transformer layers to concatenate.
+# Indices are into the hidden-state tensor (0 = embedding, 1-32 = transformer layers).
+# Default window 12-22 covers the mid-to-late layers where factual knowledge is
+# typically most linearly separable; override with --multi_layer_start / --multi_layer_end.
+MULTI_LAYER_START = 12
+MULTI_LAYER_END   = 22
+
 CLF_NAMES = ["LR", "RF", "AdaBoost"]
 
 CHECKPOINT_DIR = Path("checkpoints")
@@ -857,20 +864,32 @@ def _make_multi_layer_pipeline(clf_name: str) -> Pipeline:
 
 def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
                     hs_val:   np.ndarray, y_val:   np.ndarray,
-                    label: str = "") -> dict:
+                    label: str = "",
+                    multi_layer_start: int = MULTI_LAYER_START,
+                    multi_layer_end:   int = MULTI_LAYER_END) -> dict:
     """
     Train all per-layer (LR, RF, AdaBoost) and multi-layer (LR, RF, AdaBoost)
     probes.
 
+    multi_layer_start / multi_layer_end: inclusive layer indices (into the
+    hidden-state tensor, where 0 = embedding and 1-32 = transformer layers)
+    used to build the concatenated feature vector for multi-layer probes.
+    Defaults to MULTI_LAYER_START–MULTI_LAYER_END (layers 12-22).
+
     Returns a ProbeSet dict:
     {
-      "per_layer":   {"LR": {l: pipe, ...}, "RF": {...}, "AdaBoost": {...}},
-      "multi_layer": {"LR": pipe, "RF": pipe, "AdaBoost": pipe},
-      "best_layers": {"LR": int, "RF": int, "AdaBoost": int},
+      "per_layer":        {"LR": {l: pipe, ...}, "RF": {...}, "AdaBoost": {...}},
+      "multi_layer":      {"LR": pipe, "RF": pipe, "AdaBoost": pipe},
+      "best_layers":      {"LR": int, "RF": int, "AdaBoost": int},
+      "multi_layer_range": (start, end),   # stored so eval uses same slice
     }
     """
     n_train, n_layers, hidden_dim = hs_train.shape
     prefix = f"[{label}] " if label else ""
+
+    # Clamp range to valid layer indices
+    ml_start = max(0, multi_layer_start)
+    ml_end   = min(n_layers - 1, multi_layer_end)
 
     # ── Per-layer probes ────────────────────────────────────────────────────
     per_layer = {clf_name: {} for clf_name in CLF_NAMES}
@@ -896,9 +915,11 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         print(f"  {prefix}{clf_name} best layer: {best_l:2d}  "
               f"val acc: {val_accs[best_l]:.3f}", flush=True)
 
-    # ── Multi-layer probes ──────────────────────────────────────────────────
-    X_flat_tr  = hs_train.reshape(n_train, -1)
-    X_flat_val = hs_val.reshape(len(hs_val), -1)
+    # ── Multi-layer probes (layers ml_start … ml_end inclusive) ────────────
+    print(f"  {prefix}Multi-layer probes using layers {ml_start}–{ml_end} "
+          f"({ml_end - ml_start + 1} layers)", flush=True)
+    X_flat_tr  = hs_train[:, ml_start:ml_end + 1, :].reshape(n_train, -1)
+    X_flat_val = hs_val[:,   ml_start:ml_end + 1, :].reshape(len(hs_val), -1)
 
     multi_layer = {}
     for clf_name in CLF_NAMES:
@@ -909,9 +930,10 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         print(f"  {prefix}Multi-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
 
     return {
-        "per_layer":   per_layer,
-        "multi_layer": multi_layer,
-        "best_layers": best_layers,
+        "per_layer":         per_layer,
+        "multi_layer":       multi_layer,
+        "best_layers":       best_layers,
+        "multi_layer_range": (ml_start, ml_end),
     }
 
 
@@ -957,7 +979,8 @@ def compute_all_probe_stats(probe_set: dict,
         s    = _pipe_stats(pipe, hs_test[:, l, :], y_test)
         result["per_layer"][clf_name] = {**s, "best_layer": l}
 
-    X_flat = hs_test.reshape(n_test, -1)
+    ml_start, ml_end = probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1))
+    X_flat = hs_test[:, ml_start:ml_end + 1, :].reshape(n_test, -1)
     for clf_name in CLF_NAMES:
         pipe = probe_set["multi_layer"][clf_name]
         result["multi_layer"][clf_name] = _pipe_stats(pipe, X_flat, y_test)
@@ -1370,7 +1393,8 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
 # Stage: base
 # =============================================================================
 
-def run_base():
+def run_base(multi_layer_start: int = MULTI_LAYER_START,
+             multi_layer_end:   int = MULTI_LAYER_END):
     rng = random.Random(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
@@ -1562,9 +1586,12 @@ def run_base():
         print("\n" + "=" * 60)
         print("Training probe set — BASE model")
         print("  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
-        print("  Multi-layer: LR / RF / AdaBoost  on flattened all-layer vector (PCA-256)")
+        print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
+              f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
-        probe_set = train_probe_set(hs_train, y_train, hs_val, y_val, label="base")
+        probe_set = train_probe_set(hs_train, y_train, hs_val, y_val, label="base",
+                                    multi_layer_start=multi_layer_start,
+                                    multi_layer_end=multi_layer_end)
         CHECKPOINT_DIR.mkdir(exist_ok=True)
         with open(CHECKPOINT_DIR / "base_probes.pkl", "wb") as f:
             pickle.dump(probe_set, f)
@@ -1603,7 +1630,9 @@ def run_base():
 # Stage: method
 # =============================================================================
 
-def run_method(method_name: str):
+def run_method(method_name: str,
+               multi_layer_start: int = MULTI_LAYER_START,
+               multi_layer_end:   int = MULTI_LAYER_END):
     if method_name not in UNLEARNED_MODELS:
         raise ValueError(f"Unknown method '{method_name}'. "
                          f"Choose from: {list(UNLEARNED_MODELS)}")
@@ -1798,11 +1827,14 @@ def run_method(method_name: str):
         print(f"\n" + "=" * 60)
         print(f"Training method-specific probe set — {method_name}")
         print(f"  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
-        print(f"  Multi-layer: LR / RF / AdaBoost  (PCA-256)")
+        print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
+              f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
         method_probe_set = train_probe_set(hs_train_un, y_train,
                                            hs_val_un,   y_val,
-                                           label=method_name)
+                                           label=method_name,
+                                           multi_layer_start=multi_layer_start,
+                                           multi_layer_end=multi_layer_end)
         CHECKPOINT_DIR.mkdir(exist_ok=True)
         with open(CHECKPOINT_DIR / f"{sn}_probes.pkl", "wb") as f:
             pickle.dump(method_probe_set, f)
@@ -2158,14 +2190,23 @@ def main():
     parser.add_argument("--method", default=None,
                         help="Unlearning method name for --stage method "
                              f"(one of: {', '.join(UNLEARNED_MODELS)})")
+    parser.add_argument("--multi_layer_start", type=int, default=MULTI_LAYER_START,
+                        help=f"First layer index (inclusive) for multi-layer probe "
+                             f"concatenation (default: {MULTI_LAYER_START})")
+    parser.add_argument("--multi_layer_end", type=int, default=MULTI_LAYER_END,
+                        help=f"Last layer index (inclusive) for multi-layer probe "
+                             f"concatenation (default: {MULTI_LAYER_END})")
     args = parser.parse_args()
 
     if args.stage == "base":
-        run_base()
+        run_base(multi_layer_start=args.multi_layer_start,
+                 multi_layer_end=args.multi_layer_end)
     elif args.stage == "method":
         if args.method is None:
             parser.error("--method is required when --stage method is used.")
-        run_method(args.method)
+        run_method(args.method,
+                   multi_layer_start=args.multi_layer_start,
+                   multi_layer_end=args.multi_layer_end)
     elif args.stage == "summary":
         run_summary()
     elif args.stage == "sanity":
