@@ -66,7 +66,7 @@ _PALETTE = [
 
 MODEL_COLORS = {name: _PALETTE[i] for i, name in enumerate(ALL_MODELS)}
 
-Y_MIN = 0.475          # fixed lower bound
+Y_MIN = 0.4          # fixed lower bound
 Y_PAD = 0.05           # 5 % padding above the highest point
 N_LAYERS = 32          # transformer layers (indices 1–32; layer 0 = embedding, skipped)
 
@@ -175,7 +175,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path, clf_filter: list):
         "Per-Layer Probe Accuracy on Forget Set (Test Split)",
         fontsize=13, y=1.01
     )
-
+    axes.spines['bottom'].set_position('data', Y_MIN)
     legend_handles = []
     legend_labels  = []
 
@@ -238,7 +238,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path, clf_filter: list):
     # outside the axes, so we use explicit margins instead.
     right_margin = 0.78 if n_clfs == 3 else (0.72 if n_clfs == 2 else 0.65)
     fig.subplots_adjust(left=0.06, right=right_margin, bottom=0.13, top=0.93)
-
+    fig.tight_layout()
     fig.legend(
         legend_handles, legend_labels,
         loc="center left",
