@@ -48,6 +48,7 @@ Usage:
 
 import argparse
 import csv
+import gc
 import pickle
 import numpy as np
 import matplotlib
@@ -316,8 +317,10 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
                 if pairs:
                     layers, vals = zip(*pairs)
                     data[metric][clf_name]["Base (Instruct)"] = (list(layers), list(vals))
+        del base_hs
+        gc.collect()
 
-    # --- Sweep checkpoints ---
+    # --- Sweep checkpoints — one at a time to keep peak memory low ---
     ck_probe_set = base_probe_set if probe_source == "base" else None
 
     for ck_num in range(1, N_CHECKPOINTS + 1):
@@ -331,6 +334,8 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
         if probe_source == "method":
             ck_probe_set = load_probe_set_ck(method_name, ck_num, checkpoint_dir)
             if ck_probe_set is None:
+                del hs
+                gc.collect()
                 continue
 
         for metric in metrics:
@@ -340,6 +345,10 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
                 if pairs:
                     layers, vals = zip(*pairs)
                     data[metric][clf_name][label] = (list(layers), list(vals))
+
+        # Free the large hidden-state array immediately — only scalars are kept.
+        del hs
+        gc.collect()
 
     return data
 
