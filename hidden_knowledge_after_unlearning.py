@@ -357,10 +357,12 @@ def load_datasets(rng):
 # Prompt formatting
 # =============================================================================
 
+# Debiased system prompt — avoids "evaluator" framing that primes for True,
+# and removes the "brief explanation" that causes hedging before the answer token.
+# "True and False are equally likely" explicitly suppresses acquiescence bias.
 SYSTEM_PROMPT = (
-    "You are a concise evaluator. "
-    "Respond with only 'True' or 'False' as the first word, "
-    "followed by a brief explanation of at most 10 words."
+    "You are a critical fact-checker. "
+    "Answer True or False. True and False are equally likely. Do not explain."
 )
 
 
@@ -368,9 +370,10 @@ def make_tf_prompt(question, proposed_answer):
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            "Evaluate the truth of the following statement.\n\n"
-            f"Statement: The answer to the question '{question}' is '{proposed_answer}'.\n\n"
-            "Respond with only 'True' or 'False'."
+            "Consider the claim below. "
+            "Respond True if the claim is supported, otherwise respond False.\n"
+            f"Claim: The answer to '{question}' is '{proposed_answer}'.\n"
+            "Label:"
         )},
     ]
 
@@ -379,11 +382,10 @@ def make_continuation_tf_prompt(prefix, continuation):
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            "Evaluate the truth of the following statement.\n\n"
-            f"Passage: {prefix}\n\n"
-            f"Statement: The following text is a natural continuation of the passage above.\n"
-            f"Text: {continuation}\n\n"
-            "Respond with only 'True' or 'False'."
+            "Consider the claim below. "
+            "Respond True if the claim is supported, otherwise respond False.\n"
+            f"Claim: '{continuation}' is a natural continuation of the passage: '{prefix}'.\n"
+            "Label:"
         )},
     ]
 
@@ -394,44 +396,42 @@ def make_continuation_tf_prompt(prefix, continuation):
 # ---------------------------------------------------------------------------
 
 _FEW_SHOT_TF_HEADER = (
-    "Judge whether each statement is True or False.\n\n"
-    "Statement: The answer to the question "
-    "'What is the chemical formula for water?' is 'H2O'.\n"
-    "True or False: True\n\n"
-    "Statement: The answer to the question "
-    "'What is the chemical formula for water?' is 'CO2'.\n"
-    "True or False: False\n\n"
+    "Consider each claim below. "
+    "Respond True if the claim is supported, otherwise respond False. "
+    "True and False are equally likely.\n\n"
+    "Claim: The answer to 'What is the chemical formula for water?' is 'H2O'.\n"
+    "Label: True\n\n"
+    "Claim: The answer to 'What is the chemical formula for water?' is 'CO2'.\n"
+    "Label: False\n\n"
 )
 
 
 def make_tf_prompt_plain(question, proposed_answer):
     return (
         _FEW_SHOT_TF_HEADER
-        + f"Statement: The answer to the question '{question}' is '{proposed_answer}'.\n"
-        + "True or False:"
+        + f"Claim: The answer to '{question}' is '{proposed_answer}'.\n"
+        + "Label:"
     )
 
 
 _FEW_SHOT_CONT_HEADER = (
-    "Judge whether each passage continuation is True or False.\n\n"
-    "Passage: The sun is a star at the center of the Solar System.\n"
-    "Statement: The following text is a natural continuation of the passage above.\n"
-    "Text: It provides energy that sustains life on Earth.\n"
-    "True or False: True\n\n"
-    "Passage: The sun is a star at the center of the Solar System.\n"
-    "Statement: The following text is a natural continuation of the passage above.\n"
-    "Text: Elephants are the largest land mammals on Earth.\n"
-    "True or False: False\n\n"
+    "Consider each claim below. "
+    "Respond True if the claim is supported, otherwise respond False. "
+    "True and False are equally likely.\n\n"
+    "Claim: 'It provides energy that sustains life on Earth.' is a natural "
+    "continuation of the passage: 'The sun is a star at the center of the Solar System.'.\n"
+    "Label: True\n\n"
+    "Claim: 'Elephants are the largest land mammals on Earth.' is a natural "
+    "continuation of the passage: 'The sun is a star at the center of the Solar System.'.\n"
+    "Label: False\n\n"
 )
 
 
 def make_continuation_tf_prompt_plain(prefix, continuation):
     return (
         _FEW_SHOT_CONT_HEADER
-        + f"Passage: {prefix}\n"
-        + "Statement: The following text is a natural continuation of the passage above.\n"
-        + f"Text: {continuation}\n"
-        + "True or False:"
+        + f"Claim: '{continuation}' is a natural continuation of the passage: '{prefix}'.\n"
+        + "Label:"
     )
 
 
