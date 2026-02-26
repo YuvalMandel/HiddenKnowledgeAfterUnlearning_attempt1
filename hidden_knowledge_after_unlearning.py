@@ -32,6 +32,7 @@ model's test hidden states to check whether the same directions transfer.
 
 import argparse
 import csv
+import os
 import re
 import json
 import pickle
@@ -2180,6 +2181,40 @@ def _sweep_complete(r: dict) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# HuggingFace model-cache helpers (sweep disk management)
+# ---------------------------------------------------------------------------
+
+def _hf_model_cache_dir(model_id: str) -> Path:
+    """
+    Return the HuggingFace hub cache directory for model_id.
+    HF stores "org/repo" as  $HF_HOME/hub/models--org--repo.
+    """
+    hf_home = Path(os.environ.get("HF_HOME",
+                                  str(Path.home() / ".cache" / "huggingface")))
+    safe = model_id.replace("/", "--")
+    return hf_home / "hub" / f"models--{safe}"
+
+
+def _is_model_cached(model_id: str) -> bool:
+    """Return True if the model is already downloaded in the HF hub cache."""
+    d = _hf_model_cache_dir(model_id)
+    # A fully downloaded repo has a 'snapshots' subdirectory with at least one entry.
+    snap = d / "snapshots"
+    return snap.exists() and any(snap.iterdir())
+
+
+def _delete_model_cache(model_id: str):
+    """Delete all cached files for model_id to free disk space."""
+    d = _hf_model_cache_dir(model_id)
+    if d.exists():
+        import shutil as _shutil
+        _shutil.rmtree(d)
+        print(f"  [sweep] Deleted model cache: {d.name}", flush=True)
+    else:
+        print(f"  [sweep] Model cache already absent: {d.name}", flush=True)
+
+
 def _sw(d, k):
     """Safe float getter for a stats dict that may be None or missing a key."""
     return float(d.get(k, 0.0)) if d else 0.0
@@ -2322,6 +2357,7 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     """
     Run (or resume) a single sweep checkpoint.  Returns its results dict.
     Always trains and evaluates both base probes and per-checkpoint method probes.
+    Deletes the HF model cache after use to free disk space.
     """
     sn       = safe_name(method_name)
     model_id = sweep_model_id(method_name, ck_num)
@@ -2331,9 +2367,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
 
     print(f"\n{'─'*60}")
     print(f"  Checkpoint {ck_num}  — {model_id}")
+    print(f"  Model cached: {_is_model_cached(model_id)}")
     print(f"{'─'*60}")
 
-    # Complete cache hit?
+    # Complete cache hit — no model needed, do not touch HF cache.
     if results_path.exists():
         with open(results_path) as f:
             r = json.load(f)
@@ -2361,8 +2398,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     need_gen = "test_answers"     not in partial
     need_log = "logit_scores"     not in partial
     need_mcq = "mcq_test_answers" not in partial
+    model_used = False
 
     if need_hs or need_gen or need_log or need_mcq:
+        model_used = True
         print(f"  Loading model  {model_id} …")
         m_tok, m_model = load_model_and_tokenizer(model_id)
 
@@ -2415,9 +2454,11 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
         else:
             mcq_answers = partial["mcq_test_answers"]
 
+        # Free GPU memory, then remove model from HF cache so disk stays clear.
         del m_model, m_tok
         import gc as _gc; _gc.collect()
         torch.cuda.empty_cache()
+        _delete_model_cache(model_id)
 
     else:
         test_answers = partial["test_answers"]
@@ -2534,8 +2575,27 @@ def run_sweep(method_name: str,
     (base_probe_set, train_pairs, val_pairs, test_pairs, mcq_pairs_v,
      y_train, y_val, y_test) = _sweep_load_shared(method_name)
 
-    all_results = []
-    for ck_num in range(1, n_checkpoints + 1):
+    # ── Smart ordering: complete (instant) → cached model → needs download ─────
+    all_ck = list(range(1, n_checkpoints + 1))
+    done, cached, to_download = [], [], []
+    for ck_num in all_ck:
+        rp = _ck_dir(method_name, ck_num) / "results.json"
+        if rp.exists():
+            with open(rp) as f:
+                if _sweep_complete(json.load(f)):
+                    done.append(ck_num)
+                    continue
+        if _is_model_cached(sweep_model_id(method_name, ck_num)):
+            cached.append(ck_num)
+        else:
+            to_download.append(ck_num)
+    ordered = done + cached + to_download
+    print(f"  Ordering: {len(done)} complete | {len(cached)} cached | "
+          f"{len(to_download)} to download")
+    print(f"  Run order: {ordered}\n")
+
+    results_map = {}
+    for ck_num in ordered:
         r = _run_one_sweep_checkpoint(
             method_name, ck_num,
             base_probe_set,
@@ -2543,8 +2603,10 @@ def run_sweep(method_name: str,
             y_train, y_val, y_test,
             multi_layer_start, multi_layer_end,
         )
-        all_results.append(r)
+        results_map[ck_num] = r
 
+    # Restore original checkpoint order for the output table.
+    all_results = [results_map[n] for n in all_ck]
     print_sweep_table(method_name, all_results)
     save_sweep_csv(method_name, all_results)
 
