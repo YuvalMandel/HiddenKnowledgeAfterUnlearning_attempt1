@@ -40,12 +40,23 @@ METHOD="${SWEEP_METHODS[$SLURM_ARRAY_TASK_ID]}"
 echo ""
 echo "Method: ${METHOD}"
 
+# Build method-specific output filename: layer_accuracy.png -> layer_accuracy_GradDiff.png
+# Mirrors plot_layer_accuracy._safe_name(): replace & / space with _
+BASE_OUT="${PLOT_OUT:-layer_accuracy.png}"
+SAFE_METHOD="${METHOD//&/_}"
+SAFE_METHOD="${SAFE_METHOD// /_}"
+SAFE_METHOD="${SAFE_METHOD//\//_}"
+OUT_STEM="${BASE_OUT%.*}"
+OUT_EXT="${BASE_OUT##*.}"
+METHOD_OUT="${OUT_STEM}_${SAFE_METHOD}.${OUT_EXT}"
+
+echo "Output: ${METHOD_OUT}"
+
 # Build optional argument list from environment
-EXTRA_ARGS=""
+EXTRA_ARGS="--out ${METHOD_OUT}"
 [[ -n "${PLOT_PROBE_SOURCE}"   ]] && EXTRA_ARGS="$EXTRA_ARGS --probe_source ${PLOT_PROBE_SOURCE}"
 [[ -n "${PLOT_CLF}"            ]] && EXTRA_ARGS="$EXTRA_ARGS --clf ${PLOT_CLF}"
 [[ -n "${PLOT_METRIC}"         ]] && EXTRA_ARGS="$EXTRA_ARGS --metric ${PLOT_METRIC}"
-[[ -n "${PLOT_OUT}"            ]] && EXTRA_ARGS="$EXTRA_ARGS --out ${PLOT_OUT}"
 [[ -n "${PLOT_CHECKPOINT_DIR}" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint_dir ${PLOT_CHECKPOINT_DIR}"
 
 python plot_layer_accuracy.py \
