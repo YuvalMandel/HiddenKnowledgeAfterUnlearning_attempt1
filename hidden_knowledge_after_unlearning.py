@@ -802,10 +802,14 @@ def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, de
 
 def logit_stats(scores, pairs):
     total = correct = true_total = true_correct = false_total = false_correct = 0
+    y_true_list, y_pred_list, margin_list = [], [], []
     for (t, f), p in zip(scores, pairs):
         pred     = "True" if t > f else "False"
         expected = p["expected"]
         total += 1
+        y_true_list.append(1 if expected == "True" else 0)
+        y_pred_list.append(1 if pred     == "True" else 0)
+        margin_list.append(float(t) - float(f))   # score for AUC
         if expected == "True":
             true_total += 1
             if pred == "True":
@@ -816,10 +820,16 @@ def logit_stats(scores, pairs):
             if pred == "False":
                 false_correct += 1
                 correct += 1
+    m = _clf_metrics(np.array(y_true_list), np.array(y_pred_list),
+                     np.array(margin_list))
     return {
         "accuracy":      float(correct       / total)      if total       > 0 else 0.0,
         "true_accuracy": float(true_correct  / true_total) if true_total  > 0 else 0.0,
         "false_accuracy":float(false_correct / false_total)if false_total > 0 else 0.0,
+        "precision":     m["precision"],
+        "recall":        m["recall"],
+        "f1":            m["f1"],
+        "auc":           m["auc"],
     }
 
 
@@ -952,27 +962,63 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
     }
 
 
+def _clf_metrics(labels: np.ndarray, preds: np.ndarray,
+                 scores: np.ndarray | None = None) -> dict:
+    """
+    Compute precision, recall, F1 (positive class = 1) and optionally AUC-ROC.
+    scores: continuous decision values for AUC (e.g. predict_proba[:,1] or margin).
+    """
+    from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+    p  = float(precision_score(labels, preds, zero_division=0))
+    r  = float(recall_score(labels, preds, zero_division=0))
+    f1 = float(f1_score(labels, preds, zero_division=0))
+    out = {"precision": p, "recall": r, "f1": f1}
+    if scores is not None:
+        try:
+            out["auc"] = float(roc_auc_score(labels, scores))
+        except Exception:
+            out["auc"] = 0.0
+    return out
+
+
 def _pipe_stats(pipe: Pipeline, X: np.ndarray, labels: np.ndarray) -> dict:
-    """Accuracy / yes-accuracy / no-accuracy for one fitted pipeline."""
+    """Accuracy / per-class accuracy / precision / recall / F1 / AUC for one pipeline."""
     preds    = pipe.predict(X)
     yes_mask = labels == 1
     no_mask  = labels == 0
+    if hasattr(pipe, "predict_proba"):
+        scores = pipe.predict_proba(X)[:, 1]
+    else:
+        scores = pipe.decision_function(X)
+    m = _clf_metrics(labels, preds, scores)
     return {
         "accuracy":      float((preds == labels).mean()),
         "true_accuracy": float((preds[yes_mask] == 1).mean()) if yes_mask.any() else 0.0,
         "false_accuracy":float((preds[no_mask]  == 0).mean()) if no_mask.any()  else 0.0,
+        "precision":     m["precision"],
+        "recall":        m["recall"],
+        "f1":            m["f1"],
+        "auc":           m["auc"],
     }
 
 
-def _preds_stats(preds: np.ndarray, labels: np.ndarray) -> dict:
-    """Same as _pipe_stats but takes a pre-computed prediction array."""
+def _preds_stats(preds: np.ndarray, labels: np.ndarray,
+                 scores: np.ndarray | None = None) -> dict:
+    """Same as _pipe_stats but takes pre-computed predictions (and optional scores for AUC)."""
     yes_mask = labels == 1
     no_mask  = labels == 0
-    return {
+    m = _clf_metrics(labels, preds, scores)
+    out = {
         "accuracy":      float((preds == labels).mean()),
         "true_accuracy": float((preds[yes_mask] == 1).mean()) if yes_mask.any() else 0.0,
         "false_accuracy":float((preds[no_mask]  == 0).mean()) if no_mask.any()  else 0.0,
+        "precision":     m["precision"],
+        "recall":        m["recall"],
+        "f1":            m["f1"],
     }
+    if scores is not None:
+        out["auc"] = m["auc"]
+    return out
 
 
 def _ensemble_stats(probe_set: dict, hs_test: np.ndarray,
@@ -993,7 +1039,8 @@ def _ensemble_stats(probe_set: dict, hs_test: np.ndarray,
     """
     ml_start, ml_end = probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1))
     layer_range = range(ml_start, ml_end + 1)
-    empty = {"accuracy": 0.0, "true_accuracy": 0.0, "false_accuracy": 0.0}
+    empty = {"accuracy": 0.0, "true_accuracy": 0.0, "false_accuracy": 0.0,
+             "precision": 0.0, "recall": 0.0, "f1": 0.0}
     result = {"vote": {}, "avg": {}}
 
     for clf_name in CLF_NAMES:
@@ -1027,7 +1074,7 @@ def _ensemble_stats(probe_set: dict, hs_test: np.ndarray,
         avg_preds = (avg_proba >= 0.5).astype(int)
 
         result["vote"][clf_name] = _preds_stats(vote_preds, y_test)
-        result["avg"][clf_name]  = _preds_stats(avg_preds,  y_test)
+        result["avg"][clf_name]  = _preds_stats(avg_preds,  y_test, scores=avg_proba)
 
     return result
 
@@ -1099,11 +1146,14 @@ def extract_tf(answer):
 def generation_stats(answers, pairs):
     total   = len(answers)
     correct = gibberish = true_total = true_correct = false_total = false_correct = 0
+    y_true_list, y_pred_list = [], []
     for ans, p in zip(answers, pairs):
         tf       = extract_tf(ans)
         expected = p["expected"]
         if tf is None:
             gibberish += 1
+        y_true_list.append(1 if expected == "True" else 0)
+        y_pred_list.append(1 if tf == "True" else 0)   # gibberish treated as False
         if expected == "True":
             true_total += 1
             if tf == "True":
@@ -1114,11 +1164,15 @@ def generation_stats(answers, pairs):
             if tf == "False":
                 false_correct += 1
                 correct += 1
+    m = _clf_metrics(np.array(y_true_list), np.array(y_pred_list))  # no AUC (binary only)
     return {
         "accuracy":        float(correct        / total)       if total       > 0 else 0.0,
         "true_accuracy":   float(true_correct   / true_total)  if true_total  > 0 else 0.0,
         "false_accuracy":  float(false_correct  / false_total) if false_total > 0 else 0.0,
         "gibberish_rate":  float(gibberish      / total)       if total       > 0 else 0.0,
+        "precision":       m["precision"],
+        "recall":          m["recall"],
+        "f1":              m["f1"],
     }
 
 
@@ -1132,6 +1186,9 @@ def print_gen_stats(label, stats):
     print(f"    True accuracy    : {stats['true_accuracy']:.3f}")
     print(f"    False accuracy   : {stats['false_accuracy']:.3f}")
     print(f"    Gibberish rate   : {stats['gibberish_rate']:.3f}")
+    print(f"    Precision        : {stats.get('precision', 0):.3f}")
+    print(f"    Recall           : {stats.get('recall', 0):.3f}")
+    print(f"    F1               : {stats.get('f1', 0):.3f}")
 
 
 def print_logit_stats(label, stats):
@@ -1142,24 +1199,38 @@ def print_logit_stats(label, stats):
     print(f"    Logit accuracy   : {stats.get('accuracy', 0):.3f}")
     print(f"    True  logit acc  : {stats.get('true_accuracy', 0):.3f}")
     print(f"    False logit acc  : {stats.get('false_accuracy', 0):.3f}")
+    print(f"    Precision        : {stats.get('precision', 0):.3f}")
+    print(f"    Recall           : {stats.get('recall', 0):.3f}")
+    print(f"    F1               : {stats.get('f1', 0):.3f}")
+    print(f"    AUC-ROC          : {stats.get('auc', 0):.3f}")
 
 
 def print_probe_stats_all(label, all_ps):
     """Print per-layer, multi-layer, and ensemble probe stats for all classifier types."""
+    def _extra(s):
+        parts = [f"prec {s.get('precision',0):.3f}",
+                 f"rec {s.get('recall',0):.3f}",
+                 f"f1 {s.get('f1',0):.3f}"]
+        if "auc" in s:
+            parts.append(f"auc {s['auc']:.3f}")
+        return "  " + "  ".join(parts)
+
     print(f"  [{label}] Per-layer probes (at each clf's best layer):")
     for clf_name in CLF_NAMES:
         s = all_ps["per_layer"].get(clf_name, {})
         print(f"    {clf_name:<8} layer {s.get('best_layer','?'):>2}  "
               f"acc {s.get('accuracy',0):.3f}  "
               f"true {s.get('true_accuracy',0):.3f}  "
-              f"false {s.get('false_accuracy',0):.3f}")
+              f"false {s.get('false_accuracy',0):.3f}"
+              + _extra(s))
     print(f"  [{label}] Multi-layer probes:")
     for clf_name in CLF_NAMES:
         s = all_ps["multi_layer"].get(clf_name, {})
         print(f"    {clf_name:<8}"
               f"acc {s.get('accuracy',0):.3f}  "
               f"true {s.get('true_accuracy',0):.3f}  "
-              f"false {s.get('false_accuracy',0):.3f}")
+              f"false {s.get('false_accuracy',0):.3f}"
+              + _extra(s))
     for ens_key, ens_label in [("vote_ensemble", "Ensemble vote"), ("avg_ensemble", "Ensemble avg")]:
         print(f"  [{label}] {ens_label} probes:")
         for clf_name in CLF_NAMES:
@@ -1167,7 +1238,8 @@ def print_probe_stats_all(label, all_ps):
             print(f"    {clf_name:<8}"
                   f"acc {s.get('accuracy',0):.3f}  "
                   f"true {s.get('true_accuracy',0):.3f}  "
-                  f"false {s.get('false_accuracy',0):.3f}")
+                  f"false {s.get('false_accuracy',0):.3f}"
+                  + _extra(s))
 
 
 def print_tf_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
@@ -1263,16 +1335,23 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     t1 = CHECKPOINT_DIR / "summary_table1_gen_logit.csv"
     with open(t1, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["method", "gen_acc", "gen_true", "gen_false", "gibberish",
-                    "logit_acc", "logit_true", "logit_false"])
+        w.writerow(["method",
+                    "gen_acc", "gen_true", "gen_false", "gibberish",
+                    "gen_precision", "gen_recall", "gen_f1",
+                    "logit_acc", "logit_true", "logit_false",
+                    "logit_precision", "logit_recall", "logit_f1", "logit_auc"])
         def _r1(name, g, lo):
             lo = lo or {}
             w.writerow([name,
                         round(g["accuracy"], 4), round(g["true_accuracy"], 4),
                         round(g["false_accuracy"], 4), round(g["gibberish_rate"], 4),
+                        round(g.get("precision", 0), 4), round(g.get("recall", 0), 4),
+                        round(g.get("f1", 0), 4),
                         round(_prow(lo, "accuracy"), 4),
                         round(_prow(lo, "true_accuracy"), 4),
-                        round(_prow(lo, "false_accuracy"), 4)])
+                        round(_prow(lo, "false_accuracy"), 4),
+                        round(_prow(lo, "precision"), 4), round(_prow(lo, "recall"), 4),
+                        round(_prow(lo, "f1"), 4), round(_prow(lo, "auc"), 4)])
         _r1("Base", base_gen, base_logit)
         for method, r in all_results.items():
             _r1(method, r["gen"], r.get("logit"))
@@ -1282,13 +1361,13 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     _probe_cols = (
         ["method"]
         + [f"pl_{clf.lower()}_{k}"
-           for clf in CLF_NAMES for k in ("acc", "true", "fals", "lyr")]
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "lyr", "prec", "rec", "f1", "auc")]
         + [f"ml_{clf.lower()}_{k}"
-           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
         + [f"vote_{clf.lower()}_{k}"
-           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1")]
         + [f"avg_{clf.lower()}_{k}"
-           for clf in CLF_NAMES for k in ("acc", "true", "fals")]
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
     )
 
     def _probe_row(name, aps):
@@ -1302,22 +1381,37 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4),
-                    s.get("best_layer", "")]
+                    s.get("best_layer", ""),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = ml.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
-                    round(_prow(s, "false_accuracy"), 4)]
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = vote.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
-                    round(_prow(s, "false_accuracy"), 4)]
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4)]
         for clf in CLF_NAMES:
             s = avg.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
-                    round(_prow(s, "false_accuracy"), 4)]
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
         return row
 
     for tnum, fname, inc_base, key in [
@@ -1339,8 +1433,11 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     t4 = CHECKPOINT_DIR / "summary_table4_retain.csv"
     with open(t4, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["method", "ret_acc", "ret_true", "ret_false",
-                    "ret_logit_acc", "ret_logit_true", "ret_logit_false"])
+        w.writerow(["method",
+                    "ret_acc", "ret_true", "ret_false",
+                    "ret_precision", "ret_recall", "ret_f1",
+                    "ret_logit_acc", "ret_logit_true", "ret_logit_false",
+                    "ret_logit_precision", "ret_logit_recall", "ret_logit_f1", "ret_logit_auc"])
         for method, r in all_results.items():
             rt = r["retain"]
             rl = r.get("retain_logit", {})
@@ -1348,9 +1445,16 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                         round(rt["accuracy"], 4),
                         round(rt["true_accuracy"], 4),
                         round(rt["false_accuracy"], 4),
+                        round(rt.get("precision", 0), 4),
+                        round(rt.get("recall", 0), 4),
+                        round(rt.get("f1", 0), 4),
                         round(_prow(rl, "accuracy"), 4),
                         round(_prow(rl, "true_accuracy"), 4),
-                        round(_prow(rl, "false_accuracy"), 4)])
+                        round(_prow(rl, "false_accuracy"), 4),
+                        round(_prow(rl, "precision"), 4),
+                        round(_prow(rl, "recall"), 4),
+                        round(_prow(rl, "f1"), 4),
+                        round(_prow(rl, "auc"), 4)])
     print(f"  [CSV] {t4}")
 
     # ── Table 6: MCQ direct ───────────────────────────────────────────────────
@@ -2288,37 +2392,47 @@ def save_sweep_csv(method_name: str, results: list):
         for clf in CLF_NAMES:
             s = aps.get("per_layer",     {}).get(clf, {}) if aps else {}
             row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
-                    round(_sw(s, "false_accuracy"), 4), s.get("best_layer", "")]
+                    round(_sw(s, "false_accuracy"), 4), s.get("best_layer", ""),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = aps.get("multi_layer",   {}).get(clf, {}) if aps else {}
             row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
-                    round(_sw(s, "false_accuracy"), 4)]
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = aps.get("vote_ensemble", {}).get(clf, {}) if aps else {}
             row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
-                    round(_sw(s, "false_accuracy"), 4)]
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4)]
         for clf in CLF_NAMES:
             s = aps.get("avg_ensemble",  {}).get(clf, {}) if aps else {}
             row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
-                    round(_sw(s, "false_accuracy"), 4)]
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         return row
 
     def _probe_cols(pfx):
         return (
             [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
-             for k in ("pl_acc", "pl_true", "pl_fals", "pl_lyr")]
+             for k in ("pl_acc", "pl_true", "pl_fals", "pl_lyr", "pl_prec", "pl_rec", "pl_f1", "pl_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
-               for k in ("ml_acc", "ml_true", "ml_fals")]
+               for k in ("ml_acc", "ml_true", "ml_fals", "ml_prec", "ml_rec", "ml_f1", "ml_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
-               for k in ("vote_acc", "vote_true", "vote_fals")]
+               for k in ("vote_acc", "vote_true", "vote_fals", "vote_prec", "vote_rec", "vote_f1")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
-               for k in ("avg_acc", "avg_true", "avg_fals")]
+               for k in ("avg_acc", "avg_true", "avg_fals", "avg_prec", "avg_rec", "avg_f1", "avg_auc")]
         )
 
     cols = (
         ["checkpoint", "model_id",
          "gen_acc", "gen_true", "gen_false", "gen_gib",
+         "gen_precision", "gen_recall", "gen_f1",
          "logit_acc", "logit_true", "logit_false",
+         "logit_precision", "logit_recall", "logit_f1", "logit_auc",
          "mcq_acc", "mcq_gib"]
         + _probe_cols("bp")
         + (_probe_cols("mp") if has_mp else [])
@@ -2336,8 +2450,12 @@ def save_sweep_csv(method_name: str, results: list):
                 [ck, sweep_model_id(method_name, ck),
                  round(_sw(g,  "accuracy"), 4), round(_sw(g,  "true_accuracy"), 4),
                  round(_sw(g,  "false_accuracy"), 4), round(_sw(g, "gibberish_rate"), 4),
+                 round(_sw(g,  "precision"), 4), round(_sw(g,  "recall"), 4),
+                 round(_sw(g,  "f1"), 4),
                  round(_sw(lo, "accuracy"), 4), round(_sw(lo, "true_accuracy"), 4),
                  round(_sw(lo, "false_accuracy"), 4),
+                 round(_sw(lo, "precision"), 4), round(_sw(lo, "recall"), 4),
+                 round(_sw(lo, "f1"), 4), round(_sw(lo, "auc"), 4),
                  round(_sw(mcq,"accuracy"), 4), round(_sw(mcq,"gibberish_rate"), 4)]
                 + _probe_block(r.get("all_base_probe_stats", {}))
                 + (_probe_block(r.get("all_method_probe_stats", {})) if has_mp else [])
