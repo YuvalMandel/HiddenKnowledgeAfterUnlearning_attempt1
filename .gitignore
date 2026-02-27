@@ -1,5 +1,7 @@
 .claude*
 .idea/
+logs/
+checkpoints/
 
 # Python
 __pycache__/
@@ -22,3 +24,6 @@ monitor.sh
 # OS
 .DS_Store
 Thumbs.db
+
+# image results
+*.png
