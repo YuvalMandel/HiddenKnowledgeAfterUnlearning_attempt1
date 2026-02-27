@@ -202,8 +202,13 @@ Stage 2 starts automatically once stage 1 succeeds; stage 3 starts once all stag
 # Submit all 64 parallel jobs (8 methods × 8 checkpoints):
 bash submit_sweep.sh
 
-# Submit + auto-submit summary jobs after all 64 complete:
+# Submit sweep + auto-submit summary+plot jobs after all 64 complete:
 bash submit_sweep.sh --summary
+
+# Submit sweep + summary, with plot options:
+bash submit_sweep.sh --summary --plot_type heatmap --metric f1
+bash submit_sweep.sh --summary --metric auc --probe_source base
+bash submit_sweep.sh --summary --clf LR --metric accuracy --plot_type line
 
 # One method only (8 parallel jobs):
 bash submit_sweep.sh --method GradDiff
@@ -211,9 +216,8 @@ bash submit_sweep.sh --method GradDiff
 # Single (method, checkpoint) job:
 bash submit_sweep.sh --method GradDiff --checkpoint 3
 
-# After sweep jobs finish — print tables and save CSVs (no GPU):
-bash submit_sweep.sh --summary         # or submit summary array directly:
-sbatch --array=0-7 slurm_sweep_summary.sh
+# Submit summary+plot array directly (after sweep jobs have finished):
+sbatch --export=ALL --array=0-7 slurm_sweep_summary.sh
 
 # Logs:
 tail -f logs/sweep_<TASK>_<JOBID>.out
@@ -222,7 +226,20 @@ tail -f logs/sweep_sum_<TASK>_<JOBID>.out
 
 The sweep runs as a **64-task SLURM array** (`slurm_sweep.sh`, tasks 0–63).
 Each task handles one (method, checkpoint) pair independently — all 64 can run in parallel.
-After all sweep tasks finish, run `sweep_summary` (CPU-only) per method to produce the table and CSV.
+
+`slurm_sweep_summary.sh` runs two steps per method in one job:
+1. Print the SWEEP TABLE and save `{method}_sweep.csv` (calls `--stage sweep_summary`)
+2. Generate the layer-accuracy plot by calling `plot_layer_accuracy.py`
+
+Plot options are forwarded via environment variables:
+
+| `submit_sweep.sh` flag | Env var passed to SLURM | Default |
+|---|---|---|
+| `--plot_type line\|heatmap` | `PLOT_PLOT_TYPE` | `line` |
+| `--metric accuracy\|f1\|…` | `PLOT_METRIC` | all metrics |
+| `--clf LR\|RF\|AdaBoost` | `PLOT_CLF` | all |
+| `--probe_source method\|base` | `PLOT_PROBE_SOURCE` | `method` |
+| `--out filename` | `PLOT_OUT` | auto-generated |
 
 ### Running a single method manually
 
@@ -358,16 +375,23 @@ The CSV (`checkpoints/sweep_<method>/<method>_sweep.csv`) also includes multi-la
 
 Plots are produced by `plot_layer_accuracy.py` (no GPU required — reads from saved `.npy` and `.pkl` files).
 
-### Plot modes
+### Plot modes (`--mode`)
 
-| Mode | Description |
+| Value | Description |
 |---|---|
-| `methods` (default) | Per-layer probe metric for all 10 models at their final checkpoint. One curve per model, X axis = transformer layer. |
-| `checkpoints` | Per-layer probe metric for **one** unlearning method across all 8 training checkpoints, with Base (Instruct) as a reference curve. |
+| `methods` (default) | Per-layer probe metric for all 10 models at their final checkpoint. One curve/row per model. |
+| `checkpoints` | Per-layer probe metric for **one** unlearning method across all 8 training checkpoints, with Base (Instruct) as a reference. `--method METHOD` or `--method all` (8 files). |
+
+### Plot types (`--plot_type`)
+
+| Value | Description |
+|---|---|
+| `line` (default) | One curve per model/checkpoint, X axis = layer. |
+| `heatmap` | 2-D grid: X axis = layer, Y axis = checkpoint or model, colour = metric value (red=low → green=high). One subplot per classifier. |
 
 ### Metrics (`--metric`)
 
-If `--metric` is omitted all metrics are plotted as separate rows in one figure.
+If omitted, all metrics are plotted as separate rows in one figure.
 
 | Value | Description |
 |---|---|
@@ -383,59 +407,93 @@ If `--metric` is omitted all metrics are plotted as separate rows in one figure.
 
 | Value | Description |
 |---|---|
-| `method` (default) | Each model/checkpoint is evaluated with its **own** trained probes (Table 3) |
-| `base` | The base model's probes are applied to every model's hidden states (Table 2) |
+| `method` (default) | Each model/checkpoint evaluated with its **own** trained probes (Table 3) |
+| `base` | Base model's probes applied to every model's hidden states (Table 2) |
+
+### Output filenames
+
+When `--out` is not given, a descriptive name is auto-generated:
+
+```
+{plot_type}_{mode}[_{method}]_{metric}_{clf}_{probe_source}.png
+```
+
+Examples:
+```
+line_methods_all_metrics_all_clf_method.png
+line_checkpoints_GradDiff_f1_LR_method.png
+heatmap_checkpoints_GradDiff_auc_all_clf_base.png
+heatmap_methods_accuracy_all_clf_method.png
+```
+
+When `--out` is given with `--method all`, it is used as a template and the method name is appended to the stem.
 
 ### Examples
 
 ```bash
-# All models, all metrics, method probes (default):
+# ── Line plots ──────────────────────────────────────────────────────────────
+
+# All models, all metrics (default):
 python plot_layer_accuracy.py
 
-# All models, F1 only:
-python plot_layer_accuracy.py --metric f1
+# All models, F1 only, LR classifier:
+python plot_layer_accuracy.py --metric f1 --clf LR
 
 # All models, AUC-ROC, base probes:
-python plot_layer_accuracy.py --metric auc --probe_source base --out layer_auc_base.png
-
-# LR classifier only, overall accuracy:
-python plot_layer_accuracy.py --clf LR --metric accuracy
+python plot_layer_accuracy.py --metric auc --probe_source base
 
 # One method across 8 checkpoints:
-python plot_layer_accuracy.py --mode checkpoints --method GradDiff
-
-# One method, F1 only:
 python plot_layer_accuracy.py --mode checkpoints --method GradDiff --metric f1
 
-# One method, base probes:
-python plot_layer_accuracy.py --mode checkpoints --method RMU --probe_source base --out ck_rmu_base.png
+# All 8 methods, one PNG each (auto-named):
+python plot_layer_accuracy.py --mode checkpoints --method all --metric accuracy
 
-# All 8 methods, one PNG per method (output: layer_accuracy_GradDiff.png, ...):
-python plot_layer_accuracy.py --mode checkpoints --method all
+# ── Heatmaps ────────────────────────────────────────────────────────────────
 
-# All 8 methods via SLURM (parallel, one job per method):
-bash submit_plot_checkpoints.sh
-bash submit_plot_checkpoints.sh --metric f1
-bash submit_plot_checkpoints.sh --probe_source base --out plots/ck_base.png
+# All models × all layers, coloured by accuracy:
+python plot_layer_accuracy.py --plot_type heatmap --metric accuracy
+
+# All models × all layers, F1, LR only:
+python plot_layer_accuracy.py --plot_type heatmap --metric f1 --clf LR
+
+# Checkpoints × layers heatmap, one method:
+python plot_layer_accuracy.py --mode checkpoints --method GradDiff --plot_type heatmap --metric f1
+
+# Checkpoints × layers, AUC-ROC, base probes:
+python plot_layer_accuracy.py --mode checkpoints --method RMU --plot_type heatmap --metric auc --probe_source base
+
+# All 8 methods, heatmap, one PNG each (auto-named):
+python plot_layer_accuracy.py --mode checkpoints --method all --plot_type heatmap --metric f1
 ```
 
 ### SLURM checkpoint plots
 
-`submit_plot_checkpoints.sh` submits 8 parallel CPU jobs (one per unlearning method) via `slurm_plot_checkpoints.sh`.  Each job produces one PNG named `{out_stem}_{Method}.{ext}`.
+`submit_plot_checkpoints.sh` submits 8 parallel CPU jobs (one per unlearning method) via `slurm_plot_checkpoints.sh`.
 
 ```bash
-# Default (method probes, all metrics):
+# Default (line, method probes, all metrics — filenames auto-generated):
 bash submit_plot_checkpoints.sh
 
-# Options:
-bash submit_plot_checkpoints.sh --metric auc --out plots/auc.png
-bash submit_plot_checkpoints.sh --probe_source base --clf LR
+# Heatmap, F1 only:
+bash submit_plot_checkpoints.sh --plot_type heatmap --metric f1
+
+# Base probes, AUC, custom output template:
+bash submit_plot_checkpoints.sh --probe_source base --metric auc --out plots/ck.png
+
+# LR only, line plot:
+bash submit_plot_checkpoints.sh --clf LR --metric accuracy
 ```
 
-Output files land next to the `--out` path, one per method:
+When `--out` is omitted, filenames are auto-generated per method:
 ```
-layer_accuracy_GradDiff.png
-layer_accuracy_RMU.png
-layer_accuracy_RMU_LAT.png
+line_checkpoints_GradDiff_f1_all_clf_method.png
+line_checkpoints_RMU_f1_all_clf_method.png
+...
+```
+
+When `--out plots/ck.png` is given, output is:
+```
+plots/ck_GradDiff.png
+plots/ck_RMU.png
 ...
 ```

@@ -20,9 +20,16 @@
 #
 # Usage:
 #   bash submit_sweep.sh                     # all 8 methods × 8 checkpoints
-#   bash submit_sweep.sh --summary           # also submit summary jobs after
+#   bash submit_sweep.sh --summary           # also submit summary+plot jobs after
 #   bash submit_sweep.sh --method GradDiff   # one method only (8 ck jobs)
 #   bash submit_sweep.sh --method GradDiff --checkpoint 3  # single job
+#
+# Plot options (only used when --summary is passed):
+#   --plot_type  line|heatmap        (default: line)
+#   --metric     accuracy|f1|auc|…  (default: all)
+#   --clf        LR|RF|AdaBoost      (default: all)
+#   --probe_source method|base       (default: method)
+#   --out        filename template   (default: auto-generated)
 
 set -e
 mkdir -p logs
@@ -31,11 +38,25 @@ WITH_SUMMARY=false
 SINGLE_METHOD=""
 SINGLE_CK=""
 
+# Plot options passed through to slurm_sweep_summary.sh via env vars
+export PLOT_PLOT_TYPE=""
+export PLOT_METRIC=""
+export PLOT_CLF=""
+export PLOT_PROBE_SOURCE=""
+export PLOT_OUT=""
+export PLOT_CHECKPOINT_DIR="checkpoints"
+
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --summary)    WITH_SUMMARY=true ;;
-        --method)     SINGLE_METHOD="$2"; shift ;;
-        --checkpoint) SINGLE_CK="$2";    shift ;;
+        --summary)        WITH_SUMMARY=true ;;
+        --method)         SINGLE_METHOD="$2";          shift ;;
+        --checkpoint)     SINGLE_CK="$2";              shift ;;
+        --plot_type)      export PLOT_PLOT_TYPE="$2";  shift ;;
+        --metric)         export PLOT_METRIC="$2";     shift ;;
+        --clf)            export PLOT_CLF="$2";        shift ;;
+        --probe_source)   export PLOT_PROBE_SOURCE="$2"; shift ;;
+        --out)            export PLOT_OUT="$2";        shift ;;
+        --checkpoint_dir) export PLOT_CHECKPOINT_DIR="$2"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
@@ -86,11 +107,13 @@ if $WITH_SUMMARY; then
     else
         SUM_RANGE="0-7"
     fi
+    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}"
     SUM_JOB=$(sbatch --parsable \
         --dependency=afterok:${SWEEP_JOB} \
         --array="${SUM_RANGE}" \
+        --export=ALL \
         slurm_sweep_summary.sh)
-    echo "  Summary job ID: ${SUM_JOB}  (depends on ${SWEEP_JOB})"
+    echo "  Summary+plot job ID: ${SUM_JOB}  (depends on ${SWEEP_JOB})"
 fi
 
 echo ""
@@ -100,3 +123,4 @@ echo ""
 echo "When complete, results are in:"
 echo "  checkpoints/sweep_<method>/ck<N>/results.json"
 echo "  checkpoints/sweep_<method>/<method>_sweep.csv  (after sweep_summary)"
+echo "  <plot>.png                                      (after sweep_summary)"

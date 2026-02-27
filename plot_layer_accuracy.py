@@ -5,16 +5,21 @@ plot_layer_accuracy.py
 Two plot modes (--mode):
 
   methods    (default)
-             Per-layer probe accuracy for all 10 models at their final-checkpoint
-             state.  X axis = layer, one curve per model.
+             Per-layer probe metric for all 10 models at their final-checkpoint
+             state.  X axis = layer, one curve/row per model.
 
   checkpoints
-             Per-layer probe accuracy for ONE unlearning method across all 8
+             Per-layer probe metric for ONE unlearning method across all 8
              training checkpoints, with the Base (Instruct) model as reference.
-             X axis = layer, one curve per checkpoint + one for base.
+             X axis = layer, one curve/row per checkpoint + one for base.
 
              --method METHOD   which method to show (required, or "all")
              --method all      produce one graph per method (8 files)
+
+Two plot types (--plot_type):
+
+  line      (default) — one curve per model/checkpoint, X = layer
+  heatmap   — 2-D grid: X = layer, Y = checkpoint or model, colour = metric
 
 Two probe-source modes (--probe_source):
   method  (default / Table 3)
@@ -25,26 +30,33 @@ Two probe-source modes (--probe_source):
           Exception: Llama3-8B (methods mode) and Base (Instruct) (both modes)
           always use their own probes.
 
-X axis: transformer layers 1-32  (embedding layer 0 is skipped)
-Y axis: probe metric on the forget-set test split
-         lower = Y_MIN,  upper = max observed value + 5 % padding
+Metrics (--metric):
+  accuracy | true_accuracy | false_accuracy | precision | recall | f1 | auc
+  If omitted all metrics are shown as separate rows.
 
---metric: if omitted, all metrics are shown as separate rows in one figure.
-          If specified, only that metric is shown.
-          Available: accuracy | true_accuracy | false_accuracy | precision | recall | f1 | auc
+Output filenames are auto-generated from parameters when --out is not given:
+  {plot_type}_{mode}[_{method}]_{metric}_{clf}_{probe_source}.png
+  e.g.  heatmap_checkpoints_GradDiff_f1_LR_method.png
+        line_methods_all_metrics_all_clf_base.png
 
 Usage:
-    # --- methods mode (original behaviour) ---
+    # --- methods / line ---
     python plot_layer_accuracy.py
-    python plot_layer_accuracy.py --probe_source base --out layer_base_probes.png
-    python plot_layer_accuracy.py --clf LR --metric true_accuracy
+    python plot_layer_accuracy.py --metric f1 --clf LR
+    python plot_layer_accuracy.py --probe_source base --metric auc
 
-    # --- checkpoints mode ---
+    # --- methods / heatmap ---
+    python plot_layer_accuracy.py --plot_type heatmap --metric accuracy
+    python plot_layer_accuracy.py --plot_type heatmap --metric f1 --clf LR
+
+    # --- checkpoints / line ---
     python plot_layer_accuracy.py --mode checkpoints --method GradDiff
     python plot_layer_accuracy.py --mode checkpoints --method RMU --probe_source base
-    python plot_layer_accuracy.py --mode checkpoints --method all   # 8 files
-    python plot_layer_accuracy.py --mode checkpoints --method all --out ck_plot.png
-    #  ^ produces ck_plot_GradDiff.png, ck_plot_RMU.png, ...
+    python plot_layer_accuracy.py --mode checkpoints --method all
+
+    # --- checkpoints / heatmap ---
+    python plot_layer_accuracy.py --mode checkpoints --method GradDiff --plot_type heatmap --metric f1
+    python plot_layer_accuracy.py --mode checkpoints --method all --plot_type heatmap --metric auc
 """
 
 import argparse
@@ -426,6 +438,93 @@ def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
 
 
 # ---------------------------------------------------------------------------
+# Auto filename
+# ---------------------------------------------------------------------------
+
+def _auto_out_path(plot_type: str, mode: str, method: str | None,
+                   metric: str | None, clf: str | None,
+                   probe_source: str) -> Path:
+    """
+    Build a descriptive output filename from the run parameters.
+    Example: heatmap_checkpoints_GradDiff_f1_LR_method.png
+    """
+    parts = [plot_type, mode]
+    if mode == "checkpoints" and method and method != "all":
+        parts.append(_safe_name(method))
+    parts.append(_safe_name(metric) if metric else "all_metrics")
+    parts.append(clf.lower() if clf else "all_clf")
+    parts.append(probe_source)
+    return Path("_".join(parts) + ".png")
+
+
+# ---------------------------------------------------------------------------
+# Heatmap renderer (shared by both modes)
+# ---------------------------------------------------------------------------
+
+def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
+                    row_labels: list, out_path: Path, title: str):
+    """
+    Render a heatmap figure.
+
+    Layout: rows = metrics_to_plot, cols = clfs.
+    Each cell: X = layer (1..N_LAYERS), Y = row_labels (checkpoints or models),
+               colour = metric value (0–1, RdYlGn).
+    """
+    n_rows_fig = len(metrics_to_plot)
+    n_clfs     = len(clfs)
+
+    fig, axes = plt.subplots(
+        n_rows_fig, n_clfs,
+        figsize=(6 * n_clfs, 3.5 * n_rows_fig),
+        squeeze=False,
+    )
+    fig.suptitle(title, fontsize=11, y=1.01)
+
+    for row_idx, metric in enumerate(metrics_to_plot):
+        for ax_idx, clf_name in enumerate(clfs):
+            ax = axes[row_idx][ax_idx]
+            clf_data = data[metric].get(clf_name, {})
+
+            # Rows present for this clf (preserve declared order)
+            present = [lb for lb in row_labels if lb in clf_data]
+            mat = np.full((len(present), N_LAYERS), np.nan)
+            for ri, label in enumerate(present):
+                layers, vals = clf_data[label]
+                for l, v in zip(layers, vals):
+                    if 1 <= l <= N_LAYERS:
+                        mat[ri, l - 1] = v
+
+            im = ax.imshow(
+                mat, aspect="auto", origin="upper",
+                vmin=0.0, vmax=1.0, cmap="RdYlGn",
+                interpolation="nearest",
+            )
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+            # Titles / labels
+            if row_idx == 0:
+                ax.set_title(clf_name, fontsize=11)
+            if ax_idx == 0:
+                ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
+            if row_idx == n_rows_fig - 1:
+                ax.set_xlabel("Layer", fontsize=10)
+                # Show every 4th layer tick to avoid crowding
+                tick_pos = list(range(0, N_LAYERS, 4))
+                ax.set_xticks(tick_pos)
+                ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=8)
+            else:
+                ax.set_xticks([])
+
+            ax.set_yticks(range(len(present)))
+            ax.set_yticklabels(present, fontsize=8)
+
+    fig.subplots_adjust(hspace=0.4, wspace=0.35)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"\nSaved -> {out_path}")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Plot — methods mode (original)
 # ---------------------------------------------------------------------------
 
@@ -614,31 +713,88 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
 
 
 # ---------------------------------------------------------------------------
+# Heatmap — methods mode  (Y = model, X = layer)
+# ---------------------------------------------------------------------------
+
+def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
+                         clf_filter: list, metric: str | None,
+                         probe_source: str):
+    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
+
+    print("Loading y_test from CSV ...")
+    y_test = load_y_test(csv_path)
+
+    clfs            = clf_filter if clf_filter else CLF_NAMES
+    metrics_to_plot = [metric] if metric else METRIC_NAMES
+
+    data = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot, probe_source)
+
+    row_labels = list(ALL_MODELS.keys())   # model display names in palette order
+    title = (
+        f"Probe Heatmap — all models  [{PROBE_SOURCE_TITLES[probe_source].split(' —')[0]}]"
+    )
+    _render_heatmap(data, metrics_to_plot, clfs, row_labels, out_path, title)
+
+
+# ---------------------------------------------------------------------------
+# Heatmap — checkpoints mode  (Y = checkpoint, X = layer)
+# ---------------------------------------------------------------------------
+
+def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
+                              method_name: str,
+                              clf_filter: list, metric: str | None,
+                              probe_source: str):
+    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
+
+    print(f"\n=== Heatmap checkpoints mode: {method_name} ===")
+    y_test = load_y_test(csv_path)
+
+    clfs            = clf_filter if clf_filter else CLF_NAMES
+    metrics_to_plot = [metric] if metric else METRIC_NAMES
+
+    data = collect_data_checkpoints(
+        checkpoint_dir, method_name, clfs, y_test, metrics_to_plot, probe_source
+    )
+
+    probe_lbl = "Method Probes" if probe_source == "method" else "Base Probes"
+    title = (
+        f"{method_name} — Probe Heatmap Over Training Checkpoints  [{probe_lbl}]"
+    )
+    _render_heatmap(data, metrics_to_plot, clfs, CK_LABELS, out_path, title)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Plot per-layer probe accuracy.\n"
-            "  methods mode     — all models at final checkpoint (original)\n"
-            "  checkpoints mode — one method across training checkpoints"
+            "Plot per-layer probe metrics.\n"
+            "  methods mode     — all models at final checkpoint\n"
+            "  checkpoints mode — one method across training checkpoints\n"
+            "  plot_type line   — curves (default)\n"
+            "  plot_type heatmap — 2-D grid (X=layer, Y=checkpoint/model, colour=metric)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
         "--mode", choices=["methods", "checkpoints"], default="methods",
-        help=(
-            "Plot mode (default: methods).\n"
-            "  methods      — all 10 models at final checkpoint state\n"
-            "  checkpoints  — one unlearning method across 8 training checkpoints"
-        ),
+        help="Plot mode (default: methods).",
+    )
+    parser.add_argument(
+        "--plot_type", choices=["line", "heatmap"], default="line",
+        help="Plot type: line curves or 2-D heatmap (default: line).",
     )
     parser.add_argument(
         "--method", default=None,
         help=(
-            "For --mode checkpoints: method name or 'all' (to produce one file per method).\n"
+            "For --mode checkpoints: method name or 'all' (one file per method).\n"
             f"Available: {', '.join(SWEEP_METHODS + ['all'])}"
         ),
     )
@@ -647,11 +803,12 @@ def main():
         help="Checkpoint directory (default: checkpoints)"
     )
     parser.add_argument(
-        "--out", default="layer_accuracy.png",
+        "--out", default=None,
         help=(
-            "Output PNG path (default: layer_accuracy.png).\n"
-            "For --mode checkpoints --method all, used as a filename template:\n"
-            "  e.g. layer_accuracy.png → layer_accuracy_GradDiff.png, ..."
+            "Output PNG path. If omitted a descriptive name is auto-generated:\n"
+            "  {plot_type}_{mode}[_{method}]_{metric}_{clf}_{probe_source}.png\n"
+            "When --method all, this becomes a filename template and the method\n"
+            "name is appended to the stem for each output file."
         )
     )
     parser.add_argument(
@@ -671,44 +828,65 @@ def main():
         help=(
             "Which probes to use (default: method).\n"
             "  method — each model/checkpoint's own probes (Table 3)\n"
-            "  base   — base probes on all models; base (Instruct) always uses own probes"
+            "  base   — base probes on all models"
         ),
     )
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
-    out_path       = Path(args.out)
     clf_filter     = [args.clf] if args.clf else []
 
-    if args.mode == "methods":
-        make_plot(
-            checkpoint_dir=checkpoint_dir,
-            out_path=out_path,
-            clf_filter=clf_filter,
-            metric=args.metric,
-            probe_source=args.probe_source,
+    # Resolve base output path (auto-generate if not given)
+    if args.out is not None:
+        base_out = Path(args.out)
+    else:
+        base_out = _auto_out_path(
+            args.plot_type, args.mode,
+            args.method if args.mode == "checkpoints" else None,
+            args.metric, args.clf, args.probe_source,
         )
 
-    else:  # checkpoints
+    # ── methods mode ─────────────────────────────────────────────────────────
+    if args.mode == "methods":
+        if args.plot_type == "heatmap":
+            make_heatmap_methods(
+                checkpoint_dir=checkpoint_dir,
+                out_path=base_out,
+                clf_filter=clf_filter,
+                metric=args.metric,
+                probe_source=args.probe_source,
+            )
+        else:
+            make_plot(
+                checkpoint_dir=checkpoint_dir,
+                out_path=base_out,
+                clf_filter=clf_filter,
+                metric=args.metric,
+                probe_source=args.probe_source,
+            )
+
+    # ── checkpoints mode ──────────────────────────────────────────────────────
+    else:
         if args.method is None:
             parser.error("--mode checkpoints requires --method METHOD (or 'all').")
-
-        methods = SWEEP_METHODS if args.method == "all" else [args.method]
-
         if args.method not in SWEEP_METHODS and args.method != "all":
             parser.error(
                 f"Unknown method '{args.method}'. "
                 f"Choose from: {', '.join(SWEEP_METHODS + ['all'])}"
             )
 
+        methods = SWEEP_METHODS if args.method == "all" else [args.method]
+
+        plot_fn = make_heatmap_checkpoints if args.plot_type == "heatmap" else make_plot_checkpoints
+
         for method in methods:
             if len(methods) > 1:
-                # Auto-name: stem_Method.suffix
-                file_out = out_path.parent / f"{out_path.stem}_{_safe_name(method)}{out_path.suffix}"
+                # For --method all: append method name to the stem
+                file_out = base_out.parent / f"{base_out.stem}_{_safe_name(method)}{base_out.suffix}"
             else:
-                file_out = out_path
+                file_out = base_out
 
-            make_plot_checkpoints(
+            plot_fn(
                 checkpoint_dir=checkpoint_dir,
                 out_path=file_out,
                 method_name=method,

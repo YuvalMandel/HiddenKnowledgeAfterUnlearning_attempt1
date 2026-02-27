@@ -22,7 +22,8 @@
 #   PLOT_PROBE_SOURCE   (default: method)
 #   PLOT_CLF            (default: all)
 #   PLOT_METRIC         (default: all)
-#   PLOT_OUT            (default: layer_accuracy.png)
+#   PLOT_PLOT_TYPE      (default: line)
+#   PLOT_OUT            (default: auto-generated from params)
 #   PLOT_CHECKPOINT_DIR (default: checkpoints)
 #   CONDA_ENV           (default: htm_keyboard_1)
 
@@ -40,24 +41,30 @@ METHOD="${SWEEP_METHODS[$SLURM_ARRAY_TASK_ID]}"
 echo ""
 echo "Method: ${METHOD}"
 
-# Build method-specific output filename: layer_accuracy.png -> layer_accuracy_GradDiff.png
-# Mirrors plot_layer_accuracy._safe_name(): replace & / space with _
-BASE_OUT="${PLOT_OUT:-layer_accuracy.png}"
-SAFE_METHOD="${METHOD//&/_}"
-SAFE_METHOD="${SAFE_METHOD// /_}"
-SAFE_METHOD="${SAFE_METHOD//\//_}"
-OUT_STEM="${BASE_OUT%.*}"
-OUT_EXT="${BASE_OUT##*.}"
-METHOD_OUT="${OUT_STEM}_${SAFE_METHOD}.${OUT_EXT}"
-
-echo "Output: ${METHOD_OUT}"
-
-# Build optional argument list from environment
-EXTRA_ARGS="--out ${METHOD_OUT}"
+# Build optional argument list from environment.
+# If PLOT_OUT is given, append the method name to it (template behaviour).
+# If PLOT_OUT is absent, omit --out entirely so the script auto-generates a
+# descriptive filename that already encodes method, metric, clf, probe_source.
+EXTRA_ARGS=""
 [[ -n "${PLOT_PROBE_SOURCE}"   ]] && EXTRA_ARGS="$EXTRA_ARGS --probe_source ${PLOT_PROBE_SOURCE}"
 [[ -n "${PLOT_CLF}"            ]] && EXTRA_ARGS="$EXTRA_ARGS --clf ${PLOT_CLF}"
 [[ -n "${PLOT_METRIC}"         ]] && EXTRA_ARGS="$EXTRA_ARGS --metric ${PLOT_METRIC}"
+[[ -n "${PLOT_PLOT_TYPE}"      ]] && EXTRA_ARGS="$EXTRA_ARGS --plot_type ${PLOT_PLOT_TYPE}"
 [[ -n "${PLOT_CHECKPOINT_DIR}" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint_dir ${PLOT_CHECKPOINT_DIR}"
+
+if [[ -n "${PLOT_OUT}" ]]; then
+    # User supplied a template — append method name to the stem
+    SAFE_METHOD="${METHOD//&/_}"
+    SAFE_METHOD="${SAFE_METHOD// /_}"
+    SAFE_METHOD="${SAFE_METHOD//\//_}"
+    OUT_STEM="${PLOT_OUT%.*}"
+    OUT_EXT="${PLOT_OUT##*.}"
+    METHOD_OUT="${OUT_STEM}_${SAFE_METHOD}.${OUT_EXT}"
+    EXTRA_ARGS="$EXTRA_ARGS --out ${METHOD_OUT}"
+    echo "Output: ${METHOD_OUT}"
+else
+    echo "Output: auto-generated from params"
+fi
 
 python plot_layer_accuracy.py \
     --mode checkpoints \
