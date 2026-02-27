@@ -131,17 +131,18 @@ slurm_methods.sh                           SLURM job array for stage 2 (8 method
 slurm_summary.sh                           SLURM script for stage 3 (summary)
 slurm_sweep.sh                             SLURM job array for stage 4 (64 tasks: 8 methods × 8 checkpoints)
 slurm_sweep_summary.sh                     SLURM job array for sweep_summary (8 tasks, CPU-only)
-checkpoints/                                 Auto-created; holds .npy, .pkl, .json
-checkpoints/wmdp_tf_pairs.csv               Cached WMDP train/val/test pairs (created on first run)
-checkpoints/summary_table1_gen_logit.csv    Table 1 CSV (generation + logit)
-checkpoints/summary_table2_base_probes.csv  Table 2 CSV (base probes)
-checkpoints/summary_table3_method_probes.csv Table 3 CSV (method-specific probes)
-checkpoints/summary_table4_retain.csv       Table 4 CSV (retain set)
-checkpoints/summary_table5_cross_probes.csv Table 5 CSV (cross-probe quadrant)
-checkpoints/summary_table6_mcq.csv          Table 6 CSV (MCQ direct A/B/C/D)
-checkpoints/sweep_METHOD/                      Sweep results for one method
-checkpoints/sweep_METHOD/ckN/                  Per-checkpoint cache: hs_train/val/test.npy, partial.json, probes.pkl, results.json
-checkpoints/sweep_METHOD/METHOD_sweep.csv      Time-series CSV (one row per checkpoint, written by sweep_summary)
+checkpoints/                                 Auto-created; holds .npy, .pkl, .json model caches
+checkpoints/sweep_METHOD/                    Sweep results for one method
+checkpoints/sweep_METHOD/ckN/               Per-checkpoint cache: hs_train/val/test.npy, partial.json, probes.pkl, results.json
+data/                                        Auto-created; holds all CSV outputs
+data/wmdp_tf_pairs.csv                      Cached WMDP train/val/test pairs (created on first run)
+data/summary_table1_gen_logit.csv           Table 1 CSV (generation + logit)
+data/summary_table2_base_probes.csv         Table 2 CSV (base probes)
+data/summary_table3_method_probes.csv       Table 3 CSV (method-specific probes)
+data/summary_table4_retain.csv              Table 4 CSV (retain set)
+data/summary_table5_cross_probes.csv        Table 5 CSV (cross-probe quadrant)
+data/summary_table6_mcq.csv                 Table 6 CSV (MCQ direct A/B/C/D)
+data/sweep_METHOD/METHOD_sweep.csv          Time-series CSV (one row per checkpoint, written by sweep_summary)
 logs/                                        Auto-created; SLURM stdout/stderr
 ```
 

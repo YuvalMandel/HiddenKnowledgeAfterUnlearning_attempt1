@@ -463,17 +463,42 @@ def _auto_out_path(plot_type: str, mode: str, method: str | None,
 # Heatmap renderer (shared by both modes)
 # ---------------------------------------------------------------------------
 
+def _data_range(data: dict, metrics: list, clfs: list):
+    """Return (vmin, vmax) of all non-NaN values in a data dict."""
+    all_vals = []
+    for m in metrics:
+        for clf in clfs:
+            for _label, (_layers, vals) in data[m].get(clf, {}).items():
+                all_vals.extend(v for v in vals if not np.isnan(v))
+    if not all_vals:
+        return 0.0, 1.0
+    return float(np.min(all_vals)), float(np.max(all_vals))
+
+
 def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
-                    row_labels: list, out_path: Path, title: str):
+                    row_labels: list, out_path: Path, title: str,
+                    vmin: float | None = None, vmax: float | None = None):
     """
     Render a heatmap figure.
 
     Layout: rows = metrics_to_plot, cols = clfs.
     Each cell: X = layer (1..N_LAYERS), Y = row_labels (checkpoints or models),
-               colour = metric value (0–1, RdYlGn).
+               colour = metric value (RdYlGn).
+
+    vmin / vmax: colour scale bounds.  If None, computed from this figure's data.
+    Pass explicit values when multiple figures must share a common scale
+    (e.g. --method all).
     """
     n_rows_fig = len(metrics_to_plot)
     n_clfs     = len(clfs)
+
+    # Compute colour scale if not supplied
+    if vmin is None or vmax is None:
+        _vmin, _vmax = _data_range(data, metrics_to_plot, clfs)
+        if vmin is None:
+            vmin = _vmin
+        if vmax is None:
+            vmax = _vmax
 
     fig, axes = plt.subplots(
         n_rows_fig, n_clfs,
@@ -498,7 +523,7 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 
             im = ax.imshow(
                 mat, aspect="auto", origin="upper",
-                vmin=0.0, vmax=1.0, cmap="RdYlGn",
+                vmin=vmin, vmax=vmax, cmap="RdYlGn",
                 interpolation="nearest",
             )
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -722,8 +747,10 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
 
 def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
                          clf_filter: list, metric: str | None,
-                         probe_source: str):
-    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+                         probe_source: str,
+                         data_dir: Path = DATA_DIR,
+                         vmin: float | None = None, vmax: float | None = None):
+    csv_path = data_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
 
@@ -739,7 +766,8 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
     title = (
         f"Probe Heatmap — all models  [{PROBE_SOURCE_TITLES[probe_source].split(' —')[0]}]"
     )
-    _render_heatmap(data, metrics_to_plot, clfs, row_labels, out_path, title)
+    _render_heatmap(data, metrics_to_plot, clfs, row_labels, out_path, title,
+                    vmin=vmin, vmax=vmax)
 
 
 # ---------------------------------------------------------------------------
@@ -749,8 +777,10 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
 def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
                               method_name: str,
                               clf_filter: list, metric: str | None,
-                              probe_source: str):
-    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+                              probe_source: str,
+                              data_dir: Path = DATA_DIR,
+                              vmin: float | None = None, vmax: float | None = None):
+    csv_path = data_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
 
@@ -768,7 +798,8 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
     title = (
         f"{method_name} — Probe Heatmap Over Training Checkpoints  [{probe_lbl}]"
     )
-    _render_heatmap(data, metrics_to_plot, clfs, CK_LABELS, out_path, title)
+    _render_heatmap(data, metrics_to_plot, clfs, CK_LABELS, out_path, title,
+                    vmin=vmin, vmax=vmax)
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +838,10 @@ def main():
         help="Checkpoint directory (default: checkpoints)"
     )
     parser.add_argument(
+        "--data_dir", default=str(DATA_DIR),
+        help=f"Data directory containing CSVs (default: {DATA_DIR})"
+    )
+    parser.add_argument(
         "--out", default=None,
         help=(
             "Output PNG path. If omitted a descriptive name is auto-generated:\n"
@@ -838,6 +873,7 @@ def main():
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
+    data_dir       = Path(args.data_dir)
     clf_filter     = [args.clf] if args.clf else []
 
     # Resolve base output path (auto-generate if not given)
@@ -859,6 +895,7 @@ def main():
                 clf_filter=clf_filter,
                 metric=args.metric,
                 probe_source=args.probe_source,
+                data_dir=data_dir,
             )
         else:
             make_plot(
@@ -867,6 +904,7 @@ def main():
                 clf_filter=clf_filter,
                 metric=args.metric,
                 probe_source=args.probe_source,
+                data_dir=data_dir,
             )
 
     # ── checkpoints mode ──────────────────────────────────────────────────────
@@ -881,23 +919,60 @@ def main():
 
         methods = SWEEP_METHODS if args.method == "all" else [args.method]
 
-        plot_fn = make_heatmap_checkpoints if args.plot_type == "heatmap" else make_plot_checkpoints
+        if args.plot_type == "heatmap":
+            # For heatmaps: compute a global colour scale across ALL methods so
+            # every figure is directly comparable.  Data dicts are small (scalars
+            # only — raw hs arrays are deleted inside collect_data_checkpoints).
+            clfs            = clf_filter if clf_filter else CLF_NAMES
+            metrics_to_plot = [args.metric] if args.metric else METRIC_NAMES
+            csv_path        = data_dir / "wmdp_tf_pairs.csv"
+            y_test          = load_y_test(csv_path)
 
-        for method in methods:
-            if len(methods) > 1:
-                # For --method all: append method name to the stem
-                file_out = base_out.parent / f"{base_out.stem}_{_safe_name(method)}{base_out.suffix}"
-            else:
-                file_out = base_out
+            print("Computing global colour scale across all methods ...")
+            global_vmin, global_vmax = 1.0, 0.0
+            all_data = {}
+            for method in methods:
+                d = collect_data_checkpoints(
+                    checkpoint_dir, method, clfs, y_test, metrics_to_plot, args.probe_source
+                )
+                all_data[method] = d
+                lo, hi = _data_range(d, metrics_to_plot, clfs)
+                global_vmin = min(global_vmin, lo)
+                global_vmax = max(global_vmax, hi)
+            print(f"  Global scale: vmin={global_vmin:.4f}  vmax={global_vmax:.4f}")
 
-            plot_fn(
-                checkpoint_dir=checkpoint_dir,
-                out_path=file_out,
-                method_name=method,
-                clf_filter=clf_filter,
-                metric=args.metric,
-                probe_source=args.probe_source,
-            )
+            for method in methods:
+                if len(methods) > 1:
+                    file_out = base_out.parent / f"{base_out.stem}_{_safe_name(method)}{base_out.suffix}"
+                else:
+                    file_out = base_out
+
+                probe_lbl = "Method Probes" if args.probe_source == "method" else "Base Probes"
+                title = (
+                    f"{method} — Probe Heatmap Over Training Checkpoints  [{probe_lbl}]"
+                )
+                _render_heatmap(
+                    all_data[method], metrics_to_plot, clfs, CK_LABELS,
+                    file_out, title,
+                    vmin=global_vmin, vmax=global_vmax,
+                )
+
+        else:
+            for method in methods:
+                if len(methods) > 1:
+                    file_out = base_out.parent / f"{base_out.stem}_{_safe_name(method)}{base_out.suffix}"
+                else:
+                    file_out = base_out
+
+                make_plot_checkpoints(
+                    checkpoint_dir=checkpoint_dir,
+                    out_path=file_out,
+                    method_name=method,
+                    clf_filter=clf_filter,
+                    metric=args.metric,
+                    probe_source=args.probe_source,
+                    data_dir=data_dir,
+                )
 
 
 if __name__ == "__main__":
