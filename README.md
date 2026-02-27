@@ -6,7 +6,7 @@
 
 ## What the code does
 
-The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosecurity benchmark as the **forget set** (knowledge that unlearning methods try to erase) and [WikiText-103](https://huggingface.co/datasets/wikitext) passages as the **retain set** (general knowledge that should be preserved).
+The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosecurity benchmark as the **forget set** (knowledge that unlearning methods try to erase) and WMDP **cyber** questions (from `data/wmdp_cyber_true_false_balanced.csv`) as the **cyber set** — a parallel domain used to measure how well knowledge is retained in a different but similarly structured hazard domain.
 
 ### Pipeline overview
 
@@ -19,25 +19,25 @@ Stage 4 (sweep) is independent of stages 2–3 and only requires stage 1 to have
 
 #### Stage 1 — Base model (`--stage base`)
 1. Load and split WMDP-bio questions into **train / val / test** (500 / 200 / rest).
-2. Each question becomes two True/False prompts: one with the *correct* answer (→ "True") and one with a *wrong* answer (→ "False").  The prompt is a semantic statement ("The answer to the question '…' is '…'.") rather than a surface question, making the label a truth-value rather than a surface token.  WikiText passages are similarly turned into correct/wrong continuation pairs.  All three splits are saved to `checkpoints/wmdp_tf_pairs.csv` on first run; subsequent runs load from the CSV to skip re-downloading and ensure reproducible splits.
-3. Extract **hidden states** (all transformer layers, last non-pad token via `attention_mask`) for train/val/test pairs.  The chat template is applied *without* the generation-prompt suffix so the probed token is the final user-message token, not an assistant-turn marker.
-4. Train a **linear probe** (logistic regression) per layer; pick the best layer on the validation set.
-5. Run **generation** on test and retain sets; record the first word (True/False).
-6. Run a **logit-based metric**: a forward pass at the last input token records the max logit over True-tokens vs False-tokens — no decoding required.
-7. Run **MCQ direct evaluation**: give the model each original multiple-choice question with all four answer options and record the A/B/C/D letter response (Table 6).
-8. Save everything to `checkpoints/`.
+2. Each WMDP-bio question becomes two True/False prompts (correct answer → "True", wrong answer → "False"). The WMDP-cyber CSV (`data/wmdp_cyber_true_false_balanced.csv`) is loaded the same way — each `question_id` has one True and one False row, and both sets use the **identical prompt format**: `make_tf_prompt(question, choice)` → `"Claim: The answer to '{question}' is '{choice}'."`. All bio pairs are saved to `data/wmdp_tf_pairs.csv` on first run.
+3. Extract **hidden states** (all transformer layers, last non-pad token via `attention_mask`) for **bio train/val/test** and **cyber train/val/test** pairs.
+4. Train separate probe sets (LR/RF/AdaBoost per-layer + multi-layer) for **bio** and **cyber**.
+5. Run **generation** and **logit scoring** on bio test and cyber test sets.
+6. Run **MCQ direct evaluation** on bio test questions (Table 6).
+7. Save everything to `checkpoints/`.
 
 #### Stage 2 — Unlearned models (`--stage method --method <NAME>`)
 Runs independently for each of the 8 LLM-GAT unlearning methods plus the raw `Llama3-8B` reference (9 jobs total, all in parallel via SLURM job array):
 
-1. Load forget pairs from `checkpoints/wmdp_tf_pairs.csv` (created by stage 1).
-2. Extract hidden states of **train / val / test** using the *unlearned* model.
-3. Train a **method-specific probe** on those hidden states (same train set, different model).  Find its best layer on the unlearned model's val hidden states.
-4. Run generation and logit scoring on test and retain sets.
-5. Run **MCQ direct evaluation** on the test questions (Table 6).
-6. Evaluate with **two probe sets**:
-   - **Base probes** (trained on base-model hs) — do the base-model's learned directions transfer?
-   - **Method probes** (trained on unlearned-model hs) — is a *new* direction still detectable?
+1. Load bio forget pairs from `data/wmdp_tf_pairs.csv` and cyber pairs from `data/wmdp_cyber_true_false_balanced.csv`.
+2. Extract hidden states of **bio train/val/test** and **cyber train/val/test** using the *unlearned* model.
+3. Train **method-specific probe sets** for bio and cyber separately. Find best layer on unlearned-model val hidden states.
+4. Run generation and logit scoring on bio test and cyber test sets.
+5. Run **MCQ direct evaluation** on bio test questions (Table 6).
+6. Evaluate with **four probe sets** per domain (bio & cyber):
+   - **Base probes on unlearned hs** — do base-model directions transfer?
+   - **Method probes on unlearned hs** — is a fresh direction still detectable?
+   - **Method probes on base hs** — cross-quadrant: do unlearned directions transfer back?
 7. Save to `checkpoints/`.
 
 #### Stage 3 — Summary (`--stage summary`)
@@ -56,11 +56,13 @@ Three sweep sub-stages:
 | Summary | `--stage sweep_summary --method M` | No | Load cached results and print table / save CSV |
 
 For each checkpoint the sweep:
-1. Extracts **train, val, and test hidden states** from that checkpoint.
-2. Runs **generation**, **logit scoring**, and **MCQ** on the test set.
-3. Evaluates two probe sets:
-   - **Base probes** — trained on the base instruct model (loaded from stage 1, no retraining).
-   - **Per-checkpoint probes** — trained on this checkpoint's own hidden states.
+1. Extracts **bio and cyber train/val/test hidden states** from that checkpoint.
+2. Runs **generation**, **logit scoring**, and **MCQ** on the bio test set; generation and logit scoring on the cyber test set.
+3. Evaluates four probe sets:
+   - **Bio base probes** — trained on the base instruct model (loaded from stage 1, no retraining).
+   - **Bio per-checkpoint probes** — trained on this checkpoint's own bio hidden states.
+   - **Cyber base probes** — base model's cyber probes applied to this checkpoint's cyber hidden states.
+   - **Cyber per-checkpoint probes** — trained on this checkpoint's own cyber hidden states.
 4. Caches all arrays and results under `checkpoints/sweep_{method}/ck{N}/` for safe resumption.
 
 Output (after `sweep_summary`):
@@ -133,14 +135,18 @@ slurm_sweep.sh                             SLURM job array for stage 4 (64 tasks
 slurm_sweep_summary.sh                     SLURM job array for sweep_summary (8 tasks, CPU-only)
 checkpoints/                                 Auto-created; holds .npy, .pkl, .json model caches
 checkpoints/sweep_METHOD/                    Sweep results for one method
-checkpoints/sweep_METHOD/ckN/               Per-checkpoint cache: hs_train/val/test.npy, partial.json, probes.pkl, results.json
+checkpoints/sweep_METHOD/ckN/               Per-checkpoint cache: hs_{train,val,test}.npy, cyber_hs_{train,val,test}.npy, probes.pkl, cyber_probes.pkl, partial.json, results.json
 data/                                        Auto-created; holds all CSV outputs
-data/wmdp_tf_pairs.csv                      Cached WMDP train/val/test pairs (created on first run)
-data/summary_table1_gen_logit.csv           Table 1 CSV (generation + logit)
-data/summary_table2_base_probes.csv         Table 2 CSV (base probes)
-data/summary_table3_method_probes.csv       Table 3 CSV (method-specific probes)
-data/summary_table4_retain.csv              Table 4 CSV (retain set)
-data/summary_table5_cross_probes.csv        Table 5 CSV (cross-probe quadrant)
+data/wmdp_tf_pairs.csv                      Cached WMDP bio train/val/test pairs (created on first run)
+data/wmdp_cyber_true_false_balanced.csv     WMDP cyber True/False pairs (must be present before running)
+data/summary_table1_gen_logit.csv           Table 1 CSV (bio generation + logit)
+data/summary_table2_base_probes.csv         Table 2 CSV (bio base probes)
+data/summary_table3_method_probes.csv       Table 3 CSV (bio method-specific probes)
+data/summary_table4_cyber_gen_logit.csv     Table 4 CSV (cyber generation + logit)
+data/summary_table4b_cyber_base_probes.csv  Table 4b CSV (cyber base probes)
+data/summary_table4c_cyber_method_probes.csv Table 4c CSV (cyber method probes)
+data/summary_table4d_cyber_cross_probes.csv  Table 4d CSV (cyber cross-probe quadrant)
+data/summary_table5_cross_probes.csv        Table 5 CSV (bio cross-probe quadrant)
 data/summary_table6_mcq.csv                 Table 6 CSV (MCQ direct A/B/C/D)
 data/sweep_METHOD/METHOD_sweep.csv          Time-series CSV (one row per checkpoint, written by sweep_summary)
 logs/                                        Auto-created; SLURM stdout/stderr
@@ -153,7 +159,7 @@ logs/                                        Auto-created; SLURM stdout/stderr
 ### Requirements
 
 - Python 3.10+
-- PyTorch with CUDA (tested on A40 48 GB)
+- PyTorch with CUDA (tested on L40 48 GB)
 - `transformers`, `datasets`, `scikit-learn`, `numpy`
 
 ```bash
@@ -189,8 +195,8 @@ tail -f logs/summary_<JOBID>.out
 ```
 
 The three stages run as:
-- `slurm_base.sh` — 1 × A40, up to 8 h
-- `slurm_methods.sh` — 9 × A40 in parallel (job array), up to 10 h each
+- `slurm_base.sh` — 1 × L40, up to 8 h
+- `slurm_methods.sh` — 9 × L40 in parallel (job array), up to 10 h each
 - `slurm_summary.sh` — CPU-only, 30 min
 
 Stage 2 starts automatically once stage 1 succeeds; stage 3 starts once all stage-2 tasks succeed.
@@ -274,7 +280,15 @@ Checkpoints are saved after each heavy operation (hidden-state extraction arrays
 sbatch slurm_methods.sh   # or the full pipeline again
 ```
 
-To start completely from scratch, delete the `checkpoints/` directory.
+To start completely from scratch, delete the `checkpoints/` directory and `data/wmdp_tf_pairs.csv`.
+
+To recompute only the **cyber** set (e.g. after changing `CYBER_TRAIN_SIZE`), delete:
+- `checkpoints/base_cyber_hs_{train,val,test}.npy` and `checkpoints/base_cyber_probes.pkl`
+- The `cyber_test_answers` and `cyber_logit_scores` keys from `checkpoints/base_partial.json`
+- For each method: `checkpoints/{sn}_cyber_hs_{train,val,test}.npy` and `checkpoints/{sn}_cyber_probes.pkl`
+Then rerun `--stage base` followed by `--stage method` for each method.
+
+All bio hidden states, bio probes, and generation caches are preserved and reused automatically.
 
 ---
 
@@ -285,12 +299,14 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | Constant | Default | Description |
 |---|---|---|
 | `BASE_MODEL` | `meta-llama/Meta-Llama-3-8B-Instruct` | Base (un-unlearned) model |
-| `WMDP_CSV_PATH` | `checkpoints/wmdp_tf_pairs.csv` | Cached WMDP pairs; delete to force rebuild |
+| `WMDP_CSV_PATH` | `data/wmdp_tf_pairs.csv` | Cached WMDP bio pairs; delete to force rebuild |
+| `CYBER_CSV_PATH` | `data/wmdp_cyber_true_false_balanced.csv` | WMDP cyber True/False pairs CSV |
 | `UNLEARNED_MODELS` | 8 LLM-GAT checkpoints + `Llama3-8B` | Dict of method name → HF model ID; includes raw `meta-llama/Meta-Llama-3-8B` as a reference |
 | `FORGET_SUBSET` | `wmdp-bio` | WMDP subset to treat as forget set |
-| `TRAIN_SIZE` | 500 | Questions used to train probes |
-| `VAL_SIZE` | 200 | Questions used to select best probe layer |
-| `N_RETAIN_PASSAGES` | 3 | Number of WikiText passage pairs |
+| `TRAIN_SIZE` | 500 | Bio questions used to train probes |
+| `VAL_SIZE` | 200 | Bio questions used to select best probe layer |
+| `CYBER_TRAIN_SIZE` | 500 | Cyber question pairs used to train probes |
+| `CYBER_VAL_SIZE` | 200 | Cyber question pairs used to select best probe layer |
 | `GENERATION_BATCH_SIZE` | 8 | Batch size for text generation |
 | `HIDDEN_STATE_BATCH_SIZE` | 8 | Batch size for hidden-state extraction |
 | `LOGIT_BATCH_SIZE` | 16 | Batch size for logit-score computation |
@@ -322,8 +338,13 @@ TABLE 3 — FORGET SET (test): METHOD-SPECIFIC probes
 Method   PL-LR Acc True Fals Lyr  ...
 ...
 
-TABLE 4 — RETAIN SET: Generation + Logit  (should stay near 1.0)
-Method       RetAcc  RTrue  RFalse   RLogit  RLTrue  RLFalse
+TABLE 4 — CYBER SET (test): Generation + Logit
+Method       CyAcc  CyTrue  CyFalse   Gib  CyLogit  CLTrue  CLFalse
+...
+
+TABLE 4b — CYBER SET (test): BASE-model probes applied to cyber hidden states
+TABLE 4c — CYBER SET (test): METHOD-SPECIFIC probes on cyber hidden states
+TABLE 4d — CYBER SET (test): METHOD probes applied to BASE-model cyber hidden states
 ...
 
 TABLE 5 — FORGET SET (test): METHOD probes applied to BASE-model hidden states
@@ -341,7 +362,7 @@ Method         Acc   Acc_A  Acc_B  Acc_C  Acc_D    Gib
 - `Logit*` — max(True-token logits) vs max(False-token logits) at the last input position
 - `PL-{clf}` — per-layer probe at that classifier's independently chosen best validation layer
 - `ML-{clf}` — multi-layer probe (all layers concatenated, then PCA-256)
-- `Ret*` — retain-set metrics (should stay high)
+- `Cy*` / `CL*` — cyber-set generation and logit metrics
 - `Gibberish` — fraction of outputs containing neither "True"/"False" (Tables 1–5) or a valid letter A–D (Table 6)
 - `Acc_A/B/C/D` — per-answer-letter accuracy for MCQ questions whose correct answer is that letter
 
