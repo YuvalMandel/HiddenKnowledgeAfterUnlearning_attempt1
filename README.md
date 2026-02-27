@@ -351,3 +351,91 @@ Ck  GenAcc  GTru  GFal   Gib  LogAcc  LTru  LFal  MCQAcc  MGib  BP-LR Acc True F
 - `MP-LR/RF/Ada` — method-probe per-layer accuracy (only when `--method_probes` is passed)
 
 The CSV (`checkpoints/sweep_<method>/<method>_sweep.csv`) also includes multi-layer, vote-ensemble, and avg-ensemble columns for each classifier and probe family.
+
+---
+
+## Generating plots
+
+Plots are produced by `plot_layer_accuracy.py` (no GPU required — reads from saved `.npy` and `.pkl` files).
+
+### Plot modes
+
+| Mode | Description |
+|---|---|
+| `methods` (default) | Per-layer probe metric for all 10 models at their final checkpoint. One curve per model, X axis = transformer layer. |
+| `checkpoints` | Per-layer probe metric for **one** unlearning method across all 8 training checkpoints, with Base (Instruct) as a reference curve. |
+
+### Metrics (`--metric`)
+
+If `--metric` is omitted all metrics are plotted as separate rows in one figure.
+
+| Value | Description |
+|---|---|
+| `accuracy` | Overall True/False classification accuracy |
+| `true_accuracy` | Accuracy on True-labelled examples only |
+| `false_accuracy` | Accuracy on False-labelled examples only |
+| `precision` | Precision (positive class = True) |
+| `recall` | Recall (positive class = True) |
+| `f1` | F1 score |
+| `auc` | AUC-ROC (from `predict_proba` or `decision_function`) |
+
+### Probe source (`--probe_source`)
+
+| Value | Description |
+|---|---|
+| `method` (default) | Each model/checkpoint is evaluated with its **own** trained probes (Table 3) |
+| `base` | The base model's probes are applied to every model's hidden states (Table 2) |
+
+### Examples
+
+```bash
+# All models, all metrics, method probes (default):
+python plot_layer_accuracy.py
+
+# All models, F1 only:
+python plot_layer_accuracy.py --metric f1
+
+# All models, AUC-ROC, base probes:
+python plot_layer_accuracy.py --metric auc --probe_source base --out layer_auc_base.png
+
+# LR classifier only, overall accuracy:
+python plot_layer_accuracy.py --clf LR --metric accuracy
+
+# One method across 8 checkpoints:
+python plot_layer_accuracy.py --mode checkpoints --method GradDiff
+
+# One method, F1 only:
+python plot_layer_accuracy.py --mode checkpoints --method GradDiff --metric f1
+
+# One method, base probes:
+python plot_layer_accuracy.py --mode checkpoints --method RMU --probe_source base --out ck_rmu_base.png
+
+# All 8 methods, one PNG per method (output: layer_accuracy_GradDiff.png, ...):
+python plot_layer_accuracy.py --mode checkpoints --method all
+
+# All 8 methods via SLURM (parallel, one job per method):
+bash submit_plot_checkpoints.sh
+bash submit_plot_checkpoints.sh --metric f1
+bash submit_plot_checkpoints.sh --probe_source base --out plots/ck_base.png
+```
+
+### SLURM checkpoint plots
+
+`submit_plot_checkpoints.sh` submits 8 parallel CPU jobs (one per unlearning method) via `slurm_plot_checkpoints.sh`.  Each job produces one PNG named `{out_stem}_{Method}.{ext}`.
+
+```bash
+# Default (method probes, all metrics):
+bash submit_plot_checkpoints.sh
+
+# Options:
+bash submit_plot_checkpoints.sh --metric auc --out plots/auc.png
+bash submit_plot_checkpoints.sh --probe_source base --clf LR
+```
+
+Output files land next to the `--out` path, one per method:
+```
+layer_accuracy_GradDiff.png
+layer_accuracy_RMU.png
+layer_accuracy_RMU_LAT.png
+...
+```

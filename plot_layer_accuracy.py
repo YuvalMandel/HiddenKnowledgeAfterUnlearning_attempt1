@@ -29,8 +29,9 @@ X axis: transformer layers 1-32  (embedding layer 0 is skipped)
 Y axis: probe metric on the forget-set test split
          lower = Y_MIN,  upper = max observed value + 5 % padding
 
---metric: if omitted, all three metrics are shown as separate rows in one figure.
+--metric: if omitted, all metrics are shown as separate rows in one figure.
           If specified, only that metric is shown.
+          Available: accuracy | true_accuracy | false_accuracy | precision | recall | f1 | auc
 
 Usage:
     # --- methods mode (original behaviour) ---
@@ -51,6 +52,7 @@ import csv
 import gc
 import pickle
 import numpy as np
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 import matplotlib
 matplotlib.use("Agg")          # headless; switch to "TkAgg" / "Qt5Agg" for interactive
 import matplotlib.pyplot as plt
@@ -80,7 +82,8 @@ SWEEP_METHODS   = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR",
 N_CHECKPOINTS   = 8
 
 CLF_NAMES          = ["LR", "RF", "AdaBoost"]
-METRIC_NAMES       = ["accuracy", "true_accuracy", "false_accuracy"]
+METRIC_NAMES       = ["accuracy", "true_accuracy", "false_accuracy",
+                      "precision", "recall", "f1", "auc"]
 PROBE_SOURCE_NAMES = ["method", "base"]
 
 # In base mode (methods), these models always use their own probes.
@@ -119,6 +122,10 @@ METRIC_LABELS = {
     "accuracy":       "Accuracy (overall)",
     "true_accuracy":  "True-label accuracy",
     "false_accuracy": "False-label accuracy",
+    "precision":      "Precision",
+    "recall":         "Recall",
+    "f1":             "F1 Score",
+    "auc":            "AUC-ROC",
 }
 
 PROBE_SOURCE_TITLES = {
@@ -210,6 +217,8 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
     """
     Return [(layer_idx, value), ...] for layers layer_start .. n_layers-1.
     probe_set and hs_test may come from different models.
+    Supported metrics: accuracy, true_accuracy, false_accuracy,
+                       precision, recall, f1, auc.
     """
     n_layers     = hs_test.shape[1]
     layer_probes = probe_set["per_layer"].get(clf_name, {})
@@ -220,13 +229,31 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
         pipe = layer_probes.get(l)
         if pipe is None:
             continue
-        preds = pipe.predict(hs_test[:, l, :])
+        X = hs_test[:, l, :]
+        preds = pipe.predict(X)
         if metric == "accuracy":
             val = float((preds == y_test).mean())
         elif metric == "true_accuracy":
             val = float((preds[true_mask] == 1).mean()) if true_mask.any() else 0.0
-        else:  # false_accuracy
+        elif metric == "false_accuracy":
             val = float((preds[false_mask] == 0).mean()) if false_mask.any() else 0.0
+        elif metric == "precision":
+            val = float(precision_score(y_test, preds, zero_division=0))
+        elif metric == "recall":
+            val = float(recall_score(y_test, preds, zero_division=0))
+        elif metric == "f1":
+            val = float(f1_score(y_test, preds, zero_division=0))
+        elif metric == "auc":
+            try:
+                if hasattr(pipe, "predict_proba"):
+                    scores = pipe.predict_proba(X)[:, 1]
+                else:
+                    scores = pipe.decision_function(X)
+                val = float(roc_auc_score(y_test, scores))
+            except Exception:
+                val = 0.0
+        else:
+            val = 0.0
         result.append((l, val))
     return result
 
@@ -634,8 +661,9 @@ def main():
     parser.add_argument(
         "--metric", choices=METRIC_NAMES, default=None,
         help=(
-            "Metric to plot (default: all three as separate rows).\n"
-            "Options: accuracy | true_accuracy | false_accuracy"
+            "Metric to plot (default: all as separate rows).\n"
+            "Options: accuracy | true_accuracy | false_accuracy | "
+            "precision | recall | f1 | auc"
         ),
     )
     parser.add_argument(
