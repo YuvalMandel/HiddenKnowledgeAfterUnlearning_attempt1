@@ -129,8 +129,9 @@ N_SWEEP_CHECKPOINTS = 8   # checkpoints 1 … N (inclusive)
 CLF_NAMES = ["LR", "RF", "AdaBoost"]
 
 CHECKPOINT_DIR = Path("checkpoints")
+DATA_DIR       = Path("data")
 
-WMDP_CSV_PATH = Path("checkpoints/wmdp_tf_pairs.csv")
+WMDP_CSV_PATH = DATA_DIR / "wmdp_tf_pairs.csv"
 
 MCQ_SYSTEM_PROMPT = (
     "Answer the following multiple-choice question with a single letter. "
@@ -1328,11 +1329,11 @@ def _prow(d, key, default=0.0):
 
 def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=None):
-    """Save all six summary tables as CSV files under CHECKPOINT_DIR."""
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    """Save all six summary tables as CSV files under DATA_DIR."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Table 1: Generation + Logit ──────────────────────────────────────────
-    t1 = CHECKPOINT_DIR / "summary_table1_gen_logit.csv"
+    t1 = DATA_DIR / "summary_table1_gen_logit.csv"
     with open(t1, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method",
@@ -1419,7 +1420,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         (3, "summary_table3_method_probes.csv",  False, "all_method_probe_stats"),
         (5, "summary_table5_cross_probes.csv",   False, "all_method_probe_on_base_stats"),
     ]:
-        path = CHECKPOINT_DIR / fname
+        path = DATA_DIR / fname
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(_probe_cols)
@@ -1430,7 +1431,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         print(f"  [CSV] {path}")
 
     # ── Table 4: Retain set ───────────────────────────────────────────────────
-    t4 = CHECKPOINT_DIR / "summary_table4_retain.csv"
+    t4 = DATA_DIR / "summary_table4_retain.csv"
     with open(t4, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method",
@@ -1458,7 +1459,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     print(f"  [CSV] {t4}")
 
     # ── Table 6: MCQ direct ───────────────────────────────────────────────────
-    t6 = CHECKPOINT_DIR / "summary_table6_mcq.csv"
+    t6 = DATA_DIR / "summary_table6_mcq.csv"
     with open(t6, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method", "mcq_acc", "acc_a", "acc_b", "acc_c", "acc_d", "gibberish"])
@@ -2381,8 +2382,8 @@ def print_sweep_table(method_name: str, results: list):
 
 
 def save_sweep_csv(method_name: str, results: list):
-    """Save sweep results to checkpoints/sweep_{method}/{method}_sweep.csv."""
-    sweep_d = CHECKPOINT_DIR / f"sweep_{safe_name(method_name)}"
+    """Save sweep results to data/sweep_{method}/{method}_sweep.csv."""
+    sweep_d = DATA_DIR / f"sweep_{safe_name(method_name)}"
     sweep_d.mkdir(parents=True, exist_ok=True)
     path    = sweep_d / f"{safe_name(method_name)}_sweep.csv"
     has_mp  = any("all_method_probe_stats" in r for r in results)

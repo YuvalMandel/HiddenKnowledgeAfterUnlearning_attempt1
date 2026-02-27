@@ -126,6 +126,8 @@ CK_COLORS.update({f"ck{n}": tuple(_CK_PLASMA[n - 1]) for n in range(1, N_CHECKPO
 # Ordered label list for checkpoint plots (base first, then ck1..ck8)
 CK_LABELS    = ["Base (Instruct)"] + [f"ck{n}" for n in range(1, N_CHECKPOINTS + 1)]
 
+DATA_DIR = Path("data")    # where CSVs (wmdp_tf_pairs.csv, summary tables) live
+
 Y_MIN    = 0.4    # fixed lower bound of y-axis
 Y_PAD    = 0.05   # padding fraction above the highest point
 N_LAYERS = 32     # transformer layers (indices 1-32; layer 0 = embedding, skipped)
@@ -529,9 +531,10 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 # ---------------------------------------------------------------------------
 
 def make_plot(checkpoint_dir: Path, out_path: Path,
-              clf_filter: list, metric: str | None, probe_source: str):
+              clf_filter: list, metric: str | None, probe_source: str,
+              data_dir: Path = DATA_DIR):
 
-    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+    csv_path = data_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
         raise FileNotFoundError(
             f"WMDP CSV not found at {csv_path}. "
@@ -620,9 +623,10 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
 def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
                            method_name: str,
                            clf_filter: list, metric: str | None,
-                           probe_source: str):
+                           probe_source: str,
+                           data_dir: Path = DATA_DIR):
 
-    csv_path = checkpoint_dir / "wmdp_tf_pairs.csv"
+    csv_path = data_dir / "wmdp_tf_pairs.csv"
     if not csv_path.exists():
         raise FileNotFoundError(
             f"WMDP CSV not found at {csv_path}. "
