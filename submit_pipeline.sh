@@ -1,17 +1,20 @@
 #!/bin/bash
 # submit_pipeline.sh
 #
-# Submit the full hidden-knowledge pipeline as four dependent SLURM jobs:
+# Submit the full hidden-knowledge pipeline as dependent SLURM jobs:
 #
 #   Stage 0 (sanity)  — one job         — quick padding/decoding sanity checks
-#   Stage 1 (base)    — one job         — processes the base LLaMA model
+#   Stage 1 (base)    — one job         — processes the base LLaMA-3-8B model
 #   Stage 2 (methods) — job array [0-8] — one task per unlearning method + Llama3-8B reference
-#   Stage 3 (summary) — one job         — aggregates results and prints table
+#   Stage 2b (llama70b) — one job       — Llama-3-70B reference (gen + logit + MCQ only)
+#   Stage 3 (summary) — one job         — aggregates results and prints tables
 #
 # Usage:
-#   bash submit_pipeline.sh              # submit all four stages
-#   bash submit_pipeline.sh --base-only  # only (re-)submit base (no sanity)
-#   bash submit_pipeline.sh --skip-sanity  # skip sanity, submit base→methods→summary
+#   bash submit_pipeline.sh                    # submit all stages (no 70B by default)
+#   bash submit_pipeline.sh --with-70b         # include Llama-3-70B stage
+#   bash submit_pipeline.sh --base-only        # only (re-)submit base (no sanity)
+#   bash submit_pipeline.sh --skip-sanity      # skip sanity, submit base→methods→summary
+#   bash submit_pipeline.sh --skip-sanity --with-70b
 #
 # If a stage is already done (its checkpoint exists) the Python script exits
 # immediately without recomputing, so it is safe to re-submit after failure.
@@ -23,10 +26,12 @@ mkdir -p logs
 # ── Parse arguments ────────────────────────────────────────────────────────
 BASE_ONLY=false
 SKIP_SANITY=false
+WITH_70B=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --base-only)    BASE_ONLY=true ;;
         --skip-sanity)  SKIP_SANITY=true ;;
+        --with-70b)     WITH_70B=true ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
@@ -60,27 +65,43 @@ echo "Submitting method array (depends on base job ${BASE_JOB})..."
 METHOD_JOB=$(sbatch --parsable --dependency=afterok:${BASE_JOB} slurm_methods.sh)
 echo "  Method array job ID : ${METHOD_JOB}  (tasks 0–8)"
 
-# ── Stage 3: summary (depends on all method tasks) ────────────────────────
-echo "Submitting summary stage (depends on method array ${METHOD_JOB})..."
-SUMMARY_JOB=$(sbatch --parsable --dependency=afterok:${METHOD_JOB} slurm_summary.sh)
+# ── Stage 2b: Llama-3-70B reference (optional, runs in parallel with methods)
+if $WITH_70B; then
+    echo "Submitting Llama-3-70B stage (depends on base job ${BASE_JOB})..."
+    JOB70B=$(sbatch --parsable --dependency=afterok:${BASE_JOB} slurm_70b.sh)
+    echo "  Llama-3-70B job ID : ${JOB70B}"
+    SUMMARY_DEP="--dependency=afterok:${METHOD_JOB}:${JOB70B}"
+else
+    SUMMARY_DEP="--dependency=afterok:${METHOD_JOB}"
+fi
+
+# ── Stage 3: summary (depends on methods and optionally 70B) ──────────────
+echo "Submitting summary stage..."
+SUMMARY_JOB=$(sbatch --parsable ${SUMMARY_DEP} slurm_summary.sh)
 echo "  Summary job ID : ${SUMMARY_JOB}"
 
 echo ""
 echo "Pipeline submitted successfully:"
-if ! $SKIP_SANITY; then
-    echo "  Stage 0 — sanity  : ${SANITY_JOB}"
+if ! $SKIP_SANITY && ! $BASE_ONLY; then
+    echo "  Stage 0 — sanity   : ${SANITY_JOB}"
 fi
-echo "  Stage 1 — base    : ${BASE_JOB}"
-echo "  Stage 2 — methods : ${METHOD_JOB} (array 0–8)"
-echo "  Stage 3 — summary : ${SUMMARY_JOB}"
+echo "  Stage 1 — base     : ${BASE_JOB}"
+echo "  Stage 2 — methods  : ${METHOD_JOB} (array 0–8)"
+if $WITH_70B; then
+    echo "  Stage 2b— llama70b : ${JOB70B}"
+fi
+echo "  Stage 3 — summary  : ${SUMMARY_JOB}"
 echo ""
 echo "Monitor progress with:"
 echo "  squeue -u \$USER"
 echo ""
 echo "Logs are written to: logs/"
-if ! $SKIP_SANITY; then
-    echo "  Sanity  : logs/sanity_${SANITY_JOB}.out"
+if ! $SKIP_SANITY && ! $BASE_ONLY; then
+    echo "  Sanity   : logs/sanity_${SANITY_JOB}.out"
 fi
-echo "  Base    : logs/base_${BASE_JOB}.out"
-echo "  Methods : logs/method_<task>_<jobid>.out"
-echo "  Summary : logs/summary_${SUMMARY_JOB}.out"
+echo "  Base     : logs/base_${BASE_JOB}.out"
+echo "  Methods  : logs/method_<task>_<jobid>.out"
+if $WITH_70B; then
+    echo "  Llama70B : logs/llama70b_${JOB70B}.out"
+fi
+echo "  Summary  : logs/summary_${SUMMARY_JOB}.out"

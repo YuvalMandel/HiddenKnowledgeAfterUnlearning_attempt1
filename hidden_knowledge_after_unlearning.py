@@ -95,6 +95,11 @@ LOGIT_BATCH_SIZE        = 16
 MAX_NEW_TOKENS          = 64
 MAX_INPUT_LENGTH        = 512
 
+# ── Llama-3-70B reference model ───────────────────────────────────────────────
+LLAMA70B_MODEL            = "meta-llama/Meta-Llama-3-70B-Instruct"
+LLAMA70B_GEN_BATCH_SIZE   = 4   # smaller batches — 70B is memory-heavy
+LLAMA70B_LOGIT_BATCH_SIZE = 8
+
 # Probe dimensionality reduction
 PCA_DIMS_PER_LAYER = 64    # for RF / AdaBoost per-layer pipelines
 PCA_DIMS_MULTI     = 256   # for all multi-layer pipelines
@@ -302,6 +307,15 @@ def save_method_checkpoint(method_name, hs_train, hs_val, hs_test,
     with open(CHECKPOINT_DIR / f"{sn}_results.json", "w") as f:
         json.dump(results, f)
     print(f"[checkpoint] {method_name} checkpoint saved.", flush=True)
+
+
+def load_llama70b_results() -> dict | None:
+    """Load Llama-3-70B results checkpoint. Returns None if not found."""
+    path = CHECKPOINT_DIR / "llama70b_results.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
 
 
 def load_method_results(method_name) -> dict | None:
@@ -599,6 +613,32 @@ def make_mcq_pairs(questions):
     """One MCQ pair per question; expected = correct letter A/B/C/D."""
     pairs = []
     for ex in questions:
+        letters      = "ABCD"
+        choices_text = "\n".join(f"{letters[i]}) {c}"
+                                 for i, c in enumerate(ex["choices"]))
+        correct_letter = letters[ex["answer"]]
+        pairs.append({
+            "prompt": [
+                {"role": "system", "content": MCQ_SYSTEM_PROMPT},
+                {"role": "user",   "content": (
+                    f"Question: {ex['question']}\n\n"
+                    f"{choices_text}\n\n"
+                    "Answer with only the letter A, B, C, or D."
+                )},
+            ],
+            "expected":    correct_letter,
+            "question":    ex["question"],
+            "choices":     ex["choices"],
+            "correct_idx": ex["answer"],
+        })
+    return pairs
+
+
+def make_cyber_mcq_pairs():
+    """Load WMDP-cyber MCQ questions directly from HuggingFace (full test split)."""
+    ds = load_dataset("cais/wmdp", "wmdp-cyber", split="test")
+    pairs = []
+    for ex in ds:
         letters      = "ABCD"
         choices_text = "\n".join(f"{letters[i]}) {c}"
                                  for i, c in enumerate(ex["choices"]))
@@ -1334,7 +1374,8 @@ def _prow(d, key, default=0.0):
 
 def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=None,
-                      base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None):
+                      base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None,
+                      llama70b=None):
     """Save all six summary tables as CSV files under DATA_DIR."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1362,6 +1403,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         _r1("Base", base_gen, base_logit)
         for method, r in all_results.items():
             _r1(method, r["gen"], r.get("logit"))
+        if llama70b:
+            _r1("Llama-3-70B", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
     print(f"  [CSV] {t1}")
 
     # ── Tables 2 / 3 / 5: Probe tables (shared schema) ───────────────────────
@@ -1461,6 +1504,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         _r4("Base", base_cyber_gen, base_cyber_logit)
         for method, r in all_results.items():
             _r4(method, r.get("cyber_gen"), r.get("cyber_logit"))
+        if llama70b:
+            _r4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
     print(f"  [CSV] {t4}")
 
     # ── Tables 4b / 4c / 4d: Cyber probe tables ──────────────────────────────
@@ -1483,26 +1528,31 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     t6 = DATA_DIR / "summary_table6_mcq.csv"
     with open(t6, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["method", "mcq_acc", "acc_a", "acc_b", "acc_c", "acc_d", "gibberish"])
-        def _r6(name, ms):
-            if ms is None:
-                w.writerow([name] + ["N/A"] * 6)
-                return
-            pl = ms.get("per_letter", {})
-            w.writerow([name,
-                        round(ms["accuracy"], 4),
+        w.writerow(["method",
+                    "bio_mcq_acc", "bio_acc_a", "bio_acc_b", "bio_acc_c", "bio_acc_d", "bio_gibberish",
+                    "cyber_mcq_acc", "cyber_acc_a", "cyber_acc_b", "cyber_acc_c", "cyber_acc_d", "cyber_gibberish"])
+        def _r6(name, bio_ms, cyber_ms=None):
+            def _mcq_cols(ms):
+                if ms is None:
+                    return ["N/A"] * 6
+                pl = ms.get("per_letter", {})
+                return [round(ms["accuracy"], 4),
                         round(pl.get("A", 0), 4), round(pl.get("B", 0), 4),
                         round(pl.get("C", 0), 4), round(pl.get("D", 0), 4),
-                        round(ms["gibberish_rate"], 4)])
+                        round(ms["gibberish_rate"], 4)]
+            w.writerow([name] + _mcq_cols(bio_ms) + _mcq_cols(cyber_ms))
         _r6("Base", base_mcq)
         for method, r in all_results.items():
             _r6(method, r.get("mcq"))
+        if llama70b:
+            _r6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
     print(f"  [CSV] {t6}")
 
 
 def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                         base_mcq=None,
-                        base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None):
+                        base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None,
+                        llama70b=None):
     W   = 120
     sep = "=" * W
 
@@ -1520,6 +1570,8 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
               f"  {_prow(lo,'accuracy'):9.3f} {_prow(lo,'true_accuracy'):7.3f}"
               f" {_prow(lo,'false_accuracy'):8.3f}")
     _row1("Base", base_gen, base_logit)
+    if llama70b:
+        _row1("Llama-3-70B", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
     print("-" * W)
     for method, r in all_results.items():
         _row1(method, r["gen"], r.get("logit"))
@@ -1621,7 +1673,9 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
               f" {_prow(lo,'false_accuracy'):8.3f}")
     if base_cyber_gen is not None:
         _row4("Base", base_cyber_gen, base_cyber_logit)
-        print("-" * 70)
+    if llama70b:
+        _row4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
+    print("-" * 70)
     for method, r in all_results.items():
         _row4(method, r.get("cyber_gen"), r.get("cyber_logit"))
     print(sep)
@@ -1656,26 +1710,29 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
         _row2(method, r.get("cyber_all_method_probe_on_base_stats"))
     print(sep)
 
-    # ── Table 6: MCQ direct (A/B/C/D) ────────────────────────────────────────
+    # ── Table 6: MCQ direct (A/B/C/D) — bio + cyber ──────────────────────────
     print(f"\n{sep}")
     print("TABLE 6 — MCQ DIRECT: Original multiple-choice questions (A/B/C/D)")
     print("          Model is given the full question + 4 choices and must reply A/B/C/D.")
     print(sep)
-    print(f"{'Method':<12} {'Acc':>6} {'Acc_A':>6} {'Acc_B':>6} {'Acc_C':>6} {'Acc_D':>6} {'Gib':>6}")
-    print("-" * 60)
+    print(f"{'Method':<12}  {'BioAcc':>6} {'B_A':>5} {'B_B':>5} {'B_C':>5} {'B_D':>5} {'BGib':>5}"
+          f"  {'CybAcc':>6} {'C_A':>5} {'C_B':>5} {'C_C':>5} {'C_D':>5} {'CGib':>5}")
+    print("-" * 90)
 
-    def _row6(name, ms):
+    def _mcq_str(ms):
         if ms is None:
-            print(f"{name:<12}  N/A  (run --stage base/method to compute)")
-            return
+            return f"{'N/A':>6} {'':>5} {'':>5} {'':>5} {'':>5} {'':>5}"
         pl = ms.get("per_letter", {})
-        print(f"{name:<12} {ms['accuracy']:6.3f}"
-              f" {pl.get('A', 0):6.3f} {pl.get('B', 0):6.3f}"
-              f" {pl.get('C', 0):6.3f} {pl.get('D', 0):6.3f}"
-              f" {ms['gibberish_rate']:6.3f}")
+        return (f" {ms['accuracy']:6.3f} {pl.get('A',0):5.3f} {pl.get('B',0):5.3f}"
+                f" {pl.get('C',0):5.3f} {pl.get('D',0):5.3f} {ms['gibberish_rate']:5.3f}")
+
+    def _row6(name, bio_ms, cyber_ms=None):
+        print(f"{name:<12} {_mcq_str(bio_ms)}  {_mcq_str(cyber_ms)}")
 
     _row6("Base", base_mcq)
-    print("-" * 60)
+    if llama70b:
+        _row6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
+    print("-" * 90)
     for method, r in all_results.items():
         _row6(method, r.get("mcq"))
     print(sep)
@@ -1686,7 +1743,8 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=base_mcq,
                       base_cyber_gen=base_cyber_gen,
                       base_cyber_probe_s=base_cyber_probe_s,
-                      base_cyber_logit=base_cyber_logit)
+                      base_cyber_logit=base_cyber_logit,
+                      llama70b=llama70b)
 
 
 # =============================================================================
@@ -2374,6 +2432,165 @@ def run_method(method_name: str,
 
 
 # =============================================================================
+# Stage: llama70b  — Llama-3-70B reference evaluation (gen + logit + MCQ only)
+# =============================================================================
+
+def run_llama70b():
+    rng = random.Random(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+
+    print("=" * 60)
+    print(f"STAGE: llama70b  ({LLAMA70B_MODEL})")
+    print("=" * 60)
+
+    results_path = CHECKPOINT_DIR / "llama70b_results.json"
+    if results_path.exists():
+        with open(results_path) as f:
+            _ex = json.load(f)
+        if all(k in _ex for k in ("bio_gen_stats", "bio_logit_stats", "bio_mcq_stats",
+                                   "cyber_gen_stats", "cyber_logit_stats", "cyber_mcq_stats")):
+            print("[llama70b] Complete checkpoint found. Nothing to recompute.")
+            return
+
+    # ── Datasets ──────────────────────────────────────────────────────────────
+    train_q, val_q, test_q = load_datasets(rng)
+    csv_result = load_tf_pairs_from_csv()
+    if csv_result is not None:
+        _, _, test_pairs = csv_result
+    else:
+        test_pairs = make_forget_pairs(test_q, rng)
+    _, _, cyber_test_pairs = load_cyber_tf_pairs(rng)
+    bio_mcq_pairs   = make_mcq_pairs(test_q)
+    cyber_mcq_pairs = make_cyber_mcq_pairs()
+    print(f"Bio test pairs: {len(test_pairs)}  Cyber test pairs: {len(cyber_test_pairs)}")
+    print(f"Bio MCQ: {len(bio_mcq_pairs)}  Cyber MCQ: {len(cyber_mcq_pairs)}")
+
+    # ── Partial state ─────────────────────────────────────────────────────────
+    partial            = _load_partial("llama70b")
+    need_bio_gen       = "bio_test_answers"   not in partial
+    need_cyber_gen     = "cyber_test_answers" not in partial
+    need_bio_mcq_gen   = "bio_mcq_answers"    not in partial
+    need_cyber_mcq_gen = "cyber_mcq_answers"  not in partial
+    need_log           = "bio_logit_scores"   not in partial
+    need_cyber_log     = "cyber_logit_scores" not in partial
+    need_model = (need_bio_gen or need_cyber_gen or need_bio_mcq_gen
+                  or need_cyber_mcq_gen or need_log or need_cyber_log)
+
+    if need_model:
+        print(f"\nLoading {LLAMA70B_MODEL}...")
+        tok, model = load_model_and_tokenizer(LLAMA70B_MODEL)
+
+        if need_bio_gen:
+            print("\nGenerating answers — Llama-3-70B — bio test set")
+            bio_test_answers = batch_generate(model, tok, test_pairs,
+                                              LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-test")
+            _save_partial("llama70b", {"bio_test_answers": bio_test_answers})
+        else:
+            bio_test_answers = partial["bio_test_answers"]
+            print("[llama70b] bio_test_answers loaded from partial cache.")
+
+        if need_cyber_gen:
+            print("\nGenerating answers — Llama-3-70B — cyber test set")
+            cyber_test_answers = batch_generate(model, tok, cyber_test_pairs,
+                                                LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-test")
+            _save_partial("llama70b", {"cyber_test_answers": cyber_test_answers})
+        else:
+            cyber_test_answers = partial["cyber_test_answers"]
+            print("[llama70b] cyber_test_answers loaded from partial cache.")
+
+        if need_bio_mcq_gen:
+            print("\nGenerating answers — Llama-3-70B — bio MCQ")
+            bio_mcq_answers = batch_generate(model, tok, bio_mcq_pairs,
+                                             LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-mcq")
+            _save_partial("llama70b", {"bio_mcq_answers": bio_mcq_answers})
+        else:
+            bio_mcq_answers = partial["bio_mcq_answers"]
+            print("[llama70b] bio_mcq_answers loaded from partial cache.")
+
+        if need_cyber_mcq_gen:
+            print("\nGenerating answers — Llama-3-70B — cyber MCQ")
+            cyber_mcq_answers = batch_generate(model, tok, cyber_mcq_pairs,
+                                               LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-mcq")
+            _save_partial("llama70b", {"cyber_mcq_answers": cyber_mcq_answers})
+        else:
+            cyber_mcq_answers = partial["cyber_mcq_answers"]
+            print("[llama70b] cyber_mcq_answers loaded from partial cache.")
+
+        if need_log or need_cyber_log:
+            true_ids, false_ids = get_tf_token_ids(tok)
+            if need_log:
+                print("\nComputing logit scores — Llama-3-70B — bio test set")
+                bio_logit_scores = logit_tf_scores(model, tok, test_pairs,
+                                                   LLAMA70B_LOGIT_BATCH_SIZE,
+                                                   true_ids, false_ids, "llama70b/bio-logit")
+                _save_partial("llama70b", {"bio_logit_scores": bio_logit_scores})
+            else:
+                bio_logit_scores = partial["bio_logit_scores"]
+            if need_cyber_log:
+                print("\nComputing logit scores — Llama-3-70B — cyber test set")
+                cyber_logit_scores = logit_tf_scores(model, tok, cyber_test_pairs,
+                                                     LLAMA70B_LOGIT_BATCH_SIZE,
+                                                     true_ids, false_ids, "llama70b/cyber-logit")
+                _save_partial("llama70b", {"cyber_logit_scores": cyber_logit_scores})
+            else:
+                cyber_logit_scores = partial["cyber_logit_scores"]
+        else:
+            bio_logit_scores   = partial["bio_logit_scores"]
+            cyber_logit_scores = partial["cyber_logit_scores"]
+
+        print("\nUnloading Llama-3-70B model...")
+        unload_model(model)
+        del tok
+    else:
+        bio_test_answers   = partial["bio_test_answers"]
+        cyber_test_answers = partial["cyber_test_answers"]
+        bio_mcq_answers    = partial["bio_mcq_answers"]
+        cyber_mcq_answers  = partial["cyber_mcq_answers"]
+        bio_logit_scores   = partial["bio_logit_scores"]
+        cyber_logit_scores = partial["cyber_logit_scores"]
+
+    # ── Compute stats ─────────────────────────────────────────────────────────
+    bio_gen_s     = generation_stats(bio_test_answers,   test_pairs)
+    cyber_gen_s   = generation_stats(cyber_test_answers, cyber_test_pairs)
+    bio_logit_s   = logit_stats(bio_logit_scores,        test_pairs)
+    cyber_logit_s = logit_stats(cyber_logit_scores,      cyber_test_pairs)
+    bio_mcq_s     = mcq_gen_stats(bio_mcq_answers,       bio_mcq_pairs)
+    cyber_mcq_s   = mcq_gen_stats(cyber_mcq_answers,     cyber_mcq_pairs)
+
+    print("\n  Llama-3-70B — BIO GENERATION:")
+    print_gen_stats("Llama-3-70B", bio_gen_s)
+    print("\n  Llama-3-70B — BIO LOGIT:")
+    print_logit_stats("Llama-3-70B", bio_logit_s)
+    _pl = bio_mcq_s.get("per_letter", {})
+    print(f"\n  Llama-3-70B — BIO MCQ:  acc={bio_mcq_s['accuracy']:.3f}"
+          f"  A={_pl.get('A',0):.3f}  B={_pl.get('B',0):.3f}"
+          f"  C={_pl.get('C',0):.3f}  D={_pl.get('D',0):.3f}"
+          f"  gib={bio_mcq_s['gibberish_rate']:.3f}")
+    print("\n  Llama-3-70B — CYBER GENERATION:")
+    print_gen_stats("Llama-3-70B", cyber_gen_s)
+    print("\n  Llama-3-70B — CYBER LOGIT:")
+    print_logit_stats("Llama-3-70B", cyber_logit_s)
+    _pl = cyber_mcq_s.get("per_letter", {})
+    print(f"\n  Llama-3-70B — CYBER MCQ:  acc={cyber_mcq_s['accuracy']:.3f}"
+          f"  A={_pl.get('A',0):.3f}  B={_pl.get('B',0):.3f}"
+          f"  C={_pl.get('C',0):.3f}  D={_pl.get('D',0):.3f}"
+          f"  gib={cyber_mcq_s['gibberish_rate']:.3f}")
+
+    results = {
+        "bio_gen_stats":     bio_gen_s,
+        "bio_logit_stats":   bio_logit_s,
+        "bio_mcq_stats":     bio_mcq_s,
+        "cyber_gen_stats":   cyber_gen_s,
+        "cyber_logit_stats": cyber_logit_s,
+        "cyber_mcq_stats":   cyber_mcq_s,
+    }
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    with open(results_path, "w") as f:
+        json.dump(results, f)
+    print("\n[llama70b] Done.")
+
+
+# =============================================================================
 # Stage: summary
 # =============================================================================
 
@@ -2396,6 +2613,11 @@ def run_summary():
     base_cyber_logit_s   = base.get("cyber_logit_stats")
     base_test            = base.get("test_answers", [])
     base_mcq_s           = base.get("mcq_stats")
+    llama70b_s           = load_llama70b_results()
+    if llama70b_s:
+        print("[summary] Llama-3-70B checkpoint found — will be included in tables.")
+    else:
+        print("[summary] No Llama-3-70B checkpoint — run --stage llama70b to add it.")
 
     # Load tokenizer only (no model weights) to format exact prompt strings.
     print("Loading tokenizer for prompt formatting...")
@@ -2505,7 +2727,8 @@ def run_summary():
                         base_mcq=base_mcq_s,
                         base_cyber_gen=base_cyber_gen_s,
                         base_cyber_probe_s=base_cyber_probe_s,
-                        base_cyber_logit=base_cyber_logit_s)
+                        base_cyber_logit=base_cyber_logit_s,
+                        llama70b=llama70b_s)
 
 
 # =============================================================================
@@ -3323,6 +3546,7 @@ def main():
     )
     parser.add_argument("--stage",
                         choices=["base", "method", "summary", "sanity",
+                                 "llama70b",
                                  "sweep", "sweep_checkpoint", "sweep_summary"],
                         required=True, help="Pipeline stage to run")
     parser.add_argument("--method", default=None,
@@ -3353,6 +3577,8 @@ def main():
                    multi_layer_end=args.multi_layer_end)
     elif args.stage == "summary":
         run_summary()
+    elif args.stage == "llama70b":
+        run_llama70b()
     elif args.stage == "sanity":
         run_sanity_checks()
     elif args.stage in ("sweep", "sweep_checkpoint"):
