@@ -191,7 +191,8 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
                          cyber_hs_train, cyber_hs_val, cyber_hs_test,
                          cyber_probe_set, cyber_gen_stats, cyber_all_probe_stats,
                          cyber_logit_stats, cyber_logit_scores,
-                         mcq_test_answers=None, mcq_stats=None):
+                         mcq_test_answers=None, mcq_stats=None,
+                         cyber_test_answers=None):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     _save_npy(hs_train,       CHECKPOINT_DIR / "base_hs_train.npy")
     _save_npy(hs_val,         CHECKPOINT_DIR / "base_hs_val.npy")
@@ -214,6 +215,7 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
             "cyber_all_probe_stats": cyber_all_probe_stats,
             "cyber_logit_stats":     cyber_logit_stats,
             "cyber_logit_scores":    cyber_logit_scores,
+            "cyber_test_answers":    cyber_test_answers,
             "mcq_test_answers":      mcq_test_answers,
             "mcq_stats":             mcq_stats,
         }, f)
@@ -279,6 +281,7 @@ def load_base_checkpoint(load_hs: bool = True):
         cyber_all_probe_stats=r.get("cyber_all_probe_stats"),
         cyber_logit_stats=r.get("cyber_logit_stats"),
         cyber_logit_scores=r.get("cyber_logit_scores"),
+        cyber_test_answers=r.get("cyber_test_answers", []),
         mcq_stats=r.get("mcq_stats"),
     )
 
@@ -1757,7 +1760,8 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                 and ck["all_probe_stats"] is not None
                 and ck.get("mcq_stats") is not None
                 and ck.get("cyber_probe_set") is not None
-                and ck.get("cyber_all_probe_stats") is not None):
+                and ck.get("cyber_all_probe_stats") is not None
+                and len(ck.get("cyber_test_answers") or []) > 0):
             print("[base] Complete checkpoint found. Nothing to recompute.")
             return
 
@@ -1973,7 +1977,8 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                          cyber_hs_train, cyber_hs_val, cyber_hs_test,
                          cyber_probe_set, cyber_gen_stats_v, cyber_all_probe_stats_v,
                          cyber_logit_stats_v, cyber_logit_scores,
-                         mcq_test_answers=mcq_test_answers, mcq_stats=mcq_stats_v)
+                         mcq_test_answers=mcq_test_answers, mcq_stats=mcq_stats_v,
+                         cyber_test_answers=cyber_test_answers)
     print("\n[base] Done.")
 
 
@@ -2303,6 +2308,27 @@ def run_method(method_name: str,
         print_gen_stats("Base     ", base_cyber_gen_s)
     print_gen_stats(method_name, cyber_gen_stats_v)
 
+    _base_cyber_answers = base.get("cyber_test_answers") or []
+    if _base_cyber_answers:
+        from transformers import AutoTokenizer as _AutoTok
+        _cy_tok = _AutoTok.from_pretrained(BASE_MODEL)
+        if _cy_tok.pad_token is None:
+            _cy_tok.pad_token = _cy_tok.eos_token
+        _cy_tok.padding_side = "left"
+        _cy_pair_obj_map = {(p["question"], p["pair_type"]): p for p in cyber_test_pairs}
+        _base_cy_ans_map = {(p["question"], p["pair_type"]): a
+                            for p, a in zip(cyber_test_pairs, _base_cyber_answers)}
+        _un_cy_ans_map   = {(p["question"], p["pair_type"]): a
+                            for p, a in zip(cyber_test_pairs, cyber_test_answers)}
+        _seen_cy = set(); _cyber_test_q = []
+        for _p in cyber_test_pairs:
+            _q = _p["question"]
+            if _q not in _seen_cy:
+                _seen_cy.add(_q); _cyber_test_q.append({"question": _q})
+        print_sample_questions(method_name, _cyber_test_q, _cy_pair_obj_map,
+                               _base_cy_ans_map, _un_cy_ans_map, _cy_tok, n=5)
+        del _cy_tok
+
     print(f"\n  CYBER SET — BASE PROBE STATS ({method_name}):")
     if base_cyber_probe_s:
         print_probe_stats_all("Base     ", base_cyber_probe_s)
@@ -2394,6 +2420,17 @@ def run_summary():
     base_ans_map = {(p["question"], p["pair_type"]): a
                     for p, a in zip(test_pairs, base_test)}
 
+    # Cyber lookup maps (built once; used inside loop for each method).
+    base_cyber_test_answers = base.get("cyber_test_answers") or []
+    cyber_pair_obj_map = {(p["question"], p["pair_type"]): p for p in cyber_test_pairs}
+    base_cyber_ans_map = {(p["question"], p["pair_type"]): a
+                          for p, a in zip(cyber_test_pairs, base_cyber_test_answers)}
+    _seen_cy = set(); cyber_test_q_sample = []
+    for _p in cyber_test_pairs:
+        _q = _p["question"]
+        if _q not in _seen_cy:
+            _seen_cy.add(_q); cyber_test_q_sample.append({"question": _q})
+
     all_results = {}
     for method_name in UNLEARNED_MODELS:
         r = load_method_results(method_name)
@@ -2436,6 +2473,13 @@ def run_summary():
         if base_cyber_gen_s:
             print_gen_stats("Base     ", base_cyber_gen_s)
         print_gen_stats(method_name, r.get("cyber_gen") or {})
+
+        un_cyber_test_answers = r.get("cyber_test_answers") or []
+        if base_cyber_test_answers and un_cyber_test_answers:
+            un_cy_ans_map = {(p["question"], p["pair_type"]): a
+                             for p, a in zip(cyber_test_pairs, un_cyber_test_answers)}
+            print_sample_questions(method_name, cyber_test_q_sample, cyber_pair_obj_map,
+                                   base_cyber_ans_map, un_cy_ans_map, _tok, n=5)
 
         print(f"\n  CYBER SET — BASE PROBES ({method_name}):")
         if base_cyber_probe_s:
