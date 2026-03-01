@@ -2,7 +2,7 @@
 #SBATCH --job-name=hk_70b
 #SBATCH --output=logs/llama70b_%j.out
 #SBATCH --error=logs/llama70b_%j.err
-#SBATCH --time=08:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --partition=public
 #SBATCH --gres=gpu:H200:1
 #SBATCH --mem=200G

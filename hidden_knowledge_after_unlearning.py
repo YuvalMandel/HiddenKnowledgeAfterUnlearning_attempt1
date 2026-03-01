@@ -37,6 +37,7 @@ import re
 import json
 import pickle
 import random
+from datetime import datetime
 import numpy as np
 import torch
 from pathlib import Path
@@ -759,7 +760,8 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
         for gen_ids in out:
             answers.append(tokenizer.decode(gen_ids[N:], skip_special_tokens=True).strip())
         print(f"  [{desc}] generation batch {b+1}/{n_batches}  "
-              f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
+              f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)"
+              f"  {datetime.now().strftime('%H:%M:%S')}", flush=True)
     return answers
 
 
@@ -842,7 +844,8 @@ def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, de
             f = max(row[i].item() for i in false_ids) if false_ids else float("-inf")
             results.append([t, f])
         print(f"  [{desc}] logit batch {b+1}/{n_batches}  "
-              f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)", flush=True)
+              f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)"
+              f"  {datetime.now().strftime('%H:%M:%S')}", flush=True)
     return results
 
 
