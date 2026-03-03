@@ -735,12 +735,17 @@ def _apply_template(pairs, tokenizer, add_generation_prompt: bool):
 
 
 @torch.no_grad()
-def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
+def batch_generate(model, tokenizer, pairs, batch_size, desc="",
+                   checkpoint_fn=None, save_every=10, resume_from=None):
     # add_generation_prompt=True so the model continues from the assistant turn.
-    texts     = _apply_template(pairs, tokenizer, add_generation_prompt=True)
-    answers   = []
-    n_batches = (len(texts) + batch_size - 1) // batch_size
-    for b in range(n_batches):
+    texts       = _apply_template(pairs, tokenizer, add_generation_prompt=True)
+    answers     = list(resume_from) if resume_from else []
+    start_batch = len(answers) // batch_size
+    n_batches   = (len(texts) + batch_size - 1) // batch_size
+    if start_batch > 0:
+        print(f"  [{desc}] Resuming from batch {start_batch+1}/{n_batches} "
+              f"({len(answers)} answers already done)", flush=True)
+    for b in range(start_batch, n_batches):
         batch_texts = texts[b * batch_size:(b + 1) * batch_size]
         enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
                         truncation=True, max_length=MAX_INPUT_LENGTH)
@@ -762,6 +767,8 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc=""):
         print(f"  [{desc}] generation batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)"
               f"  {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        if checkpoint_fn and (b + 1) % save_every == 0:
+            checkpoint_fn(list(answers))
     return answers
 
 
@@ -825,13 +832,18 @@ def get_tf_token_ids(tokenizer):
 
 
 @torch.no_grad()
-def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, desc=""):
+def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, desc="",
+                    checkpoint_fn=None, save_every=20, resume_from=None):
     # add_generation_prompt=True: the last token is the generation-prompt boundary,
     # so logits[:, -1, :] predicts what the model would output first (True / False).
-    texts     = _apply_template(pairs, tokenizer, add_generation_prompt=True)
-    results   = []
-    n_batches = (len(texts) + batch_size - 1) // batch_size
-    for b in range(n_batches):
+    texts       = _apply_template(pairs, tokenizer, add_generation_prompt=True)
+    results     = list(resume_from) if resume_from else []
+    start_batch = len(results) // batch_size
+    n_batches   = (len(texts) + batch_size - 1) // batch_size
+    if start_batch > 0:
+        print(f"  [{desc}] Resuming from batch {start_batch+1}/{n_batches} "
+              f"({len(results)} scores already done)", flush=True)
+    for b in range(start_batch, n_batches):
         batch_texts = texts[b * batch_size:(b + 1) * batch_size]
         enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
                         truncation=True, max_length=MAX_INPUT_LENGTH)
@@ -846,6 +858,8 @@ def logit_tf_scores(model, tokenizer, pairs, batch_size, true_ids, false_ids, de
         print(f"  [{desc}] logit batch {b+1}/{n_batches}  "
               f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)"
               f"  {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        if checkpoint_fn and (b + 1) % save_every == 0:
+            checkpoint_fn(list(results))
     return results
 
 
@@ -2485,8 +2499,13 @@ def run_llama70b():
 
         if need_bio_gen:
             print("\nGenerating answers — Llama-3-70B — bio test set")
-            bio_test_answers = batch_generate(model, tok, test_pairs,
-                                              LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-test")
+            _resume = partial.get("bio_test_answers_partial") or []
+            if _resume:
+                print(f"[llama70b] Resuming bio_test generation from {len(_resume)} answers")
+            bio_test_answers = batch_generate(
+                model, tok, test_pairs, LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-test",
+                checkpoint_fn=lambda a: _save_partial("llama70b", {"bio_test_answers_partial": a}),
+                save_every=10, resume_from=_resume)
             _save_partial("llama70b", {"bio_test_answers": bio_test_answers})
         else:
             bio_test_answers = partial["bio_test_answers"]
@@ -2494,8 +2513,13 @@ def run_llama70b():
 
         if need_cyber_gen:
             print("\nGenerating answers — Llama-3-70B — cyber test set")
-            cyber_test_answers = batch_generate(model, tok, cyber_test_pairs,
-                                                LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-test")
+            _resume = partial.get("cyber_test_answers_partial") or []
+            if _resume:
+                print(f"[llama70b] Resuming cyber_test generation from {len(_resume)} answers")
+            cyber_test_answers = batch_generate(
+                model, tok, cyber_test_pairs, LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-test",
+                checkpoint_fn=lambda a: _save_partial("llama70b", {"cyber_test_answers_partial": a}),
+                save_every=10, resume_from=_resume)
             _save_partial("llama70b", {"cyber_test_answers": cyber_test_answers})
         else:
             cyber_test_answers = partial["cyber_test_answers"]
@@ -2503,8 +2527,13 @@ def run_llama70b():
 
         if need_bio_mcq_gen:
             print("\nGenerating answers — Llama-3-70B — bio MCQ")
-            bio_mcq_answers = batch_generate(model, tok, bio_mcq_pairs,
-                                             LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-mcq")
+            _resume = partial.get("bio_mcq_answers_partial") or []
+            if _resume:
+                print(f"[llama70b] Resuming bio_mcq generation from {len(_resume)} answers")
+            bio_mcq_answers = batch_generate(
+                model, tok, bio_mcq_pairs, LLAMA70B_GEN_BATCH_SIZE, "llama70b/bio-mcq",
+                checkpoint_fn=lambda a: _save_partial("llama70b", {"bio_mcq_answers_partial": a}),
+                save_every=10, resume_from=_resume)
             _save_partial("llama70b", {"bio_mcq_answers": bio_mcq_answers})
         else:
             bio_mcq_answers = partial["bio_mcq_answers"]
@@ -2512,8 +2541,13 @@ def run_llama70b():
 
         if need_cyber_mcq_gen:
             print("\nGenerating answers — Llama-3-70B — cyber MCQ")
-            cyber_mcq_answers = batch_generate(model, tok, cyber_mcq_pairs,
-                                               LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-mcq")
+            _resume = partial.get("cyber_mcq_answers_partial") or []
+            if _resume:
+                print(f"[llama70b] Resuming cyber_mcq generation from {len(_resume)} answers")
+            cyber_mcq_answers = batch_generate(
+                model, tok, cyber_mcq_pairs, LLAMA70B_GEN_BATCH_SIZE, "llama70b/cyber-mcq",
+                checkpoint_fn=lambda a: _save_partial("llama70b", {"cyber_mcq_answers_partial": a}),
+                save_every=10, resume_from=_resume)
             _save_partial("llama70b", {"cyber_mcq_answers": cyber_mcq_answers})
         else:
             cyber_mcq_answers = partial["cyber_mcq_answers"]
@@ -2523,17 +2557,27 @@ def run_llama70b():
             true_ids, false_ids = get_tf_token_ids(tok)
             if need_log:
                 print("\nComputing logit scores — Llama-3-70B — bio test set")
-                bio_logit_scores = logit_tf_scores(model, tok, test_pairs,
-                                                   LLAMA70B_LOGIT_BATCH_SIZE,
-                                                   true_ids, false_ids, "llama70b/bio-logit")
+                _resume = partial.get("bio_logit_scores_partial") or []
+                if _resume:
+                    print(f"[llama70b] Resuming bio_logit from {len(_resume)} scores")
+                bio_logit_scores = logit_tf_scores(
+                    model, tok, test_pairs, LLAMA70B_LOGIT_BATCH_SIZE,
+                    true_ids, false_ids, "llama70b/bio-logit",
+                    checkpoint_fn=lambda s: _save_partial("llama70b", {"bio_logit_scores_partial": s}),
+                    save_every=20, resume_from=_resume)
                 _save_partial("llama70b", {"bio_logit_scores": bio_logit_scores})
             else:
                 bio_logit_scores = partial["bio_logit_scores"]
             if need_cyber_log:
                 print("\nComputing logit scores — Llama-3-70B — cyber test set")
-                cyber_logit_scores = logit_tf_scores(model, tok, cyber_test_pairs,
-                                                     LLAMA70B_LOGIT_BATCH_SIZE,
-                                                     true_ids, false_ids, "llama70b/cyber-logit")
+                _resume = partial.get("cyber_logit_scores_partial") or []
+                if _resume:
+                    print(f"[llama70b] Resuming cyber_logit from {len(_resume)} scores")
+                cyber_logit_scores = logit_tf_scores(
+                    model, tok, cyber_test_pairs, LLAMA70B_LOGIT_BATCH_SIZE,
+                    true_ids, false_ids, "llama70b/cyber-logit",
+                    checkpoint_fn=lambda s: _save_partial("llama70b", {"cyber_logit_scores_partial": s}),
+                    save_every=20, resume_from=_resume)
                 _save_partial("llama70b", {"cyber_logit_scores": cyber_logit_scores})
             else:
                 cyber_logit_scores = partial["cyber_logit_scores"]
