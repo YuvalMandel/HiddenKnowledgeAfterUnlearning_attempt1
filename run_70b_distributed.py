@@ -44,6 +44,7 @@ def _hk():
 # Paths  (resolved without importing hk)
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = pathlib.Path(__file__).parent
+DIST_DIR    = _SCRIPT_DIR / "checkpoints" / "llama70b_dist"
 QUEUE_PATH  = DIST_DIR / "queue.json"
 LOCK_PATH   = DIST_DIR / "queue.lock"
 RESULTS_DIR = DIST_DIR / "results"
