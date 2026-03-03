@@ -195,10 +195,12 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
                          gen_stats, all_probe_stats,
                          logit_stats, logit_scores,
                          cyber_hs_train, cyber_hs_val, cyber_hs_test,
-                         cyber_probe_set, cyber_gen_stats, cyber_all_probe_stats,
-                         cyber_logit_stats, cyber_logit_scores,
+                         cyber_probe_set, cyber_logit_scores,
                          mcq_test_answers=None, mcq_stats=None,
-                         cyber_test_answers=None):
+                         cyber_test_answers=None,
+                         cyber_gibberish_qids=None,
+                         cyber_subsets=None,
+                         cyber_mcq_stats=None):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     _save_npy(hs_train,       CHECKPOINT_DIR / "base_hs_train.npy")
     _save_npy(hs_val,         CHECKPOINT_DIR / "base_hs_val.npy")
@@ -212,18 +214,18 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
         pickle.dump(cyber_probe_set, f)
     with open(CHECKPOINT_DIR / "base_results.json", "w") as f:
         json.dump({
-            "test_answers":          test_answers,
-            "gen_stats":             gen_stats,
-            "all_probe_stats":       all_probe_stats,
-            "logit_stats":           logit_stats,
-            "logit_scores":          logit_scores,
-            "cyber_gen_stats":       cyber_gen_stats,
-            "cyber_all_probe_stats": cyber_all_probe_stats,
-            "cyber_logit_stats":     cyber_logit_stats,
-            "cyber_logit_scores":    cyber_logit_scores,
-            "cyber_test_answers":    cyber_test_answers,
-            "mcq_test_answers":      mcq_test_answers,
-            "mcq_stats":             mcq_stats,
+            "test_answers":         test_answers,
+            "gen_stats":            gen_stats,
+            "all_probe_stats":      all_probe_stats,
+            "logit_stats":          logit_stats,
+            "logit_scores":         logit_scores,
+            "cyber_logit_scores":   cyber_logit_scores,
+            "cyber_test_answers":   cyber_test_answers,
+            "cyber_gibberish_qids": cyber_gibberish_qids,
+            "cyber_subsets":        cyber_subsets,
+            "cyber_mcq_stats":      cyber_mcq_stats,
+            "mcq_test_answers":     mcq_test_answers,
+            "mcq_stats":            mcq_stats,
         }, f)
     print("[checkpoint] Base checkpoint saved.", flush=True)
 
@@ -283,11 +285,11 @@ def load_base_checkpoint(load_hs: bool = True):
         all_probe_stats=r.get("all_probe_stats"),
         logit_stats=r.get("logit_stats"),
         logit_scores=r.get("logit_scores"),
-        cyber_gen_stats=r.get("cyber_gen_stats"),
-        cyber_all_probe_stats=r.get("cyber_all_probe_stats"),
-        cyber_logit_stats=r.get("cyber_logit_stats"),
         cyber_logit_scores=r.get("cyber_logit_scores"),
+        cyber_subsets=r.get("cyber_subsets"),
+        cyber_mcq_stats=r.get("cyber_mcq_stats"),
         cyber_test_answers=r.get("cyber_test_answers", []),
+        cyber_gibberish_qids=r.get("cyber_gibberish_qids", []),
         mcq_stats=r.get("mcq_stats"),
     )
 
@@ -379,6 +381,23 @@ def load_datasets(rng):
     val_q   = all_questions[TRAIN_SIZE:TRAIN_SIZE + VAL_SIZE]
     test_q  = all_questions[TRAIN_SIZE + VAL_SIZE:]
     print(f"Forget set split — train: {len(train_q)}  val: {len(val_q)}  test: {len(test_q)}")
+    return train_q, val_q, test_q
+
+
+def load_cyber_mcq_questions(rng):
+    """Load WMDP-cyber questions in original 4-choice MCQ format.
+    Returns (train_q, val_q, test_q) with same split sizes as cyber TF.
+    """
+    ds = load_dataset("cais/wmdp", "wmdp-cyber", split="test")
+    all_q = list(ds)
+    for i, q in enumerate(all_q):
+        q["_orig_id"] = i
+    rng2 = random.Random(RANDOM_SEED + 1)   # separate RNG to avoid cross-split contamination
+    rng2.shuffle(all_q)
+    train_q = all_q[:CYBER_TRAIN_SIZE]
+    val_q   = all_q[CYBER_TRAIN_SIZE:CYBER_TRAIN_SIZE + CYBER_VAL_SIZE]
+    test_q  = all_q[CYBER_TRAIN_SIZE + CYBER_VAL_SIZE:]
+    print(f"Cyber MCQ split — train: {len(train_q)}  val: {len(val_q)}  test: {len(test_q)}")
     return train_q, val_q, test_q
 
 
@@ -558,8 +577,26 @@ def load_tf_pairs_from_csv():
     return train_pairs, val_pairs, test_pairs
 
 
+# Questions that require code execution / computation rather than factual recall.
+# These are excluded from the cyber set because the True/False format cannot
+# meaningfully probe knowledge for them (model must compute, not recall).
+_COMP_PATTERNS = [re.compile(p) for p in [
+    r'Which arguments will cause',
+    r'What is the output of the following',
+    r'extern "C"',
+    r'following.*assembly function',
+    r'following ve assembly',
+]]
+
+def _is_computational(question: str) -> bool:
+    return any(p.search(question) for p in _COMP_PATTERNS)
+
+
 def load_cyber_tf_pairs(rng):
     """Load WMDP-cyber True/False pairs from CYBER_CSV_PATH, split train/val/test.
+
+    Computational questions (code execution / argument-finding) are excluded
+    because the True/False format cannot probe factual knowledge for them.
 
     CSV columns: question_id, question, choice, label (True/False).
     Each question_id has exactly one True row and one False row.
@@ -893,6 +930,11 @@ def logit_stats(scores, pairs):
         "recall":        m["recall"],
         "f1":            m["f1"],
         "auc":           m["auc"],
+        "tp":            true_correct,
+        "fn":            true_total - true_correct,
+        "tn":            false_correct,
+        "fp":            false_total - false_correct,
+        "n_total":       total,
     }
 
 
@@ -1062,6 +1104,11 @@ def _pipe_stats(pipe: Pipeline, X: np.ndarray, labels: np.ndarray) -> dict:
         "recall":        m["recall"],
         "f1":            m["f1"],
         "auc":           m["auc"],
+        "tp":            int((preds[yes_mask] == 1).sum()) if yes_mask.any() else 0,
+        "fn":            int((preds[yes_mask] == 0).sum()) if yes_mask.any() else 0,
+        "tn":            int((preds[no_mask]  == 0).sum()) if no_mask.any()  else 0,
+        "fp":            int((preds[no_mask]  == 1).sum()) if no_mask.any()  else 0,
+        "n_total":       len(labels),
     }
 
 
@@ -1078,6 +1125,11 @@ def _preds_stats(preds: np.ndarray, labels: np.ndarray,
         "precision":     m["precision"],
         "recall":        m["recall"],
         "f1":            m["f1"],
+        "tp":            int((preds[yes_mask] == 1).sum()) if yes_mask.any() else 0,
+        "fn":            int((preds[yes_mask] == 0).sum()) if yes_mask.any() else 0,
+        "tn":            int((preds[no_mask]  == 0).sum()) if no_mask.any()  else 0,
+        "fp":            int((preds[no_mask]  == 1).sum()) if no_mask.any()  else 0,
+        "n_total":       len(labels),
     }
     if scores is not None:
         out["auc"] = m["auc"]
@@ -1230,13 +1282,139 @@ def generation_stats(answers, pairs):
     m = _clf_metrics(np.array(y_true_list), np.array(y_pred_list))  # no AUC (binary only)
     return {
         "accuracy":        float(correct        / total)       if total       > 0 else 0.0,
+        "accuracy_valid":  float(correct / (total - gibberish)) if (total - gibberish) > 0 else 0.0,
         "true_accuracy":   float(true_correct   / true_total)  if true_total  > 0 else 0.0,
         "false_accuracy":  float(false_correct  / false_total) if false_total > 0 else 0.0,
         "gibberish_rate":  float(gibberish      / total)       if total       > 0 else 0.0,
         "precision":       m["precision"],
         "recall":          m["recall"],
         "f1":              m["f1"],
+        "tp":              true_correct,
+        "fn":              true_total - true_correct,
+        "tn":              false_correct,
+        "fp":              false_total - false_correct,
+        "n_total":         total,
+        "n_valid":         total - gibberish,
     }
+
+
+# =============================================================================
+# Cyber test-set gibberish filter
+# =============================================================================
+
+def _cyber_gibberish_qids(answers, pairs):
+    """Return sorted list of question_ids where the BASE model gave gibberish
+    on either the True or False pair.  Used as a static filter applied uniformly
+    to all models so every method is evaluated on the same question set."""
+    gib = set()
+    for ans, p in zip(answers, pairs):
+        if extract_tf(ans) is None:
+            gib.add(p["question_id"])
+    return sorted(gib)
+
+
+def _filter_cyber_test(pairs, gib_qids, *arrays):
+    """Filter cyber test pairs and any number of parallel arrays (lists or
+    np.ndarrays) by excluding question_ids in gib_qids.
+
+    Returns (filtered_pairs, filtered_arr1, filtered_arr2, ...)
+    """
+    gib_set = set(gib_qids)
+    mask = [p["question_id"] not in gib_set for p in pairs]
+    mask_np = np.array(mask)
+    filtered_pairs = [p for p, m in zip(pairs, mask) if m]
+    filtered = []
+    for arr in arrays:
+        if arr is None:
+            filtered.append(None)
+        elif isinstance(arr, np.ndarray):
+            filtered.append(arr[mask_np])
+        else:
+            filtered.append([x for x, m in zip(arr, mask) if m])
+    return (filtered_pairs, *filtered)
+
+
+CYBER_SUBSETS = ["og", "pattern", "gibberish", "both"]
+
+def _get_cyber_subset(subset_name: str, pairs: list, gib_qids,
+                      *arrays):
+    """Return (filtered_pairs, *filtered_arrays) for the named cyber subset.
+
+    Subsets:
+      og        — all questions (no filter)
+      pattern   — exclude computational questions (_is_computational)
+      gibberish — exclude questions where base model gave gibberish
+      both      — exclude computational AND base-gibberish questions
+    """
+    gib_set = set(gib_qids or [])
+    comp_excl = subset_name in ("pattern", "both")
+    gib_excl  = subset_name in ("gibberish", "both")
+
+    mask = []
+    for p in pairs:
+        exclude = False
+        if comp_excl and _is_computational(p["question"]):
+            exclude = True
+        if gib_excl and p["question_id"] in gib_set:
+            exclude = True
+        mask.append(not exclude)
+
+    mask_np = np.array(mask)
+    filtered_pairs = [p for p, m in zip(pairs, mask) if m]
+    filtered = []
+    for arr in arrays:
+        if arr is None:
+            filtered.append(None)
+        elif isinstance(arr, np.ndarray):
+            filtered.append(arr[mask_np])
+        else:
+            filtered.append([x for x, m in zip(arr, mask) if m])
+    return (filtered_pairs, *filtered)
+
+
+def _compute_cyber_subsets_base(pairs, answers, logit_scores, hs_test,
+                                 probe_set, gib_qids):
+    """Compute gen/logit/probe stats for all 4 cyber subsets — base model."""
+    result = {}
+    for sname in CYBER_SUBSETS:
+        (pairs_s, answers_s, logit_s, hs_s) = _get_cyber_subset(
+            sname, pairs, gib_qids, answers, logit_scores, hs_test)
+        y_s = pairs_to_labels(pairs_s)
+        result[sname] = {
+            "n_pairs": len(pairs_s),
+            "gen":    generation_stats(answers_s, pairs_s),
+            "logit":  logit_stats(logit_s, pairs_s),
+            "probes": compute_all_probe_stats(probe_set, hs_s, y_s),
+        }
+    return result
+
+
+def _compute_cyber_subsets_method(pairs, answers, logit_scores,
+                                   hs_test_un, base_hs_test,
+                                   base_probe_set, method_probe_set,
+                                   gib_qids):
+    """Compute gen/logit/probe stats for all 4 cyber subsets — unlearned model.
+
+    Three probe quadrants:
+      base_probes   — base probes evaluated on method model's hidden states
+      method_probes — method probes evaluated on method model's hidden states
+      cross_probes  — method probes evaluated on base model's hidden states
+    """
+    result = {}
+    for sname in CYBER_SUBSETS:
+        (pairs_s, answers_s, logit_s, hs_un_s, hs_base_s) = _get_cyber_subset(
+            sname, pairs, gib_qids,
+            answers, logit_scores, hs_test_un, base_hs_test)
+        y_s = pairs_to_labels(pairs_s)
+        result[sname] = {
+            "n_pairs":      len(pairs_s),
+            "gen":          generation_stats(answers_s, pairs_s),
+            "logit":        logit_stats(logit_s, pairs_s),
+            "base_probes":  compute_all_probe_stats(base_probe_set,   hs_un_s,  y_s),
+            "method_probes":compute_all_probe_stats(method_probe_set, hs_un_s,  y_s),
+            "cross_probes": compute_all_probe_stats(method_probe_set, hs_base_s, y_s),
+        }
+    return result
 
 
 # =============================================================================
@@ -1391,7 +1569,7 @@ def _prow(d, key, default=0.0):
 
 def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=None,
-                      base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None,
+                      base_cyber_subsets=None, base_cyber_mcq=None,
                       llama70b=None):
     """Save all six summary tables as CSV files under DATA_DIR."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1496,7 +1674,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                 w.writerow(_probe_row(method, r.get(key)))
         print(f"  [CSV] {path}")
 
-    # ── Table 4: Cyber set — generation + logit ────────────────────────────────
+    # ── Table 4: Cyber set — generation + logit (og subset for backwards compat) ──
+    base_cyber_subsets = base_cyber_subsets or {}
     t4 = DATA_DIR / "summary_table4_cyber_gen_logit.csv"
     with open(t4, "w", newline="") as f:
         w = csv.writer(f)
@@ -1518,28 +1697,125 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                         round(_prow(lo, "false_accuracy"), 4),
                         round(_prow(lo, "precision"), 4), round(_prow(lo, "recall"), 4),
                         round(_prow(lo, "f1"), 4), round(_prow(lo, "auc"), 4)])
-        _r4("Base", base_cyber_gen, base_cyber_logit)
+        _base_og = base_cyber_subsets.get("og", {})
+        _r4("Base", _base_og.get("gen"), _base_og.get("logit"))
         for method, r in all_results.items():
-            _r4(method, r.get("cyber_gen"), r.get("cyber_logit"))
+            _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+            _r4(method, _r_og.get("gen"), _r_og.get("logit"))
         if llama70b:
             _r4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
     print(f"  [CSV] {t4}")
 
-    # ── Tables 4b / 4c / 4d: Cyber probe tables ──────────────────────────────
-    for tnum, fname, inc_base, key in [
-        (4,  "summary_table4b_cyber_base_probes.csv",   True,  "cyber_all_base_probe_stats"),
-        (4,  "summary_table4c_cyber_method_probes.csv", False, "cyber_all_method_probe_stats"),
-        (4,  "summary_table4d_cyber_cross_probes.csv",  False, "cyber_all_method_probe_on_base_stats"),
+    # ── Tables 4b / 4c / 4d: Cyber probe tables (og subset for backwards compat) ──
+    for fname, probe_key in [
+        ("summary_table4b_cyber_base_probes.csv",   "base_probes"),
+        ("summary_table4c_cyber_method_probes.csv", "method_probes"),
+        ("summary_table4d_cyber_cross_probes.csv",  "cross_probes"),
     ]:
         path = DATA_DIR / fname
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(_probe_cols)
-            if inc_base and base_cyber_probe_s:
-                w.writerow(_probe_row("Base", base_cyber_probe_s))
+            _base_og_probes = _base_og.get("probes") if probe_key == "base_probes" else None
+            if _base_og_probes:
+                w.writerow(_probe_row("Base", _base_og_probes))
             for method, r in all_results.items():
-                w.writerow(_probe_row(method, r.get(key)))
+                _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+                w.writerow(_probe_row(method, _r_og.get(probe_key)))
         print(f"  [CSV] {path}")
+
+    # ── New table: Cyber subsets — gen + logit ─────────────────────────────────
+    t_cs = DATA_DIR / "summary_cyber_subsets_gen_logit.csv"
+    with open(t_cs, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "subset", "n_pairs",
+                    "gen_acc", "gen_valid_acc", "gen_true", "gen_false", "gen_gib",
+                    "gen_precision", "gen_recall", "gen_f1",
+                    "logit_acc", "logit_true", "logit_false",
+                    "logit_precision", "logit_recall", "logit_f1", "logit_auc"])
+        def _rcs(name, sname, sv):
+            g  = sv.get("gen",   {}) or {}
+            lo = sv.get("logit", {}) or {}
+            w.writerow([name, sname, sv.get("n_pairs", 0),
+                        round(_prow(g,  "accuracy"), 4),
+                        round(_prow(g,  "accuracy_valid"), 4),
+                        round(_prow(g,  "true_accuracy"), 4),
+                        round(_prow(g,  "false_accuracy"), 4),
+                        round(_prow(g,  "gibberish_rate"), 4),
+                        round(_prow(g,  "precision"), 4),
+                        round(_prow(g,  "recall"), 4),
+                        round(_prow(g,  "f1"), 4),
+                        round(_prow(lo, "accuracy"), 4),
+                        round(_prow(lo, "true_accuracy"), 4),
+                        round(_prow(lo, "false_accuracy"), 4),
+                        round(_prow(lo, "precision"), 4),
+                        round(_prow(lo, "recall"), 4),
+                        round(_prow(lo, "f1"), 4),
+                        round(_prow(lo, "auc"), 4)])
+        for sname in CYBER_SUBSETS:
+            sv = base_cyber_subsets.get(sname, {})
+            _rcs("Base", sname, sv)
+        for method, r in all_results.items():
+            for sname in CYBER_SUBSETS:
+                sv = (r.get("cyber_subsets") or {}).get(sname, {})
+                _rcs(method, sname, sv)
+    print(f"  [CSV] {t_cs}")
+
+    # ── New table: Cyber confusion matrix ──────────────────────────────────────
+    t_cc = DATA_DIR / "summary_cyber_confusion.csv"
+    with open(t_cc, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "subset", "eval_type", "clf",
+                    "n_total", "tp", "fp", "tn", "fn",
+                    "precision", "recall", "f1", "auc"])
+        def _rcm(name, sname, eval_type, clf, stats):
+            s = stats or {}
+            w.writerow([name, sname, eval_type, clf,
+                        s.get("n_total", ""),
+                        s.get("tp", ""), s.get("fp", ""),
+                        s.get("tn", ""), s.get("fn", ""),
+                        round(_prow(s, "precision"), 4),
+                        round(_prow(s, "recall"), 4),
+                        round(_prow(s, "f1"), 4),
+                        round(_prow(s, "auc"), 4) if "auc" in s else ""])
+
+        def _write_cyber_confusion_rows(name, cyber_sub_dict):
+            for sname in CYBER_SUBSETS:
+                sv = (cyber_sub_dict or {}).get(sname, {})
+                _rcm(name, sname, "gen",   "-", sv.get("gen"))
+                _rcm(name, sname, "logit", "-", sv.get("logit"))
+                probes = sv.get("probes") or sv.get("base_probes") or {}
+                for clf in CLF_NAMES:
+                    _rcm(name, sname, "probe_pl",   clf, (probes.get("per_layer", {})     or {}).get(clf))
+                    _rcm(name, sname, "probe_ml",   clf, (probes.get("multi_layer", {})   or {}).get(clf))
+                    _rcm(name, sname, "probe_vote", clf, (probes.get("vote_ensemble", {}) or {}).get(clf))
+                    _rcm(name, sname, "probe_avg",  clf, (probes.get("avg_ensemble", {})  or {}).get(clf))
+
+        _write_cyber_confusion_rows("Base", base_cyber_subsets)
+        for method, r in all_results.items():
+            _write_cyber_confusion_rows(method, r.get("cyber_subsets"))
+    print(f"  [CSV] {t_cc}")
+
+    # ── New table: Cyber MCQ ───────────────────────────────────────────────────
+    t_cmcq = DATA_DIR / "summary_cyber_mcq.csv"
+    with open(t_cmcq, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "cyber_mcq_acc", "cyber_mcq_gib",
+                    "cyber_mcq_A", "cyber_mcq_B", "cyber_mcq_C", "cyber_mcq_D"])
+        def _rcmcq(name, ms):
+            if ms is None:
+                w.writerow([name] + ["N/A"] * 6)
+                return
+            pl = ms.get("per_letter", {})
+            w.writerow([name,
+                        round(ms["accuracy"], 4),
+                        round(ms["gibberish_rate"], 4),
+                        round(pl.get("A", 0), 4), round(pl.get("B", 0), 4),
+                        round(pl.get("C", 0), 4), round(pl.get("D", 0), 4)])
+        _rcmcq("Base", base_cyber_mcq)
+        for method, r in all_results.items():
+            _rcmcq(method, r.get("cyber_mcq_stats"))
+    print(f"  [CSV] {t_cmcq}")
 
     # ── Table 6: MCQ direct ───────────────────────────────────────────────────
     t6 = DATA_DIR / "summary_table6_mcq.csv"
@@ -1558,9 +1834,9 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                         round(pl.get("C", 0), 4), round(pl.get("D", 0), 4),
                         round(ms["gibberish_rate"], 4)]
             w.writerow([name] + _mcq_cols(bio_ms) + _mcq_cols(cyber_ms))
-        _r6("Base", base_mcq)
+        _r6("Base", base_mcq, base_cyber_mcq)
         for method, r in all_results.items():
-            _r6(method, r.get("mcq"))
+            _r6(method, r.get("mcq"), r.get("cyber_mcq_stats"))
         if llama70b:
             _r6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
     print(f"  [CSV] {t6}")
@@ -1568,7 +1844,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
 
 def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                         base_mcq=None,
-                        base_cyber_gen=None, base_cyber_probe_s=None, base_cyber_logit=None,
+                        base_cyber_subsets=None, base_cyber_mcq=None,
                         llama70b=None):
     W   = 120
     sep = "=" * W
@@ -1674,9 +1950,11 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
         _row2(method, r.get("all_method_probe_on_base_stats"))
     print(sep)
 
-    # ── Table 4: Cyber set (generation + logit + probes) ─────────────────────
+    # ── Table 4: Cyber set (generation + logit — og subset) ──────────────────
+    base_cyber_subsets = base_cyber_subsets or {}
+    _base_og = base_cyber_subsets.get("og", {})
     print(f"\n{sep}")
-    print("TABLE 4 — CYBER SET: Generation + Logit")
+    print("TABLE 4 — CYBER SET [og]: Generation + Logit")
     print(sep)
     print(f"{'Method':<12} {'CyberAcc':>8} {'CTru':>6} {'CFal':>6} {'Gib':>5}"
           f"  {'CLogAcc':>7} {'CLTru':>7} {'CLFal':>8}")
@@ -1688,43 +1966,47 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
               f" {_prow(g,'false_accuracy'):6.3f} {_prow(g,'gibberish_rate'):5.3f}"
               f"  {_prow(lo,'accuracy'):7.3f} {_prow(lo,'true_accuracy'):7.3f}"
               f" {_prow(lo,'false_accuracy'):8.3f}")
-    if base_cyber_gen is not None:
-        _row4("Base", base_cyber_gen, base_cyber_logit)
+    if _base_og:
+        _row4("Base", _base_og.get("gen"), _base_og.get("logit"))
     if llama70b:
         _row4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
     print("-" * 70)
     for method, r in all_results.items():
-        _row4(method, r.get("cyber_gen"), r.get("cyber_logit"))
+        _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+        _row4(method, _r_og.get("gen"), _r_og.get("logit"))
     print(sep)
 
     print(f"\n{sep}")
-    print("TABLE 4b — CYBER SET: BASE probes on unlearned cyber hidden states")
+    print("TABLE 4b — CYBER SET [og]: BASE probes on unlearned cyber hidden states")
     print(sep)
     print(_PROBE_HDR)
     print("-" * W)
-    if base_cyber_probe_s:
-        _row2("Base", base_cyber_probe_s)
+    if _base_og.get("probes"):
+        _row2("Base", _base_og["probes"])
         print("-" * W)
     for method, r in all_results.items():
-        _row2(method, r.get("cyber_all_base_probe_stats"))
+        _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+        _row2(method, _r_og.get("base_probes"))
     print(sep)
 
     print(f"\n{sep}")
-    print("TABLE 4c — CYBER SET: METHOD probes on unlearned cyber hidden states")
+    print("TABLE 4c — CYBER SET [og]: METHOD probes on unlearned cyber hidden states")
     print(sep)
     print(_PROBE_HDR)
     print("-" * W)
     for method, r in all_results.items():
-        _row2(method, r.get("cyber_all_method_probe_stats"))
+        _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+        _row2(method, _r_og.get("method_probes"))
     print(sep)
 
     print(f"\n{sep}")
-    print("TABLE 4d — CYBER SET: METHOD probes → BASE model cyber hidden states")
+    print("TABLE 4d — CYBER SET [og]: METHOD probes → BASE model cyber hidden states")
     print(sep)
     print(_PROBE_HDR)
     print("-" * W)
     for method, r in all_results.items():
-        _row2(method, r.get("cyber_all_method_probe_on_base_stats"))
+        _r_og = (r.get("cyber_subsets") or {}).get("og", {})
+        _row2(method, _r_og.get("cross_probes"))
     print(sep)
 
     # ── Table 6: MCQ direct (A/B/C/D) — bio + cyber ──────────────────────────
@@ -1746,21 +2028,20 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
     def _row6(name, bio_ms, cyber_ms=None):
         print(f"{name:<12} {_mcq_str(bio_ms)}  {_mcq_str(cyber_ms)}")
 
-    _row6("Base", base_mcq)
+    _row6("Base", base_mcq, base_cyber_mcq)
     if llama70b:
         _row6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
     print("-" * 90)
     for method, r in all_results.items():
-        _row6(method, r.get("mcq"))
+        _row6(method, r.get("mcq"), r.get("cyber_mcq_stats"))
     print(sep)
 
     # ── Save all tables as CSV ────────────────────────────────────────────────
     print(f"\nSaving summary CSVs to {DATA_DIR}/...")
     save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=base_mcq,
-                      base_cyber_gen=base_cyber_gen,
-                      base_cyber_probe_s=base_cyber_probe_s,
-                      base_cyber_logit=base_cyber_logit,
+                      base_cyber_subsets=base_cyber_subsets,
+                      base_cyber_mcq=base_cyber_mcq,
                       llama70b=llama70b)
 
 
@@ -1835,8 +2116,9 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                 and ck["all_probe_stats"] is not None
                 and ck.get("mcq_stats") is not None
                 and ck.get("cyber_probe_set") is not None
-                and ck.get("cyber_all_probe_stats") is not None
-                and len(ck.get("cyber_test_answers") or []) > 0):
+                and ck.get("cyber_subsets") is not None
+                and len(ck.get("cyber_test_answers") or []) > 0
+                and ck.get("cyber_gibberish_qids") is not None):
             print("[base] Complete checkpoint found. Nothing to recompute.")
             return
 
@@ -1873,13 +2155,14 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
 
     need_hs        = hs_train is None or hs_val is None or hs_test is None
     need_cyber_hs  = cyber_hs_train is None or cyber_hs_val is None or cyber_hs_test is None
-    need_gen       = "test_answers"       not in partial
-    need_cyber_gen = "cyber_test_answers" not in partial
-    need_log       = "logit_scores"       not in partial
-    need_cyber_log = "cyber_logit_scores" not in partial
-    need_mcq       = "mcq_test_answers"   not in partial
+    need_gen       = "test_answers"            not in partial
+    need_cyber_gen = "cyber_test_answers"      not in partial
+    need_log       = "logit_scores"            not in partial
+    need_cyber_log = "cyber_logit_scores"      not in partial
+    need_mcq       = "mcq_test_answers"        not in partial
+    need_cyber_mcq = "cyber_mcq_answers"       not in partial
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
-                      or need_log or need_cyber_log or need_mcq)
+                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq)
 
     if need_model:
         print("\nLoading base model...")
@@ -1972,6 +2255,19 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
             mcq_test_answers = partial["mcq_test_answers"]
             print("[base] mcq_test_answers loaded from partial cache.")
 
+        if need_cyber_mcq:
+            print("\nRunning MCQ generation — BASE — cyber test set")
+            cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+            cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+            cyber_mcq_answers = batch_generate(base_model, base_tok, cyber_mcq_pairs,
+                                               GENERATION_BATCH_SIZE, "base/cyber-mcq")
+            _save_partial("base", {"cyber_mcq_answers": cyber_mcq_answers})
+        else:
+            cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+            cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+            cyber_mcq_answers = partial["cyber_mcq_answers"]
+            print("[base] cyber_mcq_answers loaded from partial cache.")
+
         print("\nUnloading base model...")
         unload_model(base_model)
         del base_tok
@@ -1981,6 +2277,9 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
         logit_scores       = partial["logit_scores"]
         cyber_logit_scores = partial["cyber_logit_scores"]
         mcq_test_answers   = partial["mcq_test_answers"]
+        cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+        cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+        cyber_mcq_answers  = partial["cyber_mcq_answers"]
 
     # ── Train bio probes ───────────────────────────────────────────────────────
     if probe_set is None:
@@ -2017,14 +2316,30 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
         print("[base] Cyber probes saved.")
 
     # ── Compute stats ─────────────────────────────────────────────────────────
-    gen_stats_v             = generation_stats(test_answers,       test_pairs)
-    all_probe_stats_v       = compute_all_probe_stats(probe_set,       hs_test,       y_test)
-    logit_stats_v           = logit_stats(logit_scores,           test_pairs)
-    cyber_gen_stats_v       = generation_stats(cyber_test_answers, cyber_test_pairs)
-    cyber_all_probe_stats_v = compute_all_probe_stats(cyber_probe_set, cyber_hs_test, cyber_y_test)
-    cyber_logit_stats_v     = logit_stats(cyber_logit_scores,     cyber_test_pairs)
-    mcq_pairs_v             = make_mcq_pairs(test_q)
-    mcq_stats_v             = mcq_gen_stats(mcq_test_answers, mcq_pairs_v)
+    gen_stats_v       = generation_stats(test_answers, test_pairs)
+    all_probe_stats_v = compute_all_probe_stats(probe_set, hs_test, y_test)
+    logit_stats_v     = logit_stats(logit_scores, test_pairs)
+
+    # Compute cyber stats for all 4 subsets
+    cyber_gib_qids = _cyber_gibberish_qids(cyber_test_answers, cyber_test_pairs)
+    print(f"[base] Cyber gibberish filter: {len(cyber_gib_qids)} question IDs have gibberish base answers.",
+          flush=True)
+    cyber_subsets_v = _compute_cyber_subsets_base(
+        cyber_test_pairs, cyber_test_answers, cyber_logit_scores,
+        cyber_hs_test, cyber_probe_set, cyber_gib_qids)
+    for sname, sv in cyber_subsets_v.items():
+        print(f"  [cyber/{sname}] n={sv['n_pairs']}  "
+              f"gen_acc={sv['gen']['accuracy']:.3f}  "
+              f"logit_acc={sv['logit']['accuracy']:.3f}  "
+              f"logit_auc={sv['logit']['auc']:.3f}", flush=True)
+
+    # Cyber MCQ
+    cyber_mcq_stats_v = mcq_gen_stats(cyber_mcq_answers, cyber_mcq_pairs)
+    print(f"  [cyber MCQ] acc={cyber_mcq_stats_v['accuracy']:.3f}  "
+          f"gib={cyber_mcq_stats_v['gibberish_rate']:.3f}", flush=True)
+
+    mcq_pairs_v = make_mcq_pairs(test_q)
+    mcq_stats_v = mcq_gen_stats(mcq_test_answers, mcq_pairs_v)
 
     print("\n  BASE — GENERATION STATS (bio test set):")
     print_gen_stats("Base", gen_stats_v)
@@ -2032,12 +2347,6 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     print_probe_stats_all("Base", all_probe_stats_v)
     print("\n  BASE — LOGIT STATS (bio):")
     print_logit_stats("Base", logit_stats_v)
-    print("\n  BASE — GENERATION STATS (cyber test set):")
-    print_gen_stats("Base", cyber_gen_stats_v)
-    print("\n  BASE — PROBE STATS (cyber):")
-    print_probe_stats_all("Base", cyber_all_probe_stats_v)
-    print("\n  BASE — LOGIT STATS (cyber):")
-    print_logit_stats("Base", cyber_logit_stats_v)
     print(f"\n  BASE — MCQ STATS:  acc={mcq_stats_v['accuracy']:.3f}"
           f"  A={mcq_stats_v['per_letter']['A']:.3f}"
           f"  B={mcq_stats_v['per_letter']['B']:.3f}"
@@ -2050,10 +2359,12 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                          gen_stats_v, all_probe_stats_v,
                          logit_stats_v, logit_scores,
                          cyber_hs_train, cyber_hs_val, cyber_hs_test,
-                         cyber_probe_set, cyber_gen_stats_v, cyber_all_probe_stats_v,
-                         cyber_logit_stats_v, cyber_logit_scores,
+                         cyber_probe_set, cyber_logit_scores,
                          mcq_test_answers=mcq_test_answers, mcq_stats=mcq_stats_v,
-                         cyber_test_answers=cyber_test_answers)
+                         cyber_test_answers=cyber_test_answers,
+                         cyber_gibberish_qids=cyber_gib_qids,
+                         cyber_subsets=cyber_subsets_v,
+                         cyber_mcq_stats=cyber_mcq_stats_v)
     print("\n[base] Done.")
 
 
@@ -2080,9 +2391,7 @@ def run_method(method_name: str,
     base_gen             = base["gen_stats"]
     base_all_probe_s     = base["all_probe_stats"]
     base_logit_s         = base["logit_stats"]
-    base_cyber_gen_s     = base.get("cyber_gen_stats")
-    base_cyber_probe_s   = base.get("cyber_all_probe_stats")
-    base_cyber_logit_s   = base.get("cyber_logit_stats")
+    cyber_gib_qids       = base.get("cyber_gibberish_qids") or []
 
     if base_cyber_probe_set is None:
         raise RuntimeError("Base cyber probes not found in checkpoint. "
@@ -2128,10 +2437,11 @@ def run_method(method_name: str,
     if results_path.exists():
         with open(results_path) as _f:
             _existing = json.load(_f)
-        _has_cross = "all_method_probe_on_base_stats" in _existing
-        _has_mcq   = "mcq" in _existing
-        _has_cyber = "cyber_all_method_probe_stats" in _existing
-        if _has_cross and _has_mcq and _has_cyber:
+        _has_cross        = "all_method_probe_on_base_stats" in _existing
+        _has_mcq          = "mcq" in _existing
+        _has_cyber_sub    = "cyber_subsets" in _existing
+        _has_cyber_mcq    = "cyber_mcq_stats" in _existing
+        if _has_cross and _has_mcq and _has_cyber_sub and _has_cyber_mcq:
             print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
             return
         if not _has_cross:
@@ -2148,7 +2458,7 @@ def run_method(method_name: str,
                     with open(results_path, "w") as _f:
                         json.dump(_existing, _f)
                     print(f"[{method_name}] Cross-probe stats patched.", flush=True)
-                    if _has_mcq and _has_cyber:
+                    if _has_mcq and _has_cyber_sub and _has_cyber_mcq:
                         return  # fully complete now
             else:
                 print(f"[{method_name}] Cannot patch (missing base_hs_test.npy or probes). "
@@ -2192,8 +2502,9 @@ def run_method(method_name: str,
     need_log       = "logit_scores"       not in partial
     need_cyber_log = "cyber_logit_scores" not in partial
     need_mcq       = "mcq_test_answers"   not in partial
+    need_cyber_mcq = "cyber_mcq_answers"  not in partial
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
-                      or need_log or need_cyber_log or need_mcq)
+                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq)
 
     if need_model:
         print(f"\nLoading {method_name} model...")
@@ -2289,6 +2600,24 @@ def run_method(method_name: str,
             mcq_test_answers = partial["mcq_test_answers"]
             print(f"[{method_name}] mcq_test_answers loaded from partial cache.")
 
+        if need_cyber_mcq:
+            print(f"\nRunning MCQ generation — {method_name} — cyber test set")
+            cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+            cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+            if model_id in NON_INSTRUCT_MODELS:
+                cyber_mcq_pairs = adapt_pairs_for_model(cyber_mcq_pairs, model_id)
+            cyber_mcq_answers = batch_generate(un_model, un_tok, cyber_mcq_pairs,
+                                               GENERATION_BATCH_SIZE,
+                                               f"{method_name}/cyber-mcq")
+            _save_partial(sn, {"cyber_mcq_answers": cyber_mcq_answers})
+        else:
+            cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+            cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+            if model_id in NON_INSTRUCT_MODELS:
+                cyber_mcq_pairs = adapt_pairs_for_model(cyber_mcq_pairs, model_id)
+            cyber_mcq_answers = partial["cyber_mcq_answers"]
+            print(f"[{method_name}] cyber_mcq_answers loaded from partial cache.")
+
         print(f"\nUnloading {method_name} model...")
         unload_model(un_model)
         del un_tok
@@ -2298,6 +2627,11 @@ def run_method(method_name: str,
         logit_scores       = partial["logit_scores"]
         cyber_logit_scores = partial["cyber_logit_scores"]
         mcq_test_answers   = partial["mcq_test_answers"]
+        cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
+        cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+        if model_id in NON_INSTRUCT_MODELS:
+            cyber_mcq_pairs = adapt_pairs_for_model(cyber_mcq_pairs, model_id)
+        cyber_mcq_answers  = partial["cyber_mcq_answers"]
 
     # ── Train bio method probes ────────────────────────────────────────────────
     if method_probe_set is None:
@@ -2350,12 +2684,17 @@ def run_method(method_name: str,
     all_method_probe_on_base_stats_v = compute_all_probe_stats(method_probe_set,     base_hs_test,      y_test)
     un_logit_stats                   = logit_stats(logit_scores, test_pairs)
 
-    # ── Compute cyber stats ───────────────────────────────────────────────────
-    cyber_gen_stats_v                      = generation_stats(cyber_test_answers, cyber_test_pairs)
-    cyber_all_base_probe_stats_v           = compute_all_probe_stats(base_cyber_probe_set,       cyber_hs_test_un,   cyber_y_test)
-    cyber_all_method_probe_stats_v         = compute_all_probe_stats(cyber_method_probe_set,     cyber_hs_test_un,   cyber_y_test)
-    cyber_all_method_probe_on_base_stats_v = compute_all_probe_stats(cyber_method_probe_set,     base_cyber_hs_test, cyber_y_test)
-    cyber_logit_stats_v                    = logit_stats(cyber_logit_scores, cyber_test_pairs)
+    # ── Compute cyber stats for all 4 subsets ────────────────────────────────
+    cyber_subsets_v = _compute_cyber_subsets_method(
+        cyber_test_pairs, cyber_test_answers, cyber_logit_scores,
+        cyber_hs_test_un, base_cyber_hs_test,
+        base_cyber_probe_set, cyber_method_probe_set, cyber_gib_qids)
+    for sname, sv in cyber_subsets_v.items():
+        print(f"  [{method_name}/cyber/{sname}] n={sv['n_pairs']}  "
+              f"gen_acc={sv['gen']['accuracy']:.3f}  "
+              f"logit_acc={sv['logit']['accuracy']:.3f}", flush=True)
+
+    cyber_mcq_stats_v = mcq_gen_stats(cyber_mcq_answers, cyber_mcq_pairs)
 
     mcq_pairs_v = make_mcq_pairs(test_q)
     mcq_stats_v = mcq_gen_stats(mcq_test_answers, mcq_pairs_v)
@@ -2378,13 +2717,8 @@ def run_method(method_name: str,
     print_logit_stats("Base     ", base_logit_s)
     print_logit_stats(method_name, un_logit_stats)
 
-    print(f"\n  CYBER SET — GENERATION STATS ({method_name}):")
-    if base_cyber_gen_s:
-        print_gen_stats("Base     ", base_cyber_gen_s)
-    print_gen_stats(method_name, cyber_gen_stats_v)
-
-    _base_cyber_answers = base.get("cyber_test_answers") or []
-    if _base_cyber_answers:
+    _base_cyber_answers_raw = base.get("cyber_test_answers") or []
+    if _base_cyber_answers_raw:
         from transformers import AutoTokenizer as _AutoTok
         _cy_tok = _AutoTok.from_pretrained(BASE_MODEL)
         if _cy_tok.pad_token is None:
@@ -2392,7 +2726,7 @@ def run_method(method_name: str,
         _cy_tok.padding_side = "left"
         _cy_pair_obj_map = {(p["question"], p["pair_type"]): p for p in cyber_test_pairs}
         _base_cy_ans_map = {(p["question"], p["pair_type"]): a
-                            for p, a in zip(cyber_test_pairs, _base_cyber_answers)}
+                            for p, a in zip(cyber_test_pairs, _base_cyber_answers_raw)}
         _un_cy_ans_map   = {(p["question"], p["pair_type"]): a
                             for p, a in zip(cyber_test_pairs, cyber_test_answers)}
         _seen_cy = set(); _cyber_test_q = []
@@ -2404,22 +2738,6 @@ def run_method(method_name: str,
                                _base_cy_ans_map, _un_cy_ans_map, _cy_tok, n=5)
         del _cy_tok
 
-    print(f"\n  CYBER SET — BASE PROBE STATS ({method_name}):")
-    if base_cyber_probe_s:
-        print_probe_stats_all("Base     ", base_cyber_probe_s)
-    print_probe_stats_all(method_name, cyber_all_base_probe_stats_v)
-
-    print(f"\n  CYBER SET — METHOD PROBE STATS ({method_name}):")
-    print_probe_stats_all(method_name, cyber_all_method_probe_stats_v)
-
-    print(f"\n  CYBER SET — METHOD PROBES ON BASE hs ({method_name} → base model cyber hs):")
-    print_probe_stats_all(method_name, cyber_all_method_probe_on_base_stats_v)
-
-    print(f"\n  CYBER SET — LOGIT STATS ({method_name}):")
-    if base_cyber_logit_s:
-        print_logit_stats("Base     ", base_cyber_logit_s)
-    print_logit_stats(method_name, cyber_logit_stats_v)
-
     print(f"\n  MCQ STATS ({method_name}):  acc={mcq_stats_v['accuracy']:.3f}"
           f"  A={mcq_stats_v['per_letter']['A']:.3f}"
           f"  B={mcq_stats_v['per_letter']['B']:.3f}"
@@ -2428,20 +2746,17 @@ def run_method(method_name: str,
           f"  gib={mcq_stats_v['gibberish_rate']:.3f}")
 
     results = {
-        "gen":                                   un_gen_stats,
-        "all_base_probe_stats":                  all_base_probe_stats_v,
-        "all_method_probe_stats":                all_method_probe_stats_v,
-        "all_method_probe_on_base_stats":        all_method_probe_on_base_stats_v,
-        "logit":                                 un_logit_stats,
-        "test_answers":                          test_answers,
-        "cyber_gen":                             cyber_gen_stats_v,
-        "cyber_all_base_probe_stats":            cyber_all_base_probe_stats_v,
-        "cyber_all_method_probe_stats":          cyber_all_method_probe_stats_v,
-        "cyber_all_method_probe_on_base_stats":  cyber_all_method_probe_on_base_stats_v,
-        "cyber_logit":                           cyber_logit_stats_v,
-        "cyber_test_answers":                    cyber_test_answers,
-        "mcq":                                   mcq_stats_v,
-        "mcq_test_answers":                      mcq_test_answers,
+        "gen":                            un_gen_stats,
+        "all_base_probe_stats":           all_base_probe_stats_v,
+        "all_method_probe_stats":         all_method_probe_stats_v,
+        "all_method_probe_on_base_stats": all_method_probe_on_base_stats_v,
+        "logit":                          un_logit_stats,
+        "test_answers":                   test_answers,
+        "cyber_subsets":                  cyber_subsets_v,
+        "cyber_mcq_stats":                cyber_mcq_stats_v,
+        "cyber_test_answers":             cyber_test_answers,
+        "mcq":                            mcq_stats_v,
+        "mcq_test_answers":               mcq_test_answers,
     }
     save_method_checkpoint(method_name, hs_train_un, hs_val_un, hs_test_un,
                            method_probe_set, results)
@@ -2655,9 +2970,8 @@ def run_summary():
     base_gen             = base["gen_stats"]
     base_all_probe_s     = base["all_probe_stats"]
     base_logit_s         = base["logit_stats"]
-    base_cyber_gen_s     = base.get("cyber_gen_stats")
-    base_cyber_probe_s   = base.get("cyber_all_probe_stats")
-    base_cyber_logit_s   = base.get("cyber_logit_stats")
+    base_cyber_subsets   = base.get("cyber_subsets") or {}
+    base_cyber_mcq_s     = base.get("cyber_mcq_stats")
     base_test            = base.get("test_answers", [])
     base_mcq_s           = base.get("mcq_stats")
     llama70b_s           = load_llama70b_results()
@@ -2738,11 +3052,6 @@ def run_summary():
         print_logit_stats("Base     ", base_logit_s)
         print_logit_stats(method_name, r.get("logit"))
 
-        print(f"\n  CYBER SET — GENERATION ({method_name}):")
-        if base_cyber_gen_s:
-            print_gen_stats("Base     ", base_cyber_gen_s)
-        print_gen_stats(method_name, r.get("cyber_gen") or {})
-
         un_cyber_test_answers = r.get("cyber_test_answers") or []
         if base_cyber_test_answers and un_cyber_test_answers:
             un_cy_ans_map = {(p["question"], p["pair_type"]): a
@@ -2750,31 +3059,20 @@ def run_summary():
             print_sample_questions(method_name, cyber_test_q_sample, cyber_pair_obj_map,
                                    base_cyber_ans_map, un_cy_ans_map, _tok, n=5)
 
-        print(f"\n  CYBER SET — BASE PROBES ({method_name}):")
-        if base_cyber_probe_s:
-            print_probe_stats_all("Base     ", base_cyber_probe_s)
-        print_probe_stats_all(method_name, r.get("cyber_all_base_probe_stats") or {})
-
-        print(f"\n  CYBER SET — METHOD PROBES ({method_name}):")
-        print_probe_stats_all(method_name, r.get("cyber_all_method_probe_stats") or {})
-
-        print(f"\n  CYBER SET — METHOD PROBES ON BASE hs ({method_name} → base cyber hs):")
-        cyber_cross = r.get("cyber_all_method_probe_on_base_stats")
-        if cyber_cross:
-            print_probe_stats_all(method_name, cyber_cross)
-        else:
-            print(f"  [{method_name}] N/A — rerun --stage method to compute.")
-
-        print(f"\n  CYBER SET — LOGIT ({method_name}):")
-        if base_cyber_logit_s:
-            print_logit_stats("Base     ", base_cyber_logit_s)
-        print_logit_stats(method_name, r.get("cyber_logit"))
+        _r_cyber_sub = r.get("cyber_subsets") or {}
+        for sname in CYBER_SUBSETS:
+            sv = _r_cyber_sub.get(sname, {})
+            if sv:
+                print(f"\n  CYBER SET [{sname}] — GENERATION ({method_name}):")
+                _base_sv = base_cyber_subsets.get(sname, {})
+                if _base_sv.get("gen"):
+                    print_gen_stats("Base     ", _base_sv["gen"])
+                print_gen_stats(method_name, sv.get("gen") or {})
 
     print_summary_table(base_gen, base_all_probe_s, base_logit_s, all_results,
                         base_mcq=base_mcq_s,
-                        base_cyber_gen=base_cyber_gen_s,
-                        base_cyber_probe_s=base_cyber_probe_s,
-                        base_cyber_logit=base_cyber_logit_s,
+                        base_cyber_subsets=base_cyber_subsets,
+                        base_cyber_mcq=base_cyber_mcq_s,
                         llama70b=llama70b_s)
 
 
