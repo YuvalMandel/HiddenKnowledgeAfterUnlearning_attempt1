@@ -28,16 +28,22 @@ import time
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Lazy import of the main module — safe to do here because all side-effecting
-# code in hidden_knowledge_after_unlearning.py is guarded by __name__=="__main__".
+# hk is imported lazily inside cmd_init / cmd_worker / cmd_merge so that
+# --status works from any Python environment (no torch/datasets needed).
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import hidden_knowledge_after_unlearning as hk
+
+def _hk():
+    """Return the main module, importing it on first call."""
+    if not hasattr(_hk, "_mod"):
+        import hidden_knowledge_after_unlearning as mod
+        _hk._mod = mod
+    return _hk._mod
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths  (resolved without importing hk)
 # ---------------------------------------------------------------------------
-DIST_DIR    = hk.CHECKPOINT_DIR / "llama70b_dist"
+_SCRIPT_DIR = pathlib.Path(__file__).parent
 QUEUE_PATH  = DIST_DIR / "queue.json"
 LOCK_PATH   = DIST_DIR / "queue.lock"
 RESULTS_DIR = DIST_DIR / "results"
@@ -152,16 +158,16 @@ def cmd_init(chunk_size: int):
     LOCK_PATH.touch()
 
     print("Loading dataset splits to determine queue size...")
-    rng = random.Random(hk.RANDOM_SEED)
-    np.random.seed(hk.RANDOM_SEED)
+    rng = random.Random(_hk().RANDOM_SEED)
+    np.random.seed(_hk().RANDOM_SEED)
 
-    _, _, test_q     = hk.load_datasets(rng)
-    csv_result       = hk.load_tf_pairs_from_csv()
+    _, _, test_q     = _hk().load_datasets(rng)
+    csv_result       = _hk().load_tf_pairs_from_csv()
     test_pairs       = (csv_result[2] if csv_result is not None
-                        else hk.make_forget_pairs(test_q, rng))
-    _, _, cyber_test = hk.load_cyber_tf_pairs(rng)
-    bio_mcq_pairs    = hk.make_mcq_pairs(test_q)
-    cyber_mcq_pairs  = hk.make_cyber_mcq_pairs()
+                        else _hk().make_forget_pairs(test_q, rng))
+    _, _, cyber_test = _hk().load_cyber_tf_pairs(rng)
+    bio_mcq_pairs    = _hk().make_mcq_pairs(test_q)
+    cyber_mcq_pairs  = _hk().make_cyber_mcq_pairs()
 
     sizes = {
         "bio_gen":     len(test_pairs),
@@ -237,15 +243,15 @@ def cmd_worker():
     print(f"[worker {worker_id}] Starting", flush=True)
 
     # Load all dataset splits once — cheap, no GPU needed.
-    rng = random.Random(hk.RANDOM_SEED)
-    np.random.seed(hk.RANDOM_SEED)
-    _, _, test_q     = hk.load_datasets(rng)
-    csv_result       = hk.load_tf_pairs_from_csv()
+    rng = random.Random(_hk().RANDOM_SEED)
+    np.random.seed(_hk().RANDOM_SEED)
+    _, _, test_q     = _hk().load_datasets(rng)
+    csv_result       = _hk().load_tf_pairs_from_csv()
     test_pairs       = (csv_result[2] if csv_result is not None
-                        else hk.make_forget_pairs(test_q, rng))
-    _, _, cyber_test = hk.load_cyber_tf_pairs(rng)
-    bio_mcq_pairs    = hk.make_mcq_pairs(test_q)
-    cyber_mcq_pairs  = hk.make_cyber_mcq_pairs()
+                        else _hk().make_forget_pairs(test_q, rng))
+    _, _, cyber_test = _hk().load_cyber_tf_pairs(rng)
+    bio_mcq_pairs    = _hk().make_mcq_pairs(test_q)
+    cyber_mcq_pairs  = _hk().make_cyber_mcq_pairs()
 
     all_pairs = {
         "bio_gen":     test_pairs,
@@ -285,22 +291,22 @@ def cmd_worker():
 
             # Lazy model load — deferred until first real work unit.
             if model is None:
-                print(f"[worker {worker_id}] Loading {hk.LLAMA70B_MODEL}...", flush=True)
-                tok, model = hk.load_model_and_tokenizer(hk.LLAMA70B_MODEL)
-                true_ids, false_ids = hk.get_tf_token_ids(tok)
+                print(f"[worker {worker_id}] Loading {_hk().LLAMA70B_MODEL}...", flush=True)
+                tok, model = _hk().load_model_and_tokenizer(_hk().LLAMA70B_MODEL)
+                true_ids, false_ids = _hk().get_tf_token_ids(tok)
 
             if task in ("bio_gen", "cyber_gen", "bio_mcq", "cyber_mcq"):
-                result = hk.batch_generate(
+                result = _hk().batch_generate(
                     model, tok, pairs,
-                    hk.LLAMA70B_GEN_BATCH_SIZE,
+                    _hk().LLAMA70B_GEN_BATCH_SIZE,
                     f"w{worker_id}/{chunk['id']}",
                 )
                 np.save(result_path, np.array(result, dtype=object), allow_pickle=True)
 
             elif task in ("bio_logit", "cyber_logit"):
-                result = hk.logit_tf_scores(
+                result = _hk().logit_tf_scores(
                     model, tok, pairs,
-                    hk.LLAMA70B_LOGIT_BATCH_SIZE,
+                    _hk().LLAMA70B_LOGIT_BATCH_SIZE,
                     true_ids, false_ids,
                     f"w{worker_id}/{chunk['id']}",
                 )
@@ -319,7 +325,7 @@ def cmd_worker():
             release_chunk(_ACTIVE_CHUNK)
         if model is not None:
             print(f"[worker {worker_id}] Unloading model.", flush=True)
-            hk.unload_model(model)
+            _hk().unload_model(model)
             del tok, model
 
     total, done, _, pending = queue_counts()
@@ -354,15 +360,15 @@ def cmd_merge():
             return []
         return np.concatenate(parts).tolist()
 
-    rng = random.Random(hk.RANDOM_SEED)
-    np.random.seed(hk.RANDOM_SEED)
-    _, _, test_q     = hk.load_datasets(rng)
-    csv_result       = hk.load_tf_pairs_from_csv()
+    rng = random.Random(_hk().RANDOM_SEED)
+    np.random.seed(_hk().RANDOM_SEED)
+    _, _, test_q     = _hk().load_datasets(rng)
+    csv_result       = _hk().load_tf_pairs_from_csv()
     test_pairs       = (csv_result[2] if csv_result is not None
-                        else hk.make_forget_pairs(test_q, rng))
-    _, _, cyber_test = hk.load_cyber_tf_pairs(rng)
-    bio_mcq_pairs    = hk.make_mcq_pairs(test_q)
-    cyber_mcq_pairs  = hk.make_cyber_mcq_pairs()
+                        else _hk().make_forget_pairs(test_q, rng))
+    _, _, cyber_test = _hk().load_cyber_tf_pairs(rng)
+    bio_mcq_pairs    = _hk().make_mcq_pairs(test_q)
+    cyber_mcq_pairs  = _hk().make_cyber_mcq_pairs()
 
     bio_gen_ans    = load_task("bio_gen")
     cyber_gen_ans  = load_task("cyber_gen")
@@ -371,12 +377,12 @@ def cmd_merge():
     bio_logit      = load_task("bio_logit")
     cyber_logit    = load_task("cyber_logit")
 
-    bio_gen_s     = hk.generation_stats(bio_gen_ans,   test_pairs)
-    cyber_gen_s   = hk.generation_stats(cyber_gen_ans, cyber_test)
-    bio_logit_s   = hk.logit_stats(bio_logit,          test_pairs)
-    cyber_logit_s = hk.logit_stats(cyber_logit,        cyber_test)
-    bio_mcq_s     = hk.mcq_gen_stats(bio_mcq_ans,      bio_mcq_pairs)
-    cyber_mcq_s   = hk.mcq_gen_stats(cyber_mcq_ans,    cyber_mcq_pairs)
+    bio_gen_s     = _hk().generation_stats(bio_gen_ans,   test_pairs)
+    cyber_gen_s   = _hk().generation_stats(cyber_gen_ans, cyber_test)
+    bio_logit_s   = _hk().logit_stats(bio_logit,          test_pairs)
+    cyber_logit_s = _hk().logit_stats(cyber_logit,        cyber_test)
+    bio_mcq_s     = _hk().mcq_gen_stats(bio_mcq_ans,      bio_mcq_pairs)
+    cyber_mcq_s   = _hk().mcq_gen_stats(cyber_mcq_ans,    cyber_mcq_pairs)
 
     results = {
         "bio_gen_stats":    bio_gen_s,
@@ -387,7 +393,7 @@ def cmd_merge():
         "cyber_mcq_stats":  cyber_mcq_s,
     }
 
-    out = hk.CHECKPOINT_DIR / "llama70b_results.json"
+    out = _SCRIPT_DIR / "checkpoints" / "llama70b_results.json"
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
 

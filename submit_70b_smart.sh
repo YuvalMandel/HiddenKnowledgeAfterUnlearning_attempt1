@@ -17,6 +17,13 @@ set -euo pipefail
 cd "$(dirname "$0")"          # always run from the project root
 mkdir -p logs checkpoints
 
+# Activate the conda environment so python3 has torch/datasets/etc.
+# Safe to call even if already activated.
+source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null \
+    || source "$HOME/anaconda3/etc/profile.d/conda.sh" 2>/dev/null \
+    || true
+conda activate unlearning 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
