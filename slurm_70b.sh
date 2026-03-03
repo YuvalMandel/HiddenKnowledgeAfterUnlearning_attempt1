@@ -18,6 +18,7 @@ conda activate unlearning
 
 export HF_HOME=$HOME/.cache/huggingface
 export HF_TOKEN=$(cat $HF_HOME/token 2>/dev/null)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 mkdir -p logs
 
