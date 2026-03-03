@@ -6,7 +6,9 @@
 
 ## What the code does
 
-The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosecurity benchmark as the **forget set** (knowledge that unlearning methods try to erase) and WMDP **cyber** questions (from `data/wmdp_cyber_true_false_balanced.csv`) as the **cyber set** — a parallel domain used to measure how well knowledge is retained in a different but similarly structured hazard domain.
+The experiment uses the [WMDP](https://huggingface.co/datasets/cais/wmdp) biosecurity benchmark as the **forget set** (knowledge that unlearning methods try to erase) and WMDP **cyber** questions as the **cyber set** — a parallel domain used to measure how well knowledge is retained in a different but similarly structured hazard domain.
+
+The cyber set is evaluated simultaneously on **four subsets** (see below) to separate format-limitation artefacts from genuine forgetting effects.
 
 ### Pipeline overview
 
@@ -23,8 +25,9 @@ Stage 4 (sweep) is independent of stages 2–3 and only requires stage 1 to have
 3. Extract **hidden states** (all transformer layers, last non-pad token via `attention_mask`) for **bio train/val/test** and **cyber train/val/test** pairs.
 4. Train separate probe sets (LR/RF/AdaBoost per-layer + multi-layer) for **bio** and **cyber**.
 5. Run **generation** and **logit scoring** on bio test and cyber test sets.
-6. Run **MCQ direct evaluation** on bio test questions (Table 6).
-7. Save everything to `checkpoints/`.
+6. Run **MCQ direct evaluation** on bio test questions (Table 6) and **cyber MCQ** on WMDP-cyber questions in original 4-choice format.
+7. Compute cyber stats for all **four subsets** (`og`, `pattern`, `gibberish`, `both`) — no additional inference needed; subsets are derived from the already-computed answers and hidden states.
+8. Save everything to `checkpoints/`.
 
 #### Stage 2 — Unlearned models (`--stage method --method <NAME>`)
 Runs independently for each of the 8 LLM-GAT unlearning methods plus the raw `Llama3-8B` reference (9 jobs total, all in parallel via SLURM job array):
@@ -33,12 +36,13 @@ Runs independently for each of the 8 LLM-GAT unlearning methods plus the raw `Ll
 2. Extract hidden states of **bio train/val/test** and **cyber train/val/test** using the *unlearned* model.
 3. Train **method-specific probe sets** for bio and cyber separately. Find best layer on unlearned-model val hidden states.
 4. Run generation and logit scoring on bio test and cyber test sets.
-5. Run **MCQ direct evaluation** on bio test questions (Table 6).
+5. Run **MCQ direct evaluation** on bio test questions (Table 6) and **cyber MCQ** on WMDP-cyber 4-choice questions.
 6. Evaluate with **four probe sets** per domain (bio & cyber):
    - **Base probes on unlearned hs** — do base-model directions transfer?
    - **Method probes on unlearned hs** — is a fresh direction still detectable?
    - **Method probes on base hs** — cross-quadrant: do unlearned directions transfer back?
-7. Save to `checkpoints/`.
+7. Compute cyber stats for all **four subsets** (`og`, `pattern`, `gibberish`, `both`) from the cached answers and hidden states.
+8. Save to `checkpoints/`.
 
 #### Stage 3 — Summary (`--stage summary`)
 Loads all checkpoints (no GPU needed) and prints:
@@ -99,14 +103,29 @@ Method probes │  Table 5  ★        │  Table 3
 
 | Metric | What it measures |
 |---|---|
-| **Generation accuracy** | Does the model *say* the right True/False? |
+| **Generation accuracy** | Does the model *say* the right True/False? (gibberish counts as wrong) |
+| **Generation valid accuracy** | Same, but the denominator excludes gibberish answers |
 | **Base probe (LR/RF/AdaBoost)** | Do directions learned from the base model still classify True/False in the unlearned model's hidden states? |
 | **Method probe (LR/RF/AdaBoost)** | Does a probe trained on the *unlearned* model's own hidden states still find the knowledge? |
-| **Logit accuracy** | Is the logit for the correct True/False token higher than the wrong one, without generation?  The generation prompt *is* included so the last token position predicts the first output token. |
+| **Logit accuracy / AUC** | Is the log P("True") − log P("False") margin positive for correct examples? AUC uses the margin as a continuous score. |
 | **MCQ direct accuracy** | Given the original multiple-choice question with all four options, does the model pick the correct letter (A/B/C/D)? |
+| **TP / FP / TN / FN** | Raw confusion matrix counts for every evaluation type — enables per-class error analysis |
 
 A gap between generation ↓ and probe/logit accuracy ↑ is evidence of **residual hidden knowledge** after unlearning.
 Tree-based probes (RF, AdaBoost) can detect non-linear residual structure that LR would miss.
+
+### Cyber set — 4 evaluation subsets
+
+WMDP-cyber contains a mix of factual cybersecurity questions and computational questions (e.g. "which arguments make this C function return `0x3627be55338`?"). The latter require code execution rather than knowledge recall and systematically confuse the True/False format, driving base-model accuracy below chance (0.45). To disentangle format artefacts from genuine forgetting, every cyber evaluation is computed for four subsets:
+
+| Subset | What is excluded |
+|---|---|
+| `og` | Nothing — all ~1 987 questions |
+| `pattern` | Computational questions (`extern "C"`, argument-finding, assembly return-value problems) — ~35% of the dataset |
+| `gibberish` | Questions where the **base model** gave a gibberish answer (neither "True" nor "False") — same fixed mask for all methods |
+| `both` | Both computational and base-gibberish questions |
+
+The `gibberish` mask is computed once from the base model's generation outputs and stored in `checkpoints/base_results.json` as `cyber_gibberish_qids`. All method evaluations use this identical mask, so GradDiff's extra gibberish on those questions still appears in its own gibberish rate.
 
 ### Prompt design: True/False over Yes/No
 
@@ -139,15 +158,19 @@ checkpoints/sweep_METHOD/ckN/               Per-checkpoint cache: hs_{train,val,
 data/                                        Auto-created; holds all CSV outputs
 data/wmdp_tf_pairs.csv                      Cached WMDP bio train/val/test pairs (created on first run)
 data/wmdp_cyber_true_false_balanced.csv     WMDP cyber True/False pairs (must be present before running)
-data/summary_table1_gen_logit.csv           Table 1 CSV (bio generation + logit)
-data/summary_table2_base_probes.csv         Table 2 CSV (bio base probes)
-data/summary_table3_method_probes.csv       Table 3 CSV (bio method-specific probes)
-data/summary_table4_cyber_gen_logit.csv     Table 4 CSV (cyber generation + logit)
-data/summary_table4b_cyber_base_probes.csv  Table 4b CSV (cyber base probes)
-data/summary_table4c_cyber_method_probes.csv Table 4c CSV (cyber method probes)
-data/summary_table4d_cyber_cross_probes.csv  Table 4d CSV (cyber cross-probe quadrant)
-data/summary_table5_cross_probes.csv        Table 5 CSV (bio cross-probe quadrant)
-data/summary_table6_mcq.csv                 Table 6 CSV (MCQ direct A/B/C/D)
+data/summary_table1_gen_logit.csv              Table 1 (bio generation + logit)
+data/summary_table2_base_probes.csv            Table 2 (bio base probes)
+data/summary_table3_method_probes.csv          Table 3 (bio method-specific probes)
+data/summary_table4_cyber_gen_logit.csv        Table 4 (cyber og — generation + logit)
+data/summary_table4b_cyber_base_probes.csv     Table 4b (cyber og — base probes)
+data/summary_table4c_cyber_method_probes.csv   Table 4c (cyber og — method probes)
+data/summary_table4d_cyber_cross_probes.csv    Table 4d (cyber og — cross-probe quadrant)
+data/summary_table5_cross_probes.csv           Table 5 (bio cross-probe quadrant)
+data/summary_table6_mcq.csv                    Table 6 (bio MCQ A/B/C/D)
+data/summary_bio_confusion.csv                 Bio forget set — TP/FP/TN/FN for gen, logit, and all probe quadrants × classifiers
+data/summary_cyber_subsets_gen_logit.csv       Cyber gen+logit for all 4 subsets (og/pattern/gibberish/both); includes accuracy_valid
+data/summary_cyber_confusion.csv               Cyber TP/FP/TN/FN for all 4 subsets × eval types × classifiers
+data/summary_cyber_mcq.csv                     Cyber MCQ A/B/C/D (WMDP-cyber in original 4-choice format)
 data/sweep_METHOD/METHOD_sweep.csv          Time-series CSV (one row per checkpoint, written by sweep_summary)
 logs/                                        Auto-created; SLURM stdout/stderr
 ```
@@ -272,6 +295,25 @@ python hidden_knowledge_after_unlearning.py --stage sweep --method GradDiff --ch
 python hidden_knowledge_after_unlearning.py --stage sweep_summary --method GradDiff
 ```
 
+### Running the Llama-3-70B reference model
+
+The optional 70B stage evaluates `meta-llama/Meta-Llama-3-70B-Instruct` for generation, logit scoring, and MCQ **without** hidden-state extraction or probe training (scale reference only).
+
+**Hardware requirements:** 1 × H200 (or equivalent), ≥ 200 GB GPU RAM.
+
+```bash
+# SLURM (H200, 24-hour time limit):
+sbatch slurm_70b.sh
+
+# Via the pipeline helper (auto-submitted after stage 1):
+bash submit_pipeline.sh --with-70b
+
+# Locally (no SLURM):
+python hidden_knowledge_after_unlearning.py --stage llama70b
+```
+
+Results are saved to `checkpoints/Llama70B_results.json` and included automatically in the summary tables when present.
+
 ### Resubmitting after preemption
 
 Checkpoints are saved after each heavy operation (hidden-state extraction arrays, generation answers, logit scores).  Simply resubmit the failed job — it will resume from where it left off:
@@ -284,9 +326,11 @@ To start completely from scratch, delete the `checkpoints/` directory and `data/
 
 To recompute only the **cyber** set (e.g. after changing `CYBER_TRAIN_SIZE`), delete:
 - `checkpoints/base_cyber_hs_{train,val,test}.npy` and `checkpoints/base_cyber_probes.pkl`
-- The `cyber_test_answers` and `cyber_logit_scores` keys from `checkpoints/base_partial.json`
+- The `cyber_test_answers`, `cyber_logit_scores`, and `cyber_mcq_answers` keys from `checkpoints/base_partial.json`
 - For each method: `checkpoints/{sn}_cyber_hs_{train,val,test}.npy` and `checkpoints/{sn}_cyber_probes.pkl`
 Then rerun `--stage base` followed by `--stage method` for each method.
+
+**Subset stats require no extra inference.** The four subsets (`og`, `pattern`, `gibberish`, `both`) are computed at evaluation time from the already-cached answers and hidden states. To re-derive subset stats without re-running the model, delete only the `cyber_subsets` key from `checkpoints/base_results.json` (and from each method's `{sn}_results.json`) and rerun `--stage summary`.
 
 All bio hidden states, bio probes, and generation caches are preserved and reused automatically.
 
@@ -338,13 +382,13 @@ TABLE 3 — FORGET SET (test): METHOD-SPECIFIC probes
 Method   PL-LR Acc True Fals Lyr  ...
 ...
 
-TABLE 4 — CYBER SET (test): Generation + Logit
-Method       CyAcc  CyTrue  CyFalse   Gib  CyLogit  CLTrue  CLFalse
+TABLE 4 — CYBER SET (og subset): Generation + Logit
+Method  CyAcc  CyValidAcc  CyTrue  CyFalse  Gib  CyLogit  CLTrue  CLFalse  CLAuc
 ...
 
-TABLE 4b — CYBER SET (test): BASE-model probes applied to cyber hidden states
-TABLE 4c — CYBER SET (test): METHOD-SPECIFIC probes on cyber hidden states
-TABLE 4d — CYBER SET (test): METHOD probes applied to BASE-model cyber hidden states
+TABLE 4b — CYBER SET (og): BASE-model probes applied to cyber hidden states
+TABLE 4c — CYBER SET (og): METHOD-SPECIFIC probes on cyber hidden states
+TABLE 4d — CYBER SET (og): METHOD probes applied to BASE-model cyber hidden states
 ...
 
 TABLE 5 — FORGET SET (test): METHOD probes applied to BASE-model hidden states
@@ -352,17 +396,38 @@ TABLE 5 — FORGET SET (test): METHOD probes applied to BASE-model hidden states
 Method   PL-LR Acc True Fals Lyr  ...
 ...
 
-TABLE 6 — MCQ DIRECT: Original multiple-choice questions (A/B/C/D)
+TABLE 6 — BIO MCQ DIRECT: Original multiple-choice questions (A/B/C/D)
 Method         Acc   Acc_A  Acc_B  Acc_C  Acc_D    Gib
 ...
+
+BIO CONFUSION MATRIX (summary_bio_confusion.csv):
+  Rows: (method, probe_quad, eval_type, clf)
+  probe_quad: "N/A" for gen/logit; "base" / "method" / "cross" for probe rows
+  eval_type ∈ {gen, logit, pl, ml, vote, avg}
+  Columns: n_total, tp, fp, tn, fn, precision, recall, f1, auc
+
+CYBER SUBSETS (summary_cyber_subsets_gen_logit.csv):
+  Rows: (method, subset)  — subset ∈ {og, pattern, gibberish, both}
+  Key columns: n_pairs, gen_acc, gen_valid_acc, gen_true, gen_false, gen_gib,
+               logit_acc, logit_true, logit_false, logit_auc
+
+CYBER CONFUSION MATRIX (summary_cyber_confusion.csv):
+  Rows: (method, subset, eval_type, clf)
+  eval_type ∈ {gen, logit, probe_pl, probe_ml, probe_vote, probe_avg}
+  Columns: n_total, tp, fp, tn, fn, precision, recall, f1, auc
+
+CYBER MCQ (summary_cyber_mcq.csv):
+  One row per method — MCQ on WMDP-cyber in original 4-choice format
+  Columns: cyber_mcq_acc, cyber_mcq_gib, cyber_mcq_A/B/C/D
 ```
 
 **Column guide:**
 - `Gen*` — generation accuracy (first word of model output is True/False)
-- `Logit*` — max(True-token logits) vs max(False-token logits) at the last input position
+- `GenValid*` — generation accuracy computed only over non-gibberish answers
+- `Logit*` — log P("True") − log P("False") margin; AUC uses the margin as a continuous score
 - `PL-{clf}` — per-layer probe at that classifier's independently chosen best validation layer
 - `ML-{clf}` — multi-layer probe (all layers concatenated, then PCA-256)
-- `Cy*` / `CL*` — cyber-set generation and logit metrics
+- `Cy*` / `CL*` — cyber-set generation and logit metrics (og subset)
 - `Gibberish` — fraction of outputs containing neither "True"/"False" (Tables 1–5) or a valid letter A–D (Table 6)
 - `Acc_A/B/C/D` — per-answer-letter accuracy for MCQ questions whose correct answer is that letter
 

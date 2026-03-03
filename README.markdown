@@ -94,12 +94,14 @@ Respond with only 'True' or 'False'.
 
 | Metric | What it measures |
 |---|---|
-| **Generation accuracy** | Does the model *say* "True" or "False" correctly? |
+| **Generation accuracy** | Does the model *say* "True" or "False" correctly? (gibberish counts as wrong) |
+| **Generation valid accuracy** | Same, but computed only over answers that are a valid True/False (gibberish excluded from denominator) |
 | **Logit accuracy** | Is the logit for the correct token higher, *without* generating? |
 | **MCQ accuracy** | Does the model pick the right letter (A/B/C/D) from the original multiple-choice question? |
 | **Base probe accuracy** | Can the base model's trained directions still classify hidden states of the *unlearned* model? |
 | **Method probe accuracy** | Can a *fresh* probe trained on the unlearned model's own hidden states find the knowledge? |
 | **Gibberish rate** | Fraction of outputs that are neither True/False (or a valid letter for MCQ) |
+| **TP / FP / TN / FN** | Raw confusion matrix counts — reported for generation, logit, and all probe types |
 
 ---
 
@@ -221,6 +223,25 @@ python hidden_knowledge_after_unlearning.py --stage sweep --method GradDiff
 python hidden_knowledge_after_unlearning.py --stage sweep_summary --method GradDiff
 ```
 
+### Llama-3-70B reference model
+
+The optional Llama-3-70B stage runs generation, logit scoring, and MCQ on the raw `meta-llama/Meta-Llama-3-70B-Instruct` model **without** hidden-state extraction or probe training (it serves as a scale reference only).
+
+**Hardware requirements:** 1 × H200 (or equivalent), ≥ 200 GB GPU RAM, 24-hour time limit.
+
+```bash
+# SLURM:
+sbatch slurm_70b.sh
+
+# Via the pipeline helper (auto-submitted after stage 1):
+bash submit_pipeline.sh --with-70b
+
+# Locally (no SLURM):
+python hidden_knowledge_after_unlearning.py --stage llama70b
+```
+
+Results are saved to `checkpoints/Llama70B_results.json` and included in the summary tables.
+
 ### Resuming after a failure
 
 All heavy operations save incremental checkpoints (hidden states as `.npy`, probes as `.pkl`, results as `.json`). If a job is preempted or fails, simply resubmit — it will skip completed steps and resume from where it left off.
@@ -235,26 +256,49 @@ To recompute only the cyber set (e.g., after changing `CYBER_TRAIN_SIZE`), delet
 
 ```bash
 rm checkpoints/base_cyber_hs_*.npy checkpoints/base_cyber_probes.pkl
+# Also remove cached answers/scores from partial state:
+# delete "cyber_test_answers", "cyber_logit_scores", "cyber_mcq_answers" keys from checkpoints/base_partial.json
 # Then rerun --stage base followed by --stage method for each method.
 ```
+
+Subset definitions (`og`/`pattern`/`gibberish`/`both`) are computed at evaluation time from the full cached hidden states and answers — they do not require re-running model inference.
+
+---
+
+## Cyber set — 4 evaluation subsets
+
+WMDP-cyber contains a mix of question types. Some require actual code execution to answer (e.g. "which arguments make this C function return `0x3627be55338`?") rather than factual knowledge recall; these are systematically hard for the True/False format. To quantify this effect, every cyber evaluation is reported for **four subsets simultaneously**:
+
+| Subset | Filter |
+|---|---|
+| **og** | All questions — no filter |
+| **pattern** | Computational questions removed (`extern "C"`, argument-finding, assembly return-value problems) |
+| **gibberish** | Questions where the **base model** gave a gibberish answer removed (same mask applied to all unlearned models) |
+| **both** | Both filters applied |
+
+Using the base model's gibberish answers as the filter ensures every model is evaluated on an identical question set — an unlearned model that produces extra gibberish on those questions will still have that gibberish counted in its own gibberish rate.
 
 ---
 
 ## Output
 
-The summary stage prints six tables and saves each as a CSV in `data/`:
+The summary stage prints tables and saves each as a CSV in `data/`:
 
-| Table | Contents |
+| File | Contents |
 |---|---|
-| **Table 1** | Bio forget set — generation accuracy + logit accuracy |
-| **Table 2** | Bio forget set — base model probes applied to all models |
-| **Table 3** | Bio forget set — method-specific probes (trained on each unlearned model's own hidden states) |
-| **Table 4** | Cyber set — generation accuracy + logit accuracy |
-| **Tables 4b/4c/4d** | Cyber set — base probes / method probes / cross-probe |
-| **Table 5** | Bio cross-quadrant: unlearned-model probes applied to base model hidden states |
-| **Table 6** | MCQ accuracy — original A/B/C/D multiple-choice questions |
+| `summary_table1_gen_logit.csv` | Bio forget set — generation + logit accuracy |
+| `summary_table2_base_probes.csv` | Bio forget set — base model probes on all models |
+| `summary_table3_method_probes.csv` | Bio forget set — method-specific probes |
+| `summary_table4_cyber_gen_logit.csv` | Cyber set (og subset) — generation + logit |
+| `summary_table4b/4c/4d_cyber_*.csv` | Cyber set (og) — base / method / cross probes |
+| `summary_table5_cross_probes.csv` | Bio cross-quadrant |
+| `summary_table6_mcq.csv` | Bio + Cyber MCQ (A/B/C/D) |
+| `summary_bio_confusion.csv` | Bio forget set — TP/FP/TN/FN for gen, logit, and all probe quadrants × classifiers |
+| `summary_cyber_subsets_gen_logit.csv` | Cyber set — gen + logit for **all 4 subsets**, includes `accuracy_valid` |
+| `summary_cyber_confusion.csv` | Cyber set — TP/FP/TN/FN for all 4 subsets × eval types × classifiers |
+| `summary_cyber_mcq.csv` | Cyber MCQ (A/B/C/D) — original 4-choice questions from WMDP-cyber |
 
-**How to read the key result:** If a method's **generation accuracy falls** but **probe accuracy stays near baseline**, the model is *hiding* knowledge it still internally encodes.
+**How to read the key result:** If a method's **generation accuracy falls** but **probe accuracy stays near baseline**, the model is *hiding* knowledge it still internally encodes. Comparing the `og` and `both` subset rows isolates how much of any apparent degradation is an artefact of format limitations vs. genuine forgetting.
 
 ---
 
@@ -304,17 +348,21 @@ slurm_70b.sh                               SLURM script — optional Llama-3-70B
 slurm_plot_checkpoints.sh                  SLURM array script — per-method checkpoint plots
 
 data/
-  wmdp_cyber_true_false_balanced.csv       WMDP cyber pairs (must be present before running)
-  wmdp_tf_pairs.csv                        WMDP bio pairs (auto-generated on first run)
-  summary_table1_gen_logit.csv             Table 1 — bio generation + logit
-  summary_table2_base_probes.csv           Table 2 — bio base probes
-  summary_table3_method_probes.csv         Table 3 — bio method-specific probes
-  summary_table4_cyber_gen_logit.csv       Table 4 — cyber generation + logit
-  summary_table4b_cyber_base_probes.csv    Table 4b — cyber base probes
-  summary_table4c_cyber_method_probes.csv  Table 4c — cyber method probes
-  summary_table4d_cyber_cross_probes.csv   Table 4d — cyber cross-probe quadrant
-  summary_table5_cross_probes.csv          Table 5 — bio cross-probe quadrant
-  summary_table6_mcq.csv                   Table 6 — MCQ A/B/C/D accuracy
+  wmdp_cyber_true_false_balanced.csv         WMDP cyber TF pairs (must be present before running)
+  wmdp_tf_pairs.csv                          WMDP bio pairs (auto-generated on first run)
+  summary_table1_gen_logit.csv               Table 1 — bio generation + logit
+  summary_table2_base_probes.csv             Table 2 — bio base probes
+  summary_table3_method_probes.csv           Table 3 — bio method-specific probes
+  summary_table4_cyber_gen_logit.csv         Table 4 — cyber generation + logit (og subset)
+  summary_table4b_cyber_base_probes.csv      Table 4b — cyber base probes (og subset)
+  summary_table4c_cyber_method_probes.csv    Table 4c — cyber method probes (og subset)
+  summary_table4d_cyber_cross_probes.csv     Table 4d — cyber cross-probe quadrant (og subset)
+  summary_table5_cross_probes.csv            Table 5 — bio cross-probe quadrant
+  summary_table6_mcq.csv                     Table 6 — bio MCQ A/B/C/D accuracy
+  summary_bio_confusion.csv                  Bio forget set — TP/FP/TN/FN for gen, logit, and all probe quadrants × classifiers
+  summary_cyber_subsets_gen_logit.csv        Cyber gen+logit for all 4 subsets (includes accuracy_valid)
+  summary_cyber_confusion.csv                Cyber TP/FP/TN/FN for all 4 subsets × eval types × classifiers
+  summary_cyber_mcq.csv                      Cyber MCQ A/B/C/D accuracy
 
 checkpoints/                               Auto-created; all cached model outputs
   base_hs_{train,val,test}.npy             Base model bio hidden states

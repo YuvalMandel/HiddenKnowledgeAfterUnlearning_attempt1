@@ -1674,6 +1674,58 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                 w.writerow(_probe_row(method, r.get(key)))
         print(f"  [CSV] {path}")
 
+    # ── New table: Bio confusion matrix ──────────────────────────────────────────
+    t_bc = DATA_DIR / "summary_bio_confusion.csv"
+    with open(t_bc, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["method", "probe_quad", "eval_type", "clf",
+                    "n_total", "tp", "fp", "tn", "fn",
+                    "precision", "recall", "f1", "auc"])
+
+        def _rbcm(name, probe_quad, eval_type, clf, stats):
+            s = stats or {}
+            w.writerow([name, probe_quad, eval_type, clf,
+                        s.get("n_total", ""),
+                        s.get("tp", ""), s.get("fp", ""),
+                        s.get("tn", ""), s.get("fn", ""),
+                        round(_prow(s, "precision"), 4),
+                        round(_prow(s, "recall"), 4),
+                        round(_prow(s, "f1"), 4),
+                        round(_prow(s, "auc"), 4) if "auc" in s else ""])
+
+        def _write_bio_confusion_rows(name, gen_s, logit_s, base_probe_s,
+                                      method_probe_s=None, cross_probe_s=None):
+            _rbcm(name, "N/A", "gen",   "-", gen_s)
+            _rbcm(name, "N/A", "logit", "-", logit_s)
+            for quad, pset in [("base",   base_probe_s),
+                                ("method", method_probe_s),
+                                ("cross",  cross_probe_s)]:
+                if pset is None:
+                    continue
+                for clf in CLF_NAMES:
+                    _rbcm(name, quad, "pl",   clf, (pset.get("per_layer",     {}) or {}).get(clf))
+                    _rbcm(name, quad, "ml",   clf, (pset.get("multi_layer",   {}) or {}).get(clf))
+                    _rbcm(name, quad, "vote", clf, (pset.get("vote_ensemble", {}) or {}).get(clf))
+                    _rbcm(name, quad, "avg",  clf, (pset.get("avg_ensemble",  {}) or {}).get(clf))
+
+        _write_bio_confusion_rows("Base", base_gen, base_logit, base_all_probe_stats)
+        for method, r in all_results.items():
+            _write_bio_confusion_rows(
+                method,
+                r.get("gen"),  r.get("logit"),
+                r.get("all_base_probe_stats"),
+                r.get("all_method_probe_stats"),
+                r.get("all_method_probe_on_base_stats"),
+            )
+        if llama70b:
+            _write_bio_confusion_rows(
+                "Llama-3-70B",
+                llama70b.get("bio_gen_stats"),
+                llama70b.get("bio_logit_stats"),
+                None,
+            )
+    print(f"  [CSV] {t_bc}")
+
     # ── Table 4: Cyber set — generation + logit (og subset for backwards compat) ──
     base_cyber_subsets = base_cyber_subsets or {}
     t4 = DATA_DIR / "summary_table4_cyber_gen_logit.csv"
