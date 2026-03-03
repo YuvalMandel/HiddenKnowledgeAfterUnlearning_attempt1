@@ -2,10 +2,10 @@
 #SBATCH --job-name=hk_70b
 #SBATCH --output=logs/llama70b_%j.out
 #SBATCH --error=logs/llama70b_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --partition=public
-#SBATCH --gres=gpu:H200:1
-#SBATCH --mem=200G
+#SBATCH --gres=gpu:A40:4
+#SBATCH --mem=100G
 #SBATCH --cpus-per-task=8
 
 echo "Job started at $(date)"
