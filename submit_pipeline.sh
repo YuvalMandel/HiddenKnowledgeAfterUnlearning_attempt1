@@ -92,10 +92,10 @@ echo "  Method array job ID : ${METHOD_JOB}  (tasks 0–8)"
 
 # ── Stage 2b: Llama-3-70B reference (optional, runs in parallel with methods)
 if $WITH_70B; then
-    echo "Submitting Llama-3-70B stage (depends on base job ${BASE_JOB})..."
-    JOB70B=$(sbatch --parsable --dependency=afterok:${BASE_JOB} slurm_70b.sh)
-    echo "  Llama-3-70B job ID : ${JOB70B}"
-    SUMMARY_DEP="--dependency=afterok:${METHOD_JOB}:${JOB70B}"
+    echo "Submitting Llama-3-70B stage (smart, depends on base job ${BASE_JOB})..."
+    JOB70B_IDS=$(bash submit_70b_smart.sh --parsable --dependency afterok:${BASE_JOB})
+    echo "  Llama-3-70B job IDs: ${JOB70B_IDS}"
+    SUMMARY_DEP="--dependency=afterok:${METHOD_JOB}:${JOB70B_IDS}"
 else
     SUMMARY_DEP="--dependency=afterok:${METHOD_JOB}"
 fi
@@ -113,7 +113,7 @@ fi
 echo "  Stage 1 — base     : ${BASE_JOB}"
 echo "  Stage 2 — methods  : ${METHOD_JOB} (array 0–8)"
 if $WITH_70B; then
-    echo "  Stage 2b— llama70b : ${JOB70B}"
+    echo "  Stage 2b— llama70b : ${JOB70B_IDS}"
 fi
 echo "  Stage 3 — summary  : ${SUMMARY_JOB}"
 echo ""
@@ -127,6 +127,6 @@ fi
 echo "  Base     : logs/base_${BASE_JOB}.out"
 echo "  Methods  : logs/method_<task>_<jobid>.out"
 if $WITH_70B; then
-    echo "  Llama70B : logs/llama70b_${JOB70B}.out"
+    echo "  Llama70B : logs/70b_w1_<jobid>.out  (smart workers)"
 fi
 echo "  Summary  : logs/summary_${SUMMARY_JOB}.out"

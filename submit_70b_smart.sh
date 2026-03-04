@@ -32,17 +32,26 @@ DO_INIT=0
 MERGE_ONLY=0
 FORCE=0
 STATUS_ONLY=0
+PARSABLE=0
+DEPENDENCY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --workers)    WORKERS="$2";  shift 2 ;;
-        --init)       DO_INIT=1;     shift   ;;
-        --merge-only) MERGE_ONLY=1;  shift   ;;
-        --status)     STATUS_ONLY=1; shift   ;;
-        --force)      FORCE=1;       shift   ;;
+        --workers)    WORKERS="$2";       shift 2 ;;
+        --init)       DO_INIT=1;          shift   ;;
+        --merge-only) MERGE_ONLY=1;       shift   ;;
+        --status)     STATUS_ONLY=1;      shift   ;;
+        --force)      FORCE=1;            shift   ;;
+        --parsable)   PARSABLE=1;         shift   ;;
+        --dependency) DEPENDENCY="$2";    shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+# When --parsable: all verbose output goes to stderr; only job IDs go to stdout.
+if [[ $PARSABLE -eq 1 ]]; then
+    exec 3>&1 1>&2
+fi
 
 # ---------------------------------------------------------------------------
 # GPU configs, in priority order: "gres_spec  mem  walltime  label  vram_gb"
@@ -159,7 +168,8 @@ if not p.exists():
     sys.exit(1)
 d = json.load(open(p))
 needed = ("bio_gen_stats", "bio_logit_stats", "bio_mcq_stats",
-          "cyber_gen_stats", "cyber_logit_stats", "cyber_mcq_stats")
+          "cyber_gen_stats", "cyber_logit_stats", "cyber_mcq_stats",
+          "bio_mcq_logit_stats", "cyber_mcq_logit_stats")
 sys.exit(0 if all(k in d for k in needed) else 1)
 PYEOF
 }
@@ -252,6 +262,7 @@ echo "[smart] Submitting $WORKERS worker(s)..."
 # ---------------------------------------------------------------------------
 # Submit workers
 # ---------------------------------------------------------------------------
+JOB_IDS=()
 for i in $(seq 1 "$WORKERS"); do
     JOBID=$(sbatch --parsable \
         --job-name="hk_70b_w${i}" \
@@ -263,7 +274,9 @@ for i in $(seq 1 "$WORKERS"); do
         --time="$CHOSEN_TIME" \
         --cpus-per-task=8 \
         --export=ALL,SMART_RESUBMIT=1,SUBMIT_DIR="$(pwd)" \
+        ${DEPENDENCY:+--dependency=$DEPENDENCY} \
         slurm_70b_auto.sh)
+    JOB_IDS+=("$JOBID")
     echo "  Worker $i → job $JOBID ($CHOSEN_LABEL)"
 done
 
@@ -271,3 +284,8 @@ echo ""
 echo "[smart] Monitor:  squeue -u \$USER"
 echo "        Status:   bash submit_70b_smart.sh --status"
 echo "        Logs:     tail -f logs/70b_w1_<JOBID>.out"
+
+# Output colon-separated job IDs to the original stdout (for --parsable callers).
+if [[ $PARSABLE -eq 1 ]]; then
+    ( IFS=':'; echo "${JOB_IDS[*]}" >&3 )
+fi
