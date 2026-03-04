@@ -200,7 +200,9 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
                          cyber_test_answers=None,
                          cyber_gibberish_qids=None,
                          cyber_subsets=None,
-                         cyber_mcq_stats=None):
+                         cyber_mcq_stats=None,
+                         bio_mcq_logit_stats=None,
+                         cyber_mcq_logit_stats=None):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     _save_npy(hs_train,       CHECKPOINT_DIR / "base_hs_train.npy")
     _save_npy(hs_val,         CHECKPOINT_DIR / "base_hs_val.npy")
@@ -226,6 +228,8 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
             "cyber_mcq_stats":      cyber_mcq_stats,
             "mcq_test_answers":     mcq_test_answers,
             "mcq_stats":            mcq_stats,
+            "bio_mcq_logit_stats":  bio_mcq_logit_stats,
+            "cyber_mcq_logit_stats": cyber_mcq_logit_stats,
         }, f)
     print("[checkpoint] Base checkpoint saved.", flush=True)
 
@@ -291,6 +295,8 @@ def load_base_checkpoint(load_hs: bool = True):
         cyber_test_answers=r.get("cyber_test_answers", []),
         cyber_gibberish_qids=r.get("cyber_gibberish_qids", []),
         mcq_stats=r.get("mcq_stats"),
+        bio_mcq_logit_stats=r.get("bio_mcq_logit_stats"),
+        cyber_mcq_logit_stats=r.get("cyber_mcq_logit_stats"),
     )
 
 
@@ -724,6 +730,70 @@ def mcq_gen_stats(answers, pairs):
     }
 
 
+def get_abcd_token_ids(tokenizer):
+    """Return [a_ids, b_ids, c_ids, d_ids] as sorted lists of single-token IDs."""
+    result = []
+    for letter in ["A", "B", "C", "D"]:
+        ids = set()
+        for s in [letter, f" {letter}", letter.lower(), f" {letter.lower()}"]:
+            enc = tokenizer.encode(s, add_special_tokens=False)
+            if len(enc) == 1:
+                ids.add(enc[0])
+        result.append(sorted(ids))
+    return result
+
+
+@torch.no_grad()
+def logit_abcd_scores(model, tokenizer, pairs, batch_size, abcd_ids, desc="",
+                      checkpoint_fn=None, save_every=20, resume_from=None):
+    """Returns list of [logit_A, logit_B, logit_C, logit_D] per pair."""
+    texts = _apply_template(pairs, tokenizer, add_generation_prompt=True)
+    results = list(resume_from) if resume_from else []
+    start_batch = len(results) // batch_size
+    n_batches = (len(texts) + batch_size - 1) // batch_size
+    for b in range(start_batch, n_batches):
+        batch_texts = texts[b * batch_size:(b + 1) * batch_size]
+        enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
+                        truncation=True, max_length=MAX_INPUT_LENGTH)
+        enc = {k: v.to(model.device) for k, v in enc.items()}
+        out = model(**enc)
+        last_logits = out.logits[:, -1, :].float()
+        for row in last_logits:
+            scores = [max(row[i].item() for i in ids) if ids else float("-inf")
+                      for ids in abcd_ids]
+            results.append(scores)
+        print(f"  [{desc}] abcd-logit batch {b+1}/{n_batches}  "
+              f"({min((b+1)*batch_size, len(texts))}/{len(texts)} done)"
+              f"  {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        if checkpoint_fn and (b + 1) % save_every == 0:
+            checkpoint_fn(list(results))
+    return results
+
+
+def mcq_logit_stats(scores, pairs):
+    """Compute accuracy and multi-class AUC-ROC from 4-way logit scores."""
+    label_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    y_true, y_score = [], []
+    for sc, p in zip(scores, pairs):
+        y_true.append(label_map[p["expected"]])
+        sc_arr = np.array(sc, dtype=float)
+        sc_arr -= sc_arr.max()
+        exp_sc = np.exp(sc_arr)
+        y_score.append(exp_sc / exp_sc.sum())
+    y_true = np.array(y_true)
+    y_score = np.array(y_score)
+    pred = y_score.argmax(axis=1)
+    accuracy = float((pred == y_true).mean())
+    try:
+        from sklearn.metrics import roc_auc_score
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(y_true, classes=[0, 1, 2, 3])
+        auc = float(roc_auc_score(y_bin, y_score, multi_class="ovr", average="macro"))
+    except Exception:
+        auc = 0.0
+    return {"accuracy": accuracy, "auc": auc}
+
+
 # =============================================================================
 # Model utilities
 # =============================================================================
@@ -935,6 +1005,7 @@ def logit_stats(scores, pairs):
         "tn":            false_correct,
         "fp":            false_total - false_correct,
         "n_total":       total,
+        "mean_margin":   float(np.mean(margin_list)) if margin_list else 0.0,
     }
 
 
@@ -1260,25 +1331,34 @@ def extract_tf(answer):
 
 def generation_stats(answers, pairs):
     total   = len(answers)
-    correct = gibberish = true_total = true_correct = false_total = false_correct = 0
+    correct = true_total = true_correct = false_total = false_correct = 0
+    true_gibberish = false_gibberish = 0
     y_true_list, y_pred_list = [], []
     for ans, p in zip(answers, pairs):
         tf       = extract_tf(ans)
         expected = p["expected"]
-        if tf is None:
-            gibberish += 1
         y_true_list.append(1 if expected == "True" else 0)
         y_pred_list.append(1 if tf == "True" else 0)   # gibberish treated as False
         if expected == "True":
             true_total += 1
-            if tf == "True":
+            if tf is None:
+                true_gibberish += 1
+            elif tf == "True":
                 true_correct += 1
                 correct += 1
         else:
             false_total += 1
-            if tf == "False":
+            if tf is None:
+                false_gibberish += 1
+            elif tf == "False":
                 false_correct += 1
                 correct += 1
+    gibberish = true_gibberish + false_gibberish
+    # tp/fn/tn/fp exclude gibberish responses
+    tp = true_correct
+    fn = true_total  - true_correct  - true_gibberish
+    tn = false_correct
+    fp = false_total - false_correct - false_gibberish
     m = _clf_metrics(np.array(y_true_list), np.array(y_pred_list))  # no AUC (binary only)
     return {
         "accuracy":        float(correct        / total)       if total       > 0 else 0.0,
@@ -1289,10 +1369,11 @@ def generation_stats(answers, pairs):
         "precision":       m["precision"],
         "recall":          m["recall"],
         "f1":              m["f1"],
-        "tp":              true_correct,
-        "fn":              true_total - true_correct,
-        "tn":              false_correct,
-        "fp":              false_total - false_correct,
+        "tp":              tp,
+        "fn":              fn,
+        "tn":              tn,
+        "fp":              fp,
+        "gibberish":       gibberish,
         "n_total":         total,
         "n_valid":         total - gibberish,
     }
@@ -1570,7 +1651,8 @@ def _prow(d, key, default=0.0):
 def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=None,
                       base_cyber_subsets=None, base_cyber_mcq=None,
-                      llama70b=None):
+                      llama70b=None,
+                      base_bio_mcq_logit=None, base_cyber_mcq_logit=None):
     """Save all six summary tables as CSV files under DATA_DIR."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1579,27 +1661,30 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t1, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method",
-                    "gen_acc", "gen_true", "gen_false", "gibberish",
+                    "gen_acc", "gen_valid_acc", "gen_true", "gen_false", "gen_margin", "gibberish",
                     "gen_precision", "gen_recall", "gen_f1",
-                    "logit_acc", "logit_true", "logit_false",
+                    "logit_acc", "logit_true", "logit_false", "logit_margin",
                     "logit_precision", "logit_recall", "logit_f1", "logit_auc"])
         def _r1(name, g, lo):
             lo = lo or {}
             w.writerow([name,
-                        round(g["accuracy"], 4), round(g["true_accuracy"], 4),
-                        round(g["false_accuracy"], 4), round(g["gibberish_rate"], 4),
+                        round(g["accuracy"], 4), round(g.get("accuracy_valid", 0), 4),
+                        round(g["true_accuracy"], 4), round(g["false_accuracy"], 4),
+                        "",                                          # gen_margin (N/A for generation)
+                        round(g.get("gibberish_rate", 0), 4),
                         round(g.get("precision", 0), 4), round(g.get("recall", 0), 4),
                         round(g.get("f1", 0), 4),
                         round(_prow(lo, "accuracy"), 4),
                         round(_prow(lo, "true_accuracy"), 4),
                         round(_prow(lo, "false_accuracy"), 4),
+                        round(_prow(lo, "mean_margin"), 4),
                         round(_prow(lo, "precision"), 4), round(_prow(lo, "recall"), 4),
                         round(_prow(lo, "f1"), 4), round(_prow(lo, "auc"), 4)])
         _r1("Base", base_gen, base_logit)
         for method, r in all_results.items():
             _r1(method, r["gen"], r.get("logit"))
         if llama70b:
-            _r1("Llama-3-70B", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
+            _r1("Llama-3-70B-Instruct", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
     print(f"  [CSV] {t1}")
 
     # ── Tables 2 / 3 / 5: Probe tables (shared schema) ───────────────────────
@@ -1679,15 +1764,16 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t_bc, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method", "probe_quad", "eval_type", "clf",
-                    "n_total", "tp", "fp", "tn", "fn",
+                    "n_total", "tp", "fp", "tn", "fn", "gibberish",
                     "precision", "recall", "f1", "auc"])
 
-        def _rbcm(name, probe_quad, eval_type, clf, stats):
+        def _rbcm(name, probe_quad, eval_type, clf, stats, gibberish_val=""):
             s = stats or {}
             w.writerow([name, probe_quad, eval_type, clf,
                         s.get("n_total", ""),
                         s.get("tp", ""), s.get("fp", ""),
                         s.get("tn", ""), s.get("fn", ""),
+                        gibberish_val,
                         round(_prow(s, "precision"), 4),
                         round(_prow(s, "recall"), 4),
                         round(_prow(s, "f1"), 4),
@@ -1695,8 +1781,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
 
         def _write_bio_confusion_rows(name, gen_s, logit_s, base_probe_s,
                                       method_probe_s=None, cross_probe_s=None):
-            _rbcm(name, "N/A", "gen",   "-", gen_s)
-            _rbcm(name, "N/A", "logit", "-", logit_s)
+            _rbcm(name, "N/A", "gen",   "-", gen_s,   (gen_s or {}).get("gibberish", ""))
+            _rbcm(name, "N/A", "logit", "-", logit_s, "")
             for quad, pset in [("base",   base_probe_s),
                                 ("method", method_probe_s),
                                 ("cross",  cross_probe_s)]:
@@ -1719,7 +1805,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
             )
         if llama70b:
             _write_bio_confusion_rows(
-                "Llama-3-70B",
+                "Llama-3-70B-Instruct",
                 llama70b.get("bio_gen_stats"),
                 llama70b.get("bio_logit_stats"),
                 None,
@@ -1732,21 +1818,24 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t4, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method",
-                    "cyber_acc", "cyber_true", "cyber_false", "cyber_gib",
+                    "cyber_acc", "cyber_valid_acc", "cyber_true", "cyber_false", "cyber_gen_margin", "cyber_gib",
                     "cyber_precision", "cyber_recall", "cyber_f1",
-                    "cyber_logit_acc", "cyber_logit_true", "cyber_logit_false",
+                    "cyber_logit_acc", "cyber_logit_true", "cyber_logit_false", "cyber_logit_margin",
                     "cyber_logit_precision", "cyber_logit_recall",
                     "cyber_logit_f1", "cyber_logit_auc"])
         def _r4(name, g, lo):
             g  = g  or {}
             lo = lo or {}
             w.writerow([name,
-                        round(_prow(g,  "accuracy"), 4), round(_prow(g,  "true_accuracy"), 4),
-                        round(_prow(g,  "false_accuracy"), 4), round(_prow(g, "gibberish_rate"), 4),
+                        round(_prow(g,  "accuracy"), 4), round(_prow(g, "accuracy_valid"), 4),
+                        round(_prow(g,  "true_accuracy"), 4), round(_prow(g, "false_accuracy"), 4),
+                        "",                                           # cyber_gen_margin (N/A for generation)
+                        round(_prow(g, "gibberish_rate"), 4),
                         round(_prow(g,  "precision"), 4), round(_prow(g,  "recall"), 4),
                         round(_prow(g,  "f1"), 4),
                         round(_prow(lo, "accuracy"), 4), round(_prow(lo, "true_accuracy"), 4),
                         round(_prow(lo, "false_accuracy"), 4),
+                        round(_prow(lo, "mean_margin"), 4),
                         round(_prow(lo, "precision"), 4), round(_prow(lo, "recall"), 4),
                         round(_prow(lo, "f1"), 4), round(_prow(lo, "auc"), 4)])
         _base_og = base_cyber_subsets.get("og", {})
@@ -1755,7 +1844,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
             _r_og = (r.get("cyber_subsets") or {}).get("og", {})
             _r4(method, _r_og.get("gen"), _r_og.get("logit"))
         if llama70b:
-            _r4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
+            _r4("Llama-3-70B-Instruct", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
     print(f"  [CSV] {t4}")
 
     # ── Tables 4b / 4c / 4d: Cyber probe tables (og subset for backwards compat) ──
@@ -1781,9 +1870,9 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t_cs, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method", "subset", "n_pairs",
-                    "gen_acc", "gen_valid_acc", "gen_true", "gen_false", "gen_gib",
+                    "gen_acc", "gen_valid_acc", "gen_true", "gen_false", "gen_margin", "gen_gib",
                     "gen_precision", "gen_recall", "gen_f1",
-                    "logit_acc", "logit_true", "logit_false",
+                    "logit_acc", "logit_true", "logit_false", "logit_margin",
                     "logit_precision", "logit_recall", "logit_f1", "logit_auc"])
         def _rcs(name, sname, sv):
             g  = sv.get("gen",   {}) or {}
@@ -1793,6 +1882,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                         round(_prow(g,  "accuracy_valid"), 4),
                         round(_prow(g,  "true_accuracy"), 4),
                         round(_prow(g,  "false_accuracy"), 4),
+                        "",                                           # gen_margin (N/A for generation)
                         round(_prow(g,  "gibberish_rate"), 4),
                         round(_prow(g,  "precision"), 4),
                         round(_prow(g,  "recall"), 4),
@@ -1800,6 +1890,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                         round(_prow(lo, "accuracy"), 4),
                         round(_prow(lo, "true_accuracy"), 4),
                         round(_prow(lo, "false_accuracy"), 4),
+                        round(_prow(lo, "mean_margin"), 4),
                         round(_prow(lo, "precision"), 4),
                         round(_prow(lo, "recall"), 4),
                         round(_prow(lo, "f1"), 4),
@@ -1818,14 +1909,15 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t_cc, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method", "subset", "eval_type", "clf",
-                    "n_total", "tp", "fp", "tn", "fn",
+                    "n_total", "tp", "fp", "tn", "fn", "gibberish",
                     "precision", "recall", "f1", "auc"])
-        def _rcm(name, sname, eval_type, clf, stats):
+        def _rcm(name, sname, eval_type, clf, stats, gibberish_val=""):
             s = stats or {}
             w.writerow([name, sname, eval_type, clf,
                         s.get("n_total", ""),
                         s.get("tp", ""), s.get("fp", ""),
                         s.get("tn", ""), s.get("fn", ""),
+                        gibberish_val,
                         round(_prow(s, "precision"), 4),
                         round(_prow(s, "recall"), 4),
                         round(_prow(s, "f1"), 4),
@@ -1834,8 +1926,9 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         def _write_cyber_confusion_rows(name, cyber_sub_dict):
             for sname in CYBER_SUBSETS:
                 sv = (cyber_sub_dict or {}).get(sname, {})
-                _rcm(name, sname, "gen",   "-", sv.get("gen"))
-                _rcm(name, sname, "logit", "-", sv.get("logit"))
+                _gen_s = sv.get("gen") or {}
+                _rcm(name, sname, "gen",   "-", _gen_s, _gen_s.get("gibberish", ""))
+                _rcm(name, sname, "logit", "-", sv.get("logit"), "")
                 probes = sv.get("probes") or sv.get("base_probes") or {}
                 for clf in CLF_NAMES:
                     _rcm(name, sname, "probe_pl",   clf, (probes.get("per_layer", {})     or {}).get(clf))
@@ -1853,20 +1946,23 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
     with open(t_cmcq, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["method", "cyber_mcq_acc", "cyber_mcq_gib",
-                    "cyber_mcq_A", "cyber_mcq_B", "cyber_mcq_C", "cyber_mcq_D"])
-        def _rcmcq(name, ms):
+                    "cyber_mcq_A", "cyber_mcq_B", "cyber_mcq_C", "cyber_mcq_D",
+                    "cyber_mcq_logit_auc"])
+        def _rcmcq(name, ms, mcq_logit=None):
             if ms is None:
-                w.writerow([name] + ["N/A"] * 6)
+                w.writerow([name] + ["N/A"] * 7)
                 return
             pl = ms.get("per_letter", {})
+            auc = round((mcq_logit or {}).get("auc", 0), 4) if mcq_logit else ""
             w.writerow([name,
                         round(ms["accuracy"], 4),
                         round(ms["gibberish_rate"], 4),
                         round(pl.get("A", 0), 4), round(pl.get("B", 0), 4),
-                        round(pl.get("C", 0), 4), round(pl.get("D", 0), 4)])
-        _rcmcq("Base", base_cyber_mcq)
+                        round(pl.get("C", 0), 4), round(pl.get("D", 0), 4),
+                        auc])
+        _rcmcq("Base", base_cyber_mcq, base_cyber_mcq_logit)
         for method, r in all_results.items():
-            _rcmcq(method, r.get("cyber_mcq_stats"))
+            _rcmcq(method, r.get("cyber_mcq_stats"), r.get("cyber_mcq_logit_stats"))
     print(f"  [CSV] {t_cmcq}")
 
     # ── Table 6: MCQ direct ───────────────────────────────────────────────────
@@ -1875,48 +1971,56 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         w = csv.writer(f)
         w.writerow(["method",
                     "bio_mcq_acc", "bio_acc_a", "bio_acc_b", "bio_acc_c", "bio_acc_d", "bio_gibberish",
-                    "cyber_mcq_acc", "cyber_acc_a", "cyber_acc_b", "cyber_acc_c", "cyber_acc_d", "cyber_gibberish"])
-        def _r6(name, bio_ms, cyber_ms=None):
-            def _mcq_cols(ms):
+                    "bio_mcq_logit_auc",
+                    "cyber_mcq_acc", "cyber_acc_a", "cyber_acc_b", "cyber_acc_c", "cyber_acc_d", "cyber_gibberish",
+                    "cyber_mcq_logit_auc"])
+        def _r6(name, bio_ms, cyber_ms=None, bio_logit=None, cyber_logit=None):
+            def _mcq_cols(ms, logit=None):
                 if ms is None:
-                    return ["N/A"] * 6
+                    return ["N/A"] * 7
                 pl = ms.get("per_letter", {})
+                auc = round((logit or {}).get("auc", 0), 4) if logit else ""
                 return [round(ms["accuracy"], 4),
                         round(pl.get("A", 0), 4), round(pl.get("B", 0), 4),
                         round(pl.get("C", 0), 4), round(pl.get("D", 0), 4),
-                        round(ms["gibberish_rate"], 4)]
-            w.writerow([name] + _mcq_cols(bio_ms) + _mcq_cols(cyber_ms))
-        _r6("Base", base_mcq, base_cyber_mcq)
+                        round(ms["gibberish_rate"], 4), auc]
+            w.writerow([name] + _mcq_cols(bio_ms, bio_logit) + _mcq_cols(cyber_ms, cyber_logit))
+        _r6("Base", base_mcq, base_cyber_mcq, base_bio_mcq_logit, base_cyber_mcq_logit)
         for method, r in all_results.items():
-            _r6(method, r.get("mcq"), r.get("cyber_mcq_stats"))
+            _r6(method, r.get("mcq"), r.get("cyber_mcq_stats"),
+                r.get("bio_mcq_logit_stats"), r.get("cyber_mcq_logit_stats"))
         if llama70b:
-            _r6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
+            _r6("Llama-3-70B-Instruct",
+                llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"),
+                llama70b.get("bio_mcq_logit_stats"), llama70b.get("cyber_mcq_logit_stats"))
     print(f"  [CSV] {t6}")
 
 
 def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                         base_mcq=None,
                         base_cyber_subsets=None, base_cyber_mcq=None,
-                        llama70b=None):
-    W   = 120
+                        llama70b=None,
+                        base_bio_mcq_logit=None, base_cyber_mcq_logit=None):
+    W   = 140
     sep = "=" * W
 
     # ── Table 1: Generation + Logit ─────────────────────────────────────────
     print(f"\n{sep}")
     print("TABLE 1 — FORGET SET (test): Generation accuracy + Logit-based metric")
     print(sep)
-    print(f"{'Method':<12} {'GenAcc':>7} {'GTrue':>6} {'GFalse':>7} {'Gib':>5}"
-          f"  {'LogitAcc':>9} {'LTrue':>7} {'LFalse':>8}")
+    print(f"{'Method':<12} {'GenAcc':>7} {'GVAcc':>6} {'GTrue':>6} {'GFalse':>7} {'GMarg':>6} {'Gib':>5}"
+          f"  {'LogitAcc':>9} {'LTrue':>7} {'LFalse':>8} {'LMarg':>6}")
     print("-" * W)
     def _row1(name, g, lo):
         lo = lo or {}
-        print(f"{name:<12} {g['accuracy']:7.3f} {g['true_accuracy']:6.3f}"
-              f" {g['false_accuracy']:7.3f} {g['gibberish_rate']:5.3f}"
+        print(f"{name:<12} {g['accuracy']:7.3f} {g.get('accuracy_valid',0):6.3f}"
+              f" {g['true_accuracy']:6.3f}"
+              f" {g['false_accuracy']:7.3f} {'':>6} {g['gibberish_rate']:5.3f}"
               f"  {_prow(lo,'accuracy'):9.3f} {_prow(lo,'true_accuracy'):7.3f}"
-              f" {_prow(lo,'false_accuracy'):8.3f}")
+              f" {_prow(lo,'false_accuracy'):8.3f} {_prow(lo,'mean_margin'):6.3f}")
     _row1("Base", base_gen, base_logit)
     if llama70b:
-        _row1("Llama-3-70B", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
+        _row1("Llama-3-70B-Instruct", llama70b["bio_gen_stats"], llama70b.get("bio_logit_stats"))
     print("-" * W)
     for method, r in all_results.items():
         _row1(method, r["gen"], r.get("logit"))
@@ -2008,21 +2112,22 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
     print(f"\n{sep}")
     print("TABLE 4 — CYBER SET [og]: Generation + Logit")
     print(sep)
-    print(f"{'Method':<12} {'CyberAcc':>8} {'CTru':>6} {'CFal':>6} {'Gib':>5}"
-          f"  {'CLogAcc':>7} {'CLTru':>7} {'CLFal':>8}")
-    print("-" * 70)
+    print(f"{'Method':<12} {'CVAcc':>8} {'CVVAcc':>7} {'CTru':>6} {'CFal':>6} {'CGMarg':>7} {'Gib':>5}"
+          f"  {'CLogAcc':>7} {'CLTru':>7} {'CLFal':>8} {'CLMarg':>7}")
+    print("-" * 90)
     def _row4(name, g, lo):
         g  = g  or {}
         lo = lo or {}
-        print(f"{name:<12} {_prow(g,'accuracy'):8.3f} {_prow(g,'true_accuracy'):6.3f}"
-              f" {_prow(g,'false_accuracy'):6.3f} {_prow(g,'gibberish_rate'):5.3f}"
+        print(f"{name:<12} {_prow(g,'accuracy'):8.3f} {_prow(g,'accuracy_valid'):7.3f}"
+              f" {_prow(g,'true_accuracy'):6.3f}"
+              f" {_prow(g,'false_accuracy'):6.3f} {'':>7} {_prow(g,'gibberish_rate'):5.3f}"
               f"  {_prow(lo,'accuracy'):7.3f} {_prow(lo,'true_accuracy'):7.3f}"
-              f" {_prow(lo,'false_accuracy'):8.3f}")
+              f" {_prow(lo,'false_accuracy'):8.3f} {_prow(lo,'mean_margin'):7.3f}")
     if _base_og:
         _row4("Base", _base_og.get("gen"), _base_og.get("logit"))
     if llama70b:
-        _row4("Llama-3-70B", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
-    print("-" * 70)
+        _row4("Llama-3-70B-Instruct", llama70b.get("cyber_gen_stats"), llama70b.get("cyber_logit_stats"))
+    print("-" * 90)
     for method, r in all_results.items():
         _r_og = (r.get("cyber_subsets") or {}).get("og", {})
         _row4(method, _r_og.get("gen"), _r_og.get("logit"))
@@ -2066,26 +2171,30 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
     print("TABLE 6 — MCQ DIRECT: Original multiple-choice questions (A/B/C/D)")
     print("          Model is given the full question + 4 choices and must reply A/B/C/D.")
     print(sep)
-    print(f"{'Method':<12}  {'BioAcc':>6} {'B_A':>5} {'B_B':>5} {'B_C':>5} {'B_D':>5} {'BGib':>5}"
-          f"  {'CybAcc':>6} {'C_A':>5} {'C_B':>5} {'C_C':>5} {'C_D':>5} {'CGib':>5}")
-    print("-" * 90)
+    print(f"{'Method':<12}  {'BioAcc':>6} {'B_A':>5} {'B_B':>5} {'B_C':>5} {'B_D':>5} {'BGib':>5} {'BAUC':>6}"
+          f"  {'CybAcc':>6} {'C_A':>5} {'C_B':>5} {'C_C':>5} {'C_D':>5} {'CGib':>5} {'CAUC':>6}")
+    print("-" * 105)
 
-    def _mcq_str(ms):
+    def _mcq_str(ms, mcq_logit=None):
         if ms is None:
-            return f"{'N/A':>6} {'':>5} {'':>5} {'':>5} {'':>5} {'':>5}"
+            return f"{'N/A':>6} {'':>5} {'':>5} {'':>5} {'':>5} {'':>5} {'':>6}"
         pl = ms.get("per_letter", {})
+        auc_str = f"{(mcq_logit or {}).get('auc', 0):6.3f}" if mcq_logit else f"{'':>6}"
         return (f" {ms['accuracy']:6.3f} {pl.get('A',0):5.3f} {pl.get('B',0):5.3f}"
-                f" {pl.get('C',0):5.3f} {pl.get('D',0):5.3f} {ms['gibberish_rate']:5.3f}")
+                f" {pl.get('C',0):5.3f} {pl.get('D',0):5.3f} {ms['gibberish_rate']:5.3f} {auc_str}")
 
-    def _row6(name, bio_ms, cyber_ms=None):
-        print(f"{name:<12} {_mcq_str(bio_ms)}  {_mcq_str(cyber_ms)}")
+    def _row6(name, bio_ms, cyber_ms=None, bio_logit=None, cyber_logit=None):
+        print(f"{name:<12} {_mcq_str(bio_ms, bio_logit)}  {_mcq_str(cyber_ms, cyber_logit)}")
 
-    _row6("Base", base_mcq, base_cyber_mcq)
+    _row6("Base", base_mcq, base_cyber_mcq, base_bio_mcq_logit, base_cyber_mcq_logit)
     if llama70b:
-        _row6("Llama-3-70B", llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"))
-    print("-" * 90)
+        _row6("Llama-3-70B-Instruct",
+              llama70b.get("bio_mcq_stats"), llama70b.get("cyber_mcq_stats"),
+              llama70b.get("bio_mcq_logit_stats"), llama70b.get("cyber_mcq_logit_stats"))
+    print("-" * 105)
     for method, r in all_results.items():
-        _row6(method, r.get("mcq"), r.get("cyber_mcq_stats"))
+        _row6(method, r.get("mcq"), r.get("cyber_mcq_stats"),
+              r.get("bio_mcq_logit_stats"), r.get("cyber_mcq_logit_stats"))
     print(sep)
 
     # ── Save all tables as CSV ────────────────────────────────────────────────
@@ -2094,7 +2203,9 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
                       base_mcq=base_mcq,
                       base_cyber_subsets=base_cyber_subsets,
                       base_cyber_mcq=base_cyber_mcq,
-                      llama70b=llama70b)
+                      llama70b=llama70b,
+                      base_bio_mcq_logit=base_bio_mcq_logit,
+                      base_cyber_mcq_logit=base_cyber_mcq_logit)
 
 
 # =============================================================================
@@ -2205,16 +2316,19 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
         if isinstance(cps, dict) and "per_layer" in cps:
             cyber_probe_set = cps
 
-    need_hs        = hs_train is None or hs_val is None or hs_test is None
-    need_cyber_hs  = cyber_hs_train is None or cyber_hs_val is None or cyber_hs_test is None
-    need_gen       = "test_answers"            not in partial
-    need_cyber_gen = "cyber_test_answers"      not in partial
-    need_log       = "logit_scores"            not in partial
-    need_cyber_log = "cyber_logit_scores"      not in partial
-    need_mcq       = "mcq_test_answers"        not in partial
-    need_cyber_mcq = "cyber_mcq_answers"       not in partial
+    need_hs             = hs_train is None or hs_val is None or hs_test is None
+    need_cyber_hs       = cyber_hs_train is None or cyber_hs_val is None or cyber_hs_test is None
+    need_gen            = "test_answers"            not in partial
+    need_cyber_gen      = "cyber_test_answers"      not in partial
+    need_log            = "logit_scores"            not in partial
+    need_cyber_log      = "cyber_logit_scores"      not in partial
+    need_mcq            = "mcq_test_answers"        not in partial
+    need_cyber_mcq      = "cyber_mcq_answers"       not in partial
+    need_bio_mcq_logit  = "bio_mcq_logit_scores"   not in partial
+    need_cyber_mcq_logit= "cyber_mcq_logit_scores" not in partial
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
-                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq)
+                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq
+                      or need_bio_mcq_logit or need_cyber_mcq_logit)
 
     if need_model:
         print("\nLoading base model...")
@@ -2320,18 +2434,44 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
             cyber_mcq_answers = partial["cyber_mcq_answers"]
             print("[base] cyber_mcq_answers loaded from partial cache.")
 
+        if need_bio_mcq_logit or need_cyber_mcq_logit:
+            _abcd_ids = get_abcd_token_ids(base_tok)
+            if need_bio_mcq_logit:
+                print("\nComputing MCQ logit scores — BASE — bio test set")
+                _bio_mcq_p = make_mcq_pairs(test_q)
+                bio_mcq_logit_scores = logit_abcd_scores(
+                    base_model, base_tok, _bio_mcq_p, LOGIT_BATCH_SIZE, _abcd_ids,
+                    "base/bio-mcq-logit")
+                _save_partial("base", {"bio_mcq_logit_scores": bio_mcq_logit_scores})
+            else:
+                bio_mcq_logit_scores = partial["bio_mcq_logit_scores"]
+            if need_cyber_mcq_logit:
+                print("\nComputing MCQ logit scores — BASE — cyber test set")
+                _cyber_mcq_p = make_mcq_pairs(cyber_mcq_q_test)
+                cyber_mcq_logit_scores = logit_abcd_scores(
+                    base_model, base_tok, _cyber_mcq_p, LOGIT_BATCH_SIZE, _abcd_ids,
+                    "base/cyber-mcq-logit")
+                _save_partial("base", {"cyber_mcq_logit_scores": cyber_mcq_logit_scores})
+            else:
+                cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+        else:
+            bio_mcq_logit_scores   = partial["bio_mcq_logit_scores"]
+            cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+
         print("\nUnloading base model...")
         unload_model(base_model)
         del base_tok
     else:
-        test_answers       = partial["test_answers"]
-        cyber_test_answers = partial["cyber_test_answers"]
-        logit_scores       = partial["logit_scores"]
-        cyber_logit_scores = partial["cyber_logit_scores"]
-        mcq_test_answers   = partial["mcq_test_answers"]
+        test_answers          = partial["test_answers"]
+        cyber_test_answers    = partial["cyber_test_answers"]
+        logit_scores          = partial["logit_scores"]
+        cyber_logit_scores    = partial["cyber_logit_scores"]
+        mcq_test_answers      = partial["mcq_test_answers"]
         cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
-        cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
-        cyber_mcq_answers  = partial["cyber_mcq_answers"]
+        cyber_mcq_pairs       = make_mcq_pairs(cyber_mcq_q_test)
+        cyber_mcq_answers     = partial["cyber_mcq_answers"]
+        bio_mcq_logit_scores  = partial["bio_mcq_logit_scores"]
+        cyber_mcq_logit_scores= partial["cyber_mcq_logit_scores"]
 
     # ── Train bio probes ───────────────────────────────────────────────────────
     if probe_set is None:
@@ -2393,6 +2533,14 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     mcq_pairs_v = make_mcq_pairs(test_q)
     mcq_stats_v = mcq_gen_stats(mcq_test_answers, mcq_pairs_v)
 
+    # MCQ logit stats
+    bio_mcq_logit_stats_v   = mcq_logit_stats(bio_mcq_logit_scores,   mcq_pairs_v)
+    cyber_mcq_logit_stats_v = mcq_logit_stats(cyber_mcq_logit_scores, cyber_mcq_pairs)
+    print(f"  [bio  MCQ logit] acc={bio_mcq_logit_stats_v['accuracy']:.3f}"
+          f"  auc={bio_mcq_logit_stats_v['auc']:.3f}", flush=True)
+    print(f"  [cyber MCQ logit] acc={cyber_mcq_logit_stats_v['accuracy']:.3f}"
+          f"  auc={cyber_mcq_logit_stats_v['auc']:.3f}", flush=True)
+
     print("\n  BASE — GENERATION STATS (bio test set):")
     print_gen_stats("Base", gen_stats_v)
     print("\n  BASE — PROBE STATS (bio):")
@@ -2416,7 +2564,9 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                          cyber_test_answers=cyber_test_answers,
                          cyber_gibberish_qids=cyber_gib_qids,
                          cyber_subsets=cyber_subsets_v,
-                         cyber_mcq_stats=cyber_mcq_stats_v)
+                         cyber_mcq_stats=cyber_mcq_stats_v,
+                         bio_mcq_logit_stats=bio_mcq_logit_stats_v,
+                         cyber_mcq_logit_stats=cyber_mcq_logit_stats_v)
     print("\n[base] Done.")
 
 
@@ -2546,17 +2696,20 @@ def run_method(method_name: str,
         if isinstance(cps, dict) and "per_layer" in cps:
             cyber_method_probe_set = cps
 
-    need_hs        = hs_train_un is None or hs_val_un is None or hs_test_un is None
-    need_cyber_hs  = (cyber_hs_train_un is None or cyber_hs_val_un is None
-                      or cyber_hs_test_un is None)
-    need_gen       = "test_answers"       not in partial
-    need_cyber_gen = "cyber_test_answers" not in partial
-    need_log       = "logit_scores"       not in partial
-    need_cyber_log = "cyber_logit_scores" not in partial
-    need_mcq       = "mcq_test_answers"   not in partial
-    need_cyber_mcq = "cyber_mcq_answers"  not in partial
+    need_hs             = hs_train_un is None or hs_val_un is None or hs_test_un is None
+    need_cyber_hs       = (cyber_hs_train_un is None or cyber_hs_val_un is None
+                           or cyber_hs_test_un is None)
+    need_gen            = "test_answers"            not in partial
+    need_cyber_gen      = "cyber_test_answers"      not in partial
+    need_log            = "logit_scores"            not in partial
+    need_cyber_log      = "cyber_logit_scores"      not in partial
+    need_mcq            = "mcq_test_answers"        not in partial
+    need_cyber_mcq      = "cyber_mcq_answers"       not in partial
+    need_bio_mcq_logit  = "bio_mcq_logit_scores"   not in partial
+    need_cyber_mcq_logit= "cyber_mcq_logit_scores" not in partial
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
-                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq)
+                      or need_log or need_cyber_log or need_mcq or need_cyber_mcq
+                      or need_bio_mcq_logit or need_cyber_mcq_logit)
 
     if need_model:
         print(f"\nLoading {method_name} model...")
@@ -2670,20 +2823,50 @@ def run_method(method_name: str,
             cyber_mcq_answers = partial["cyber_mcq_answers"]
             print(f"[{method_name}] cyber_mcq_answers loaded from partial cache.")
 
+        if need_bio_mcq_logit or need_cyber_mcq_logit:
+            _abcd_ids = get_abcd_token_ids(un_tok)
+            if need_bio_mcq_logit:
+                print(f"\nComputing MCQ logit scores — {method_name} — bio test set")
+                _bio_mcq_p = make_mcq_pairs(test_q)
+                if model_id in NON_INSTRUCT_MODELS:
+                    _bio_mcq_p = adapt_pairs_for_model(_bio_mcq_p, model_id)
+                bio_mcq_logit_scores = logit_abcd_scores(
+                    un_model, un_tok, _bio_mcq_p, LOGIT_BATCH_SIZE, _abcd_ids,
+                    f"{method_name}/bio-mcq-logit")
+                _save_partial(sn, {"bio_mcq_logit_scores": bio_mcq_logit_scores})
+            else:
+                bio_mcq_logit_scores = partial["bio_mcq_logit_scores"]
+            if need_cyber_mcq_logit:
+                print(f"\nComputing MCQ logit scores — {method_name} — cyber test set")
+                _cyber_mcq_p = make_mcq_pairs(cyber_mcq_q_test)
+                if model_id in NON_INSTRUCT_MODELS:
+                    _cyber_mcq_p = adapt_pairs_for_model(_cyber_mcq_p, model_id)
+                cyber_mcq_logit_scores = logit_abcd_scores(
+                    un_model, un_tok, _cyber_mcq_p, LOGIT_BATCH_SIZE, _abcd_ids,
+                    f"{method_name}/cyber-mcq-logit")
+                _save_partial(sn, {"cyber_mcq_logit_scores": cyber_mcq_logit_scores})
+            else:
+                cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+        else:
+            bio_mcq_logit_scores   = partial["bio_mcq_logit_scores"]
+            cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+
         print(f"\nUnloading {method_name} model...")
         unload_model(un_model)
         del un_tok
     else:
-        test_answers       = partial["test_answers"]
-        cyber_test_answers = partial["cyber_test_answers"]
-        logit_scores       = partial["logit_scores"]
-        cyber_logit_scores = partial["cyber_logit_scores"]
-        mcq_test_answers   = partial["mcq_test_answers"]
+        test_answers          = partial["test_answers"]
+        cyber_test_answers    = partial["cyber_test_answers"]
+        logit_scores          = partial["logit_scores"]
+        cyber_logit_scores    = partial["cyber_logit_scores"]
+        mcq_test_answers      = partial["mcq_test_answers"]
         cyber_mcq_q_tr, cyber_mcq_q_val, cyber_mcq_q_test = load_cyber_mcq_questions(rng)
-        cyber_mcq_pairs = make_mcq_pairs(cyber_mcq_q_test)
+        cyber_mcq_pairs       = make_mcq_pairs(cyber_mcq_q_test)
         if model_id in NON_INSTRUCT_MODELS:
-            cyber_mcq_pairs = adapt_pairs_for_model(cyber_mcq_pairs, model_id)
-        cyber_mcq_answers  = partial["cyber_mcq_answers"]
+            cyber_mcq_pairs   = adapt_pairs_for_model(cyber_mcq_pairs, model_id)
+        cyber_mcq_answers     = partial["cyber_mcq_answers"]
+        bio_mcq_logit_scores  = partial["bio_mcq_logit_scores"]
+        cyber_mcq_logit_scores= partial["cyber_mcq_logit_scores"]
 
     # ── Train bio method probes ────────────────────────────────────────────────
     if method_probe_set is None:
@@ -2751,6 +2934,10 @@ def run_method(method_name: str,
     mcq_pairs_v = make_mcq_pairs(test_q)
     mcq_stats_v = mcq_gen_stats(mcq_test_answers, mcq_pairs_v)
 
+    # MCQ logit stats
+    bio_mcq_logit_stats_v   = mcq_logit_stats(bio_mcq_logit_scores,   mcq_pairs_v)
+    cyber_mcq_logit_stats_v = mcq_logit_stats(cyber_mcq_logit_scores, cyber_mcq_pairs)
+
     print(f"\n  BIO FORGET SET — GENERATION STATS ({method_name}):")
     print_gen_stats("Base     ", base_gen)
     print_gen_stats(method_name, un_gen_stats)
@@ -2809,6 +2996,8 @@ def run_method(method_name: str,
         "cyber_test_answers":             cyber_test_answers,
         "mcq":                            mcq_stats_v,
         "mcq_test_answers":               mcq_test_answers,
+        "bio_mcq_logit_stats":            bio_mcq_logit_stats_v,
+        "cyber_mcq_logit_stats":          cyber_mcq_logit_stats_v,
     }
     save_method_checkpoint(method_name, hs_train_un, hs_val_un, hs_test_un,
                            method_probe_set, results)
@@ -2832,7 +3021,8 @@ def run_llama70b():
         with open(results_path) as f:
             _ex = json.load(f)
         if all(k in _ex for k in ("bio_gen_stats", "bio_logit_stats", "bio_mcq_stats",
-                                   "cyber_gen_stats", "cyber_logit_stats", "cyber_mcq_stats")):
+                                   "cyber_gen_stats", "cyber_logit_stats", "cyber_mcq_stats",
+                                   "bio_mcq_logit_stats", "cyber_mcq_logit_stats")):
             print("[llama70b] Complete checkpoint found. Nothing to recompute.")
             return
 
@@ -2850,15 +3040,18 @@ def run_llama70b():
     print(f"Bio MCQ: {len(bio_mcq_pairs)}  Cyber MCQ: {len(cyber_mcq_pairs)}")
 
     # ── Partial state ─────────────────────────────────────────────────────────
-    partial            = _load_partial("llama70b")
-    need_bio_gen       = "bio_test_answers"   not in partial
-    need_cyber_gen     = "cyber_test_answers" not in partial
-    need_bio_mcq_gen   = "bio_mcq_answers"    not in partial
-    need_cyber_mcq_gen = "cyber_mcq_answers"  not in partial
-    need_log           = "bio_logit_scores"   not in partial
-    need_cyber_log     = "cyber_logit_scores" not in partial
+    partial              = _load_partial("llama70b")
+    need_bio_gen         = "bio_test_answers"      not in partial
+    need_cyber_gen       = "cyber_test_answers"    not in partial
+    need_bio_mcq_gen     = "bio_mcq_answers"       not in partial
+    need_cyber_mcq_gen   = "cyber_mcq_answers"     not in partial
+    need_log             = "bio_logit_scores"      not in partial
+    need_cyber_log       = "cyber_logit_scores"    not in partial
+    need_bio_mcq_logit   = "bio_mcq_logit_scores"  not in partial
+    need_cyber_mcq_logit = "cyber_mcq_logit_scores" not in partial
     need_model = (need_bio_gen or need_cyber_gen or need_bio_mcq_gen
-                  or need_cyber_mcq_gen or need_log or need_cyber_log)
+                  or need_cyber_mcq_gen or need_log or need_cyber_log
+                  or need_bio_mcq_logit or need_cyber_mcq_logit)
 
     if need_model:
         print(f"\nLoading {LLAMA70B_MODEL}...")
@@ -2952,16 +3145,44 @@ def run_llama70b():
             bio_logit_scores   = partial["bio_logit_scores"]
             cyber_logit_scores = partial["cyber_logit_scores"]
 
+        if need_bio_mcq_logit or need_cyber_mcq_logit:
+            _abcd_ids = get_abcd_token_ids(tok)
+            if need_bio_mcq_logit:
+                print("\nComputing MCQ logit scores — Llama-3-70B-Instruct — bio test set")
+                bio_mcq_logit_scores = logit_abcd_scores(
+                    model, tok, bio_mcq_pairs, LLAMA70B_LOGIT_BATCH_SIZE, _abcd_ids,
+                    "llama70b/bio-mcq-logit",
+                    checkpoint_fn=lambda s: _save_partial("llama70b", {"bio_mcq_logit_scores_partial": s}),
+                    save_every=20, resume_from=partial.get("bio_mcq_logit_scores_partial") or [])
+                _save_partial("llama70b", {"bio_mcq_logit_scores": bio_mcq_logit_scores})
+            else:
+                bio_mcq_logit_scores = partial["bio_mcq_logit_scores"]
+            if need_cyber_mcq_logit:
+                print("\nComputing MCQ logit scores — Llama-3-70B-Instruct — cyber test set")
+                cyber_mcq_logit_scores = logit_abcd_scores(
+                    model, tok, cyber_mcq_pairs, LLAMA70B_LOGIT_BATCH_SIZE, _abcd_ids,
+                    "llama70b/cyber-mcq-logit",
+                    checkpoint_fn=lambda s: _save_partial("llama70b", {"cyber_mcq_logit_scores_partial": s}),
+                    save_every=20, resume_from=partial.get("cyber_mcq_logit_scores_partial") or [])
+                _save_partial("llama70b", {"cyber_mcq_logit_scores": cyber_mcq_logit_scores})
+            else:
+                cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+        else:
+            bio_mcq_logit_scores   = partial["bio_mcq_logit_scores"]
+            cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
+
         print("\nUnloading Llama-3-70B model...")
         unload_model(model)
         del tok
     else:
-        bio_test_answers   = partial["bio_test_answers"]
-        cyber_test_answers = partial["cyber_test_answers"]
-        bio_mcq_answers    = partial["bio_mcq_answers"]
-        cyber_mcq_answers  = partial["cyber_mcq_answers"]
-        bio_logit_scores   = partial["bio_logit_scores"]
-        cyber_logit_scores = partial["cyber_logit_scores"]
+        bio_test_answers       = partial["bio_test_answers"]
+        cyber_test_answers     = partial["cyber_test_answers"]
+        bio_mcq_answers        = partial["bio_mcq_answers"]
+        cyber_mcq_answers      = partial["cyber_mcq_answers"]
+        bio_logit_scores       = partial["bio_logit_scores"]
+        cyber_logit_scores     = partial["cyber_logit_scores"]
+        bio_mcq_logit_scores   = partial["bio_mcq_logit_scores"]
+        cyber_mcq_logit_scores = partial["cyber_mcq_logit_scores"]
 
     # ── Compute stats ─────────────────────────────────────────────────────────
     bio_gen_s     = generation_stats(bio_test_answers,   test_pairs)
@@ -2972,31 +3193,40 @@ def run_llama70b():
     cyber_mcq_s   = mcq_gen_stats(cyber_mcq_answers,     cyber_mcq_pairs)
 
     print("\n  Llama-3-70B — BIO GENERATION:")
-    print_gen_stats("Llama-3-70B", bio_gen_s)
+    print_gen_stats("Llama-3-70B-Instruct", bio_gen_s)
     print("\n  Llama-3-70B — BIO LOGIT:")
-    print_logit_stats("Llama-3-70B", bio_logit_s)
+    print_logit_stats("Llama-3-70B-Instruct", bio_logit_s)
     _pl = bio_mcq_s.get("per_letter", {})
     print(f"\n  Llama-3-70B — BIO MCQ:  acc={bio_mcq_s['accuracy']:.3f}"
           f"  A={_pl.get('A',0):.3f}  B={_pl.get('B',0):.3f}"
           f"  C={_pl.get('C',0):.3f}  D={_pl.get('D',0):.3f}"
           f"  gib={bio_mcq_s['gibberish_rate']:.3f}")
     print("\n  Llama-3-70B — CYBER GENERATION:")
-    print_gen_stats("Llama-3-70B", cyber_gen_s)
+    print_gen_stats("Llama-3-70B-Instruct", cyber_gen_s)
     print("\n  Llama-3-70B — CYBER LOGIT:")
-    print_logit_stats("Llama-3-70B", cyber_logit_s)
+    print_logit_stats("Llama-3-70B-Instruct", cyber_logit_s)
     _pl = cyber_mcq_s.get("per_letter", {})
     print(f"\n  Llama-3-70B — CYBER MCQ:  acc={cyber_mcq_s['accuracy']:.3f}"
           f"  A={_pl.get('A',0):.3f}  B={_pl.get('B',0):.3f}"
           f"  C={_pl.get('C',0):.3f}  D={_pl.get('D',0):.3f}"
           f"  gib={cyber_mcq_s['gibberish_rate']:.3f}")
 
+    bio_mcq_logit_s   = mcq_logit_stats(bio_mcq_logit_scores,   bio_mcq_pairs)
+    cyber_mcq_logit_s = mcq_logit_stats(cyber_mcq_logit_scores, cyber_mcq_pairs)
+    print(f"\n  Llama-3-70B — BIO MCQ LOGIT:  acc={bio_mcq_logit_s['accuracy']:.3f}"
+          f"  auc={bio_mcq_logit_s['auc']:.3f}")
+    print(f"\n  Llama-3-70B — CYBER MCQ LOGIT:  acc={cyber_mcq_logit_s['accuracy']:.3f}"
+          f"  auc={cyber_mcq_logit_s['auc']:.3f}")
+
     results = {
-        "bio_gen_stats":     bio_gen_s,
-        "bio_logit_stats":   bio_logit_s,
-        "bio_mcq_stats":     bio_mcq_s,
-        "cyber_gen_stats":   cyber_gen_s,
-        "cyber_logit_stats": cyber_logit_s,
-        "cyber_mcq_stats":   cyber_mcq_s,
+        "bio_gen_stats":        bio_gen_s,
+        "bio_logit_stats":      bio_logit_s,
+        "bio_mcq_stats":        bio_mcq_s,
+        "cyber_gen_stats":      cyber_gen_s,
+        "cyber_logit_stats":    cyber_logit_s,
+        "cyber_mcq_stats":      cyber_mcq_s,
+        "bio_mcq_logit_stats":  bio_mcq_logit_s,
+        "cyber_mcq_logit_stats":cyber_mcq_logit_s,
     }
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     with open(results_path, "w") as f:
@@ -3023,9 +3253,11 @@ def run_summary():
     base_all_probe_s     = base["all_probe_stats"]
     base_logit_s         = base["logit_stats"]
     base_cyber_subsets   = base.get("cyber_subsets") or {}
-    base_cyber_mcq_s     = base.get("cyber_mcq_stats")
-    base_test            = base.get("test_answers", [])
-    base_mcq_s           = base.get("mcq_stats")
+    base_cyber_mcq_s       = base.get("cyber_mcq_stats")
+    base_test              = base.get("test_answers", [])
+    base_mcq_s             = base.get("mcq_stats")
+    base_bio_mcq_logit_s   = base.get("bio_mcq_logit_stats")
+    base_cyber_mcq_logit_s = base.get("cyber_mcq_logit_stats")
     llama70b_s           = load_llama70b_results()
     if llama70b_s:
         print("[summary] Llama-3-70B checkpoint found — will be included in tables.")
@@ -3125,7 +3357,9 @@ def run_summary():
                         base_mcq=base_mcq_s,
                         base_cyber_subsets=base_cyber_subsets,
                         base_cyber_mcq=base_cyber_mcq_s,
-                        llama70b=llama70b_s)
+                        llama70b=llama70b_s,
+                        base_bio_mcq_logit=base_bio_mcq_logit_s,
+                        base_cyber_mcq_logit=base_cyber_mcq_logit_s)
 
 
 # =============================================================================
