@@ -15,6 +15,9 @@
 #   bash submit_pipeline.sh --base-only        # only (re-)submit base (no sanity)
 #   bash submit_pipeline.sh --skip-sanity      # skip sanity, submit base→methods→summary
 #   bash submit_pipeline.sh --skip-sanity --with-70b
+#   bash submit_pipeline.sh --reset            # delete result JSONs before submitting
+#                                              # (keeps partial caches; model reloads only
+#                                              #  for new MCQ logit scoring)
 #
 # If a stage is already done (its checkpoint exists) the Python script exits
 # immediately without recomputing, so it is safe to re-submit after failure.
@@ -27,15 +30,37 @@ mkdir -p logs
 BASE_ONLY=false
 SKIP_SANITY=false
 WITH_70B=false
+RESET=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --base-only)    BASE_ONLY=true ;;
         --skip-sanity)  SKIP_SANITY=true ;;
         --with-70b)     WITH_70B=true ;;
+        --reset)        RESET=true ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
 done
+
+# ── Optional reset: remove result JSONs so stages recompute with new code ──
+# Partial caches (*_partial.json) are preserved to avoid re-running generation.
+if $RESET; then
+    echo "Removing result checkpoint JSONs (partial caches preserved)..."
+    rm -fv \
+        checkpoints/base_results.json \
+        checkpoints/GradDiff_results.json \
+        checkpoints/RMU_results.json \
+        checkpoints/RMU-LAT_results.json \
+        checkpoints/RepNoise_results.json \
+        checkpoints/ELM_results.json \
+        checkpoints/RR_results.json \
+        checkpoints/TAR_results.json \
+        checkpoints/PB_J_results.json \
+        checkpoints/Llama3-8B_results.json \
+        checkpoints/llama70b_results.json
+    echo "Reset done."
+    echo ""
+fi
 
 # ── Stage 0: sanity ────────────────────────────────────────────────────────
 if $SKIP_SANITY || $BASE_ONLY; then
