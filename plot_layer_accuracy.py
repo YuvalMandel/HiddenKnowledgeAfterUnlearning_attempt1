@@ -62,6 +62,7 @@ Usage:
 import argparse
 import csv
 import gc
+import json
 import pickle
 import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
@@ -148,6 +149,40 @@ PROBE_SOURCE_TITLES = {
               "(Llama3-8B uses its own probes)",
 }
 
+# ---------------------------------------------------------------------------
+# External-logit reference line config
+# ---------------------------------------------------------------------------
+
+# Llama-3-70B-Instruct appears only as a dotted reference line (no probe curve).
+LLAMA70B_LABEL = "Llama-3-70B-Instruct"
+LLAMA70B_COLOR = "#000000"   # black — distinct from all curve colours
+
+# Legend section 1: solid probe curves (Llama3-70B has no curve, so excluded)
+LEGEND_CURVE_ORDER = [
+    "Base (Instruct)", "Llama3-8B",
+    "GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J",
+]
+
+# Legend section 2: dotted external-logit lines (70B inserted between 8B models)
+LEGEND_LOGIT_ORDER = [
+    "Base (Instruct)", LLAMA70B_LABEL, "Llama3-8B",
+    "GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J",
+]
+
+# Checkpoint-mode logit legend: base, 70B reference, then ck1..ck8
+CK_LOGIT_ORDER = ["Base (Instruct)", LLAMA70B_LABEL] + [
+    f"ck{n}" for n in range(1, N_CHECKPOINTS + 1)
+]
+
+
+def _logit_color(name: str) -> str:
+    """Return the colour to use for an external-logit reference line."""
+    if name == LLAMA70B_LABEL:
+        return LLAMA70B_COLOR
+    if name in CK_COLORS:          # checkpoint-mode labels (ck1..ck8, Base)
+        return CK_COLORS[name]
+    return MODEL_COLORS.get(name, LLAMA70B_COLOR)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -219,6 +254,92 @@ def load_probe_set_ck(method_name: str, ck_num: int, checkpoint_dir: Path):
         print(f"  [skip] sweep/ck{ck_num}/probes.pkl: old probe format")
         return None
     return ps
+
+
+# ---------------------------------------------------------------------------
+# External logit value loading
+# ---------------------------------------------------------------------------
+
+# Map each model display name → (results filename, logit_stats key in that JSON)
+_LOGIT_SOURCES = {
+    "Base (Instruct)": ("base_results.json",      "logit_stats"),
+    "GradDiff":        ("GradDiff_results.json",   "logit_stats"),
+    "RMU":             ("RMU_results.json",         "logit_stats"),
+    "RMU-LAT":         ("RMU-LAT_results.json",     "logit_stats"),
+    "RepNoise":        ("RepNoise_results.json",     "logit_stats"),
+    "ELM":             ("ELM_results.json",          "logit_stats"),
+    "RR":              ("RR_results.json",           "logit_stats"),
+    "TAR":             ("TAR_results.json",          "logit_stats"),
+    "PB&J":            ("PB_J_results.json",         "logit_stats"),
+    "Llama3-8B":       ("Llama3-8B_results.json",   "logit_stats"),
+    LLAMA70B_LABEL:    ("llama70b_results.json",     "bio_logit_stats"),
+}
+
+
+def load_external_logit(checkpoint_dir: Path, metrics: list) -> dict:
+    """
+    Return ext[metric][model_name] = float for all available (metric, model) pairs.
+    Reads *_results.json; missing files / keys are silently skipped.
+    """
+    ext = {m: {} for m in metrics}
+    for name, (fname, stats_key) in _LOGIT_SOURCES.items():
+        path = checkpoint_dir / fname
+        if not path.exists():
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            stats = data.get(stats_key) or {}
+            for m in metrics:
+                val = stats.get(m)
+                if val is not None:
+                    ext[m][name] = float(val)
+        except Exception:
+            pass
+    return ext
+
+
+def load_external_logit_checkpoints(checkpoint_dir: Path,
+                                     method_name: str,
+                                     metrics: list) -> dict:
+    """
+    Return ext[metric][label] = float for checkpoints mode.
+    Labels: "Base (Instruct)", LLAMA70B_LABEL, "ck1".."ck8".
+    """
+    ext = {m: {} for m in metrics}
+
+    def _read(path, stats_key):
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f).get(stats_key) or {}
+        except Exception:
+            return {}
+
+    # Base (Instruct)
+    for m in metrics:
+        val = _read(checkpoint_dir / "base_results.json", "logit_stats").get(m)
+        if val is not None:
+            ext[m]["Base (Instruct)"] = float(val)
+
+    # Llama-3-70B-Instruct — constant reference line
+    for m in metrics:
+        val = _read(checkpoint_dir / "llama70b_results.json", "bio_logit_stats").get(m)
+        if val is not None:
+            ext[m][LLAMA70B_LABEL] = float(val)
+
+    # Sweep checkpoints
+    for ck_num in range(1, N_CHECKPOINTS + 1):
+        label   = f"ck{ck_num}"
+        ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
+        stats   = _read(ck_path, "logit_stats")
+        for m in metrics:
+            val = stats.get(m)
+            if val is not None:
+                ext[m][label] = float(val)
+
+    return ext
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +695,8 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
-    data = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot, probe_source)
+    data      = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot, probe_source)
+    ext_logit = load_external_logit(checkpoint_dir, metrics_to_plot)
 
     row_ymax = {}
     for m in metrics_to_plot:
@@ -595,10 +717,6 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
     )
     fig.suptitle(PROBE_SOURCE_TITLES[probe_source], fontsize=11, y=1.01)
 
-    legend_handles = []
-    legend_labels  = []
-    legend_built   = False
-
     for row_idx, m in enumerate(metrics_to_plot):
         y_max = row_ymax[m]
 
@@ -610,7 +728,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
             clf_data    = data[m].get(clf_name, {})
             any_plotted = False
 
-            for model_name in ALL_MODELS:      # consistent colour ordering
+            for model_name in ALL_MODELS:      # consistent z-ordering
                 if model_name not in clf_data:
                     continue
                 layers, vals = clf_data[model_name]
@@ -618,24 +736,53 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
                 lw     = 2.4 if model_name in THICK_MODELS else 1.2
                 ls     = "--" if model_name in DASHED_MODELS else "-"
                 zorder = 4 if model_name in THICK_MODELS else 2
-
                 ax.plot(layers, vals,
                         color=color, linewidth=lw, linestyle=ls, zorder=zorder)
                 any_plotted = True
 
-                if not legend_built and ax_idx == 0 and row_idx == 0:
-                    legend_handles.append(
-                        mlines.Line2D([], [], color=color, linewidth=lw,
-                                      linestyle=ls, label=model_name)
-                    )
-                    legend_labels.append(model_name)
+            # External logit dotted reference lines (drawn in logit-legend order)
+            for name in LEGEND_LOGIT_ORDER:
+                val = ext_logit[m].get(name)
+                if val is not None:
+                    ax.axhline(val, color=_logit_color(name),
+                               linestyle=":", linewidth=1.5, zorder=3, alpha=0.85)
 
             if not any_plotted:
                 ax.text(0.5, 0.5, "No data",
                         ha="center", va="center",
                         transform=ax.transAxes, fontsize=10)
 
-        legend_built = True
+    # ── Legend: section 1 — solid probe curves ────────────────────────────────
+    legend_handles = []
+    legend_labels  = []
+
+    models_with_data = set()
+    for m in metrics_to_plot:
+        for clf in clfs:
+            models_with_data.update(data[m].get(clf, {}).keys())
+
+    for model_name in LEGEND_CURVE_ORDER:
+        if model_name not in models_with_data:
+            continue
+        color = MODEL_COLORS[model_name]
+        lw    = 2.4 if model_name in THICK_MODELS else 1.2
+        ls    = "--" if model_name in DASHED_MODELS else "-"
+        legend_handles.append(
+            mlines.Line2D([], [], color=color, linewidth=lw, linestyle=ls,
+                          label=model_name)
+        )
+        legend_labels.append(model_name)
+
+    # ── Legend: section 2 — dotted external-logit lines ──────────────────────
+    for name in LEGEND_LOGIT_ORDER:
+        if any(name in ext_logit[m] for m in metrics_to_plot):
+            color = _logit_color(name)
+            label = f"{name} — logit"
+            legend_handles.append(
+                mlines.Line2D([], [], color=color, linewidth=1.5,
+                              linestyle=":", label=label)
+            )
+            legend_labels.append(label)
 
     _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
     plt.close(fig)
