@@ -21,6 +21,7 @@
 # Usage:
 #   bash submit_sweep.sh                     # all 8 methods × 8 checkpoints
 #   bash submit_sweep.sh --summary           # also submit summary+plot jobs after
+#   bash submit_sweep.sh --summary-only      # summary+plot jobs only (sweep already done)
 #   bash submit_sweep.sh --method GradDiff   # one method only (8 ck jobs)
 #   bash submit_sweep.sh --method GradDiff --checkpoint 3  # single job
 #
@@ -35,6 +36,7 @@ set -e
 mkdir -p logs
 
 WITH_SUMMARY=false
+SUMMARY_ONLY=false
 SINGLE_METHOD=""
 SINGLE_CK=""
 
@@ -49,6 +51,7 @@ export PLOT_CHECKPOINT_DIR="checkpoints"
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --summary)        WITH_SUMMARY=true ;;
+        --summary-only)   SUMMARY_ONLY=true ;;
         --method)         SINGLE_METHOD="$2";          shift ;;
         --checkpoint)     SINGLE_CK="$2";              shift ;;
         --plot_type)      export PLOT_PLOT_TYPE="$2";  shift ;;
@@ -95,6 +98,28 @@ else
     DESC="all 8 methods × 8 checkpoints (tasks 0-63)"
 fi
 
+# ── Determine summary array range (used by both --summary and --summary-only) ──
+if [[ -n "$SINGLE_METHOD" ]]; then
+    SUM_RANGE="${METHOD_IDX}"
+else
+    SUM_RANGE="0-7"
+fi
+
+# ── Summary-only: skip the sweep, submit summary jobs immediately ──────────────
+if $SUMMARY_ONLY; then
+    echo "Submitting summary+plot only (no sweep): ${DESC}"
+    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}"
+    SUM_JOB=$(sbatch --parsable \
+        --array="${SUM_RANGE}" \
+        --export=ALL \
+        slurm_sweep_summary.sh)
+    echo "  Summary+plot job ID: ${SUM_JOB}"
+    echo ""
+    echo "Monitor:  squeue -u \$USER"
+    echo "Logs:     logs/sweep_summary_<task>_<jobid>.out"
+    exit 0
+fi
+
 # ── Submit sweep jobs ──────────────────────────────────────────────────────────
 echo "Submitting sweep: ${DESC}"
 SWEEP_JOB=$(sbatch --parsable --array="${ARRAY_RANGE}" slurm_sweep.sh)
@@ -102,11 +127,6 @@ echo "  Sweep job ID: ${SWEEP_JOB}"
 
 # ── Optionally submit summary jobs after sweep completes ──────────────────────
 if $WITH_SUMMARY; then
-    if [[ -n "$SINGLE_METHOD" ]]; then
-        SUM_RANGE="${METHOD_IDX}"
-    else
-        SUM_RANGE="0-7"
-    fi
     echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}"
     SUM_JOB=$(sbatch --parsable \
         --dependency=afterok:${SWEEP_JOB} \
