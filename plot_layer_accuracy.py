@@ -486,11 +486,35 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
     ck_probe_set = base_probe_set if probe_source == "base" else None
 
     for ck_num in range(1, N_CHECKPOINTS + 1):
-        label = f"ck{ck_num}"
+        label   = f"ck{ck_num}"
+        json_key = ("all_layers_base_probe_stats"   if probe_source == "base"
+                    else "all_layers_method_probe_stats")
         print(f"  Loading {method_name} {label} ...")
 
         hs = load_hs_ck(method_name, ck_num, checkpoint_dir)
+
         if hs is None:
+            # Fall back to pre-computed per-layer stats stored in results.json.
+            ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
+            if ck_path.exists():
+                try:
+                    with open(ck_path, encoding="utf-8") as f:
+                        ck_r = json.load(f)
+                    all_layers = ck_r.get(json_key, {})
+                    for metric in metrics:
+                        for clf_name in clfs:
+                            clf_layers = all_layers.get(clf_name, {})
+                            if not clf_layers:
+                                continue
+                            pairs_sorted = sorted((int(l), v.get(metric, 0.0))
+                                                   for l, v in clf_layers.items()
+                                                   if int(l) >= 1)
+                            if pairs_sorted:
+                                ls, vs = zip(*pairs_sorted)
+                                data[metric][clf_name][label] = (list(ls), list(vs))
+                    print(f"    [fallback] loaded per-layer data from {ck_path.name}")
+                except Exception as e:
+                    print(f"    [fallback] failed to load {ck_path}: {e}")
             continue
 
         if probe_source == "method":
@@ -656,12 +680,9 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                 ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
             if row_idx == n_rows_fig - 1:
                 ax.set_xlabel("Layer", fontsize=10)
-                # Show every 4th layer tick to avoid crowding
-                tick_pos = list(range(0, N_LAYERS, 4))
-                ax.set_xticks(tick_pos)
-                ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=8)
-            else:
-                ax.set_xticks([])
+            tick_pos = list(range(0, N_LAYERS))
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=5, rotation=90)
 
             ax.set_yticks(range(len(present)))
             ax.set_yticklabels(present, fontsize=8)

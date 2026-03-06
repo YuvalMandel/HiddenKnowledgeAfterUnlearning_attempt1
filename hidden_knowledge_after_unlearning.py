@@ -1316,6 +1316,35 @@ def compute_all_probe_stats(probe_set: dict,
     return result
 
 
+def compute_all_layers_probe_stats(probe_set: dict,
+                                    hs_test:   np.ndarray,
+                                    y_test:    np.ndarray) -> dict:
+    """
+    Compute per-layer probe stats for ALL layers (not just best layer).
+    Returns {clf_name: {layer_idx: {accuracy, true_accuracy, false_accuracy, precision, recall, f1, auc}}}
+    Stored in sweep checkpoint JSON so per-layer plots can be regenerated without npy files.
+    """
+    result = {}
+    for clf_name in CLF_NAMES:
+        result[clf_name] = {}
+        layer_probes = probe_set["per_layer"].get(clf_name, {})
+        for l in sorted(layer_probes.keys()):
+            if l == 0:  # skip embedding layer
+                continue
+            pipe = layer_probes[l]
+            s = _pipe_stats(pipe, hs_test[:, l, :], y_test)
+            result[clf_name][l] = {
+                "accuracy":       s["accuracy"],
+                "true_accuracy":  s["true_accuracy"],
+                "false_accuracy": s["false_accuracy"],
+                "precision":      s["precision"],
+                "recall":         s["recall"],
+                "f1":             s["f1"],
+                "auc":            s["auc"],
+            }
+    return result
+
+
 def pairs_to_labels(pairs):
     return np.array([1 if p["expected"] == "True" else 0 for p in pairs])
 
@@ -3451,7 +3480,7 @@ def print_sweep_table(method_name: str, results: list):
     print(sep)
     hdr = (
         f"{'Ck':>3}  "
-        f"{'GenAcc':>6} {'GTru':>5} {'GFal':>5} {'Gib':>5}  "
+        f"{'GenAcc':>6} {'GVAcc':>6} {'GTru':>5} {'GFal':>5} {'Gib':>5}  "
         f"{'LogAcc':>6} {'LTru':>5} {'LFal':>5}  "
         f"{'MCQAcc':>6} {'MGib':>5}"
         f"  BP-LR  Acc  True  Fals"
@@ -3475,7 +3504,7 @@ def print_sweep_table(method_name: str, results: list):
         bp  = r.get("all_base_probe_stats", {})
         row = (
             f"{ck:>3}  "
-            f"{_sw(g,'accuracy'):6.3f} {_sw(g,'true_accuracy'):5.3f}"
+            f"{_sw(g,'accuracy'):6.3f} {_sw(g,'accuracy_valid'):6.3f} {_sw(g,'true_accuracy'):5.3f}"
             f" {_sw(g,'false_accuracy'):5.3f} {_sw(g,'gibberish_rate'):5.3f}  "
             f"{_sw(lo,'accuracy'):6.3f} {_sw(lo,'true_accuracy'):5.3f}"
             f" {_sw(lo,'false_accuracy'):5.3f}  "
@@ -3547,7 +3576,7 @@ def save_sweep_csv(method_name: str, results: list):
 
     cols = (
         ["checkpoint", "model_id",
-         "gen_acc", "gen_true", "gen_false", "gen_gib",
+         "gen_acc", "gen_valid_acc", "gen_true", "gen_false", "gen_gib",
          "gen_precision", "gen_recall", "gen_f1",
          "logit_acc", "logit_true", "logit_false",
          "logit_precision", "logit_recall", "logit_f1", "logit_auc",
@@ -3574,7 +3603,8 @@ def save_sweep_csv(method_name: str, results: list):
             ck   = r["checkpoint"]
             row = (
                 [ck, sweep_model_id(method_name, ck),
-                 round(_sw(g,  "accuracy"), 4), round(_sw(g,  "true_accuracy"), 4),
+                 round(_sw(g,  "accuracy"), 4), round(_sw(g,  "accuracy_valid"), 4),
+                 round(_sw(g,  "true_accuracy"), 4),
                  round(_sw(g,  "false_accuracy"), 4), round(_sw(g, "gibberish_rate"), 4),
                  round(_sw(g,  "precision"), 4), round(_sw(g,  "recall"), 4),
                  round(_sw(g,  "f1"), 4),
@@ -3810,17 +3840,22 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
 
     # ── Compute and save stats ─────────────────────────────────────────────────
     r = {
-        "checkpoint":                  ck_num,
-        "model_id":                    model_id,
-        "gen":                         generation_stats(test_answers,       test_pairs),
-        "logit":                       logit_stats(logit_scores,            test_pairs),
-        "mcq":                         mcq_gen_stats(mcq_answers,           mcq_pairs_v),
-        "all_base_probe_stats":        compute_all_probe_stats(base_probe_set,       hs_test,       y_test),
-        "all_method_probe_stats":      compute_all_probe_stats(probe_set,            hs_test,       y_test),
-        "cyber_gen":                   generation_stats(cyber_test_answers, cyber_test_pairs),
-        "cyber_logit":                 logit_stats(cyber_logit_scores,      cyber_test_pairs),
-        "cyber_all_base_probe_stats":  compute_all_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
-        "cyber_all_method_probe_stats":compute_all_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
+        "checkpoint":                       ck_num,
+        "model_id":                         model_id,
+        "gen":                              generation_stats(test_answers,       test_pairs),
+        "logit":                            logit_stats(logit_scores,            test_pairs),
+        "mcq":                              mcq_gen_stats(mcq_answers,           mcq_pairs_v),
+        "all_base_probe_stats":             compute_all_probe_stats(base_probe_set,       hs_test,       y_test),
+        "all_method_probe_stats":           compute_all_probe_stats(probe_set,            hs_test,       y_test),
+        # Per-layer stats for ALL layers (allows plotting without npy files).
+        "all_layers_base_probe_stats":      compute_all_layers_probe_stats(base_probe_set,       hs_test,       y_test),
+        "all_layers_method_probe_stats":    compute_all_layers_probe_stats(probe_set,            hs_test,       y_test),
+        "cyber_gen":                        generation_stats(cyber_test_answers, cyber_test_pairs),
+        "cyber_logit":                      logit_stats(cyber_logit_scores,      cyber_test_pairs),
+        "cyber_all_base_probe_stats":       compute_all_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
+        "cyber_all_method_probe_stats":     compute_all_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
+        "cyber_all_layers_base_probe_stats":  compute_all_layers_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
+        "cyber_all_layers_method_probe_stats":compute_all_layers_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
     }
     with open(results_path, "w") as f:
         json.dump(r, f)

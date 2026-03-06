@@ -448,13 +448,13 @@ Ck  GenAcc  GTru  GFal   Gib  LogAcc  LTru  LFal  MCQAcc  MGib  BP-LR Acc True F
 ```
 
 **Column groups:**
-- `GenAcc / GTru / GFal / Gib` — generation accuracy (overall / true-label / false-label / gibberish)
+- `GenAcc / GVAcc / GTru / GFal / Gib` — generation accuracy (overall / parsable-only / true-label / false-label / gibberish rate). `GVAcc` excludes gibberish answers from the denominator.
 - `LogAcc / LTru / LFal` — logit-based accuracy (no decoding)
 - `MCQAcc / MGib` — multiple-choice (A/B/C/D) accuracy and gibberish rate
 - `BP-LR/RF/Ada` — base-probe per-layer accuracy for each classifier at its best validation layer
 - `MP-LR/RF/Ada` — method-probe per-layer accuracy (only when `--method_probes` is passed)
 
-The CSV (`checkpoints/sweep_<method>/<method>_sweep.csv`) also includes multi-layer, vote-ensemble, and avg-ensemble columns for each classifier and probe family.
+The CSV (`checkpoints/sweep_<method>/<method>_sweep.csv`) also includes multi-layer, vote-ensemble, and avg-ensemble columns for each classifier and probe family, plus `gen_valid_acc` (parsable-only accuracy) for both bio and cyber.
 
 ---
 
@@ -474,7 +474,7 @@ Plots are produced by `plot_layer_accuracy.py` (no GPU required — reads from s
 | Value | Description |
 |---|---|
 | `line` (default) | One curve per model/checkpoint, X axis = layer. |
-| `heatmap` | 2-D grid: X axis = layer, Y axis = checkpoint or model, colour = metric value (red=low → green=high). One subplot per classifier. |
+| `heatmap` | 2-D grid: X axis = layer (all 32 layers labelled), Y axis = checkpoint or model, colour = metric value (red=low → green=high). One subplot per classifier. |
 
 ### Metrics (`--metric`)
 
@@ -514,6 +514,10 @@ heatmap_methods_accuracy_all_clf_method.png
 ```
 
 When `--out` is given with `--method all`, it is used as a template and the method name is appended to the stem.
+
+### Fallback to JSON when npy files are missing
+
+`plot_layer_accuracy.py` (checkpoints mode) normally loads `hs_test.npy` + `probes.pkl` from each sweep checkpoint directory and recomputes per-layer accuracy on the fly. If those large files have been deleted to save disk space, it automatically falls back to the pre-computed per-layer stats stored in the checkpoint's `results.json` (keys `all_layers_base_probe_stats` / `all_layers_method_probe_stats`). These keys are written by the sweep pipeline starting from the version that introduced this feature. Older `results.json` files without these keys simply produce no curve for that checkpoint.
 
 ### Examples
 
@@ -584,3 +588,55 @@ plots/ck_GradDiff.png
 plots/ck_RMU.png
 ...
 ```
+
+---
+
+## Disk-space management and recovery
+
+### Sweep pipeline — all-layer stats in JSON
+
+Each sweep checkpoint writes a `results.json` that now includes full per-layer probe stats for all 32 layers under four keys:
+
+| JSON key | Description |
+|---|---|
+| `all_layers_base_probe_stats` | Bio — base probes on this checkpoint's hidden states, per layer |
+| `all_layers_method_probe_stats` | Bio — per-checkpoint probes on this checkpoint's hidden states, per layer |
+| `cyber_all_layers_base_probe_stats` | Cyber — base probes, per layer |
+| `cyber_all_layers_method_probe_stats` | Cyber — per-checkpoint probes, per layer |
+
+Format: `{clf_name: {layer_idx: {accuracy, true_accuracy, false_accuracy, precision, recall, f1, auc}}}`.
+
+This means the large `hs_test.npy` files can be deleted after the sweep is complete without losing the ability to regenerate layer-accuracy plots.
+
+### Llama-3-70B — re-running after npy files are deleted
+
+The distributed 70B pipeline stores per-chunk results as `.npy` files under `checkpoints/llama70b_dist/results/`. If these are deleted (e.g. to free disk space), the `--merge` step will report `MISSING result:` for each chunk and produce a JSON with all-zero stats.
+
+**To re-run and recreate the missing chunks:**
+
+```bash
+# 1. Reset the queue: --init now detects missing npy files and resets those
+#    chunks from "done" back to "pending" automatically.
+python run_70b_distributed.py --init
+
+# 2. Check how many chunks need to be re-done:
+python run_70b_distributed.py --status
+
+# 3. Re-submit workers (they will only process pending chunks):
+bash submit_70b_smart.sh
+
+# 4. Once all chunks are done, merge:
+python run_70b_distributed.py --merge
+```
+
+`--init` is safe to re-run at any time: it preserves chunks whose `.npy` file still exists (keeping them as "done") and only resets those whose file is missing.
+
+### Merging with partial results
+
+If you want to produce a `llama70b_results.json` with whatever chunks are available (accepting zeros for missing ones):
+
+```bash
+python run_70b_distributed.py --merge
+```
+
+The merge always runs, printing a `MISSING result:` line for each absent chunk and computing stats over whatever data is present. Stats for tasks with no chunks at all will be 0.0.

@@ -198,20 +198,28 @@ def cmd_init(chunk_size: int):
     if QUEUE_PATH.exists():
         # Preserve completed chunks; reset stale claims to pending.
         existing = _load_queue()
-        done_ids = {c["id"] for t in TASK_NAMES for c in existing.get(t, [])
-                    if c["status"] == "done"}
-        print(f"Existing queue found — {len(done_ids)} chunks already done (preserved).")
         queue = existing
         for task in TASK_NAMES:
             existing_ids = {c["id"] for c in existing.get(task, [])}
             for c in _make_chunks(task, sizes[task]):
                 if c["id"] not in existing_ids:
                     queue.setdefault(task, []).append(c)
-        # Reset any lingering claims so fresh workers can start immediately.
+        # Reset any lingering claims, and reset "done" chunks whose npy is missing.
+        reset_missing = 0
+        preserved_done = 0
         for task in TASK_NAMES:
             for c in queue.get(task, []):
                 if c["status"] == "claimed":
                     c.update(status="pending", worker=None, claimed_at=None)
+                elif c["status"] == "done":
+                    p = RESULTS_DIR / f"{c['id']}.npy"
+                    if not p.exists():
+                        c.update(status="pending", worker=None, claimed_at=None)
+                        reset_missing += 1
+                    else:
+                        preserved_done += 1
+        print(f"Existing queue found — {preserved_done} chunks preserved, "
+              f"{reset_missing} reset (npy file missing).")
     else:
         queue = {task: _make_chunks(task, sizes[task]) for task in TASK_NAMES}
 

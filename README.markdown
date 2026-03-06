@@ -316,8 +316,11 @@ python plot_layer_accuracy.py --metric f1 --clf LR
 # One method across 8 checkpoints:
 python plot_layer_accuracy.py --mode checkpoints --method GradDiff --metric f1
 
-# Heatmap (Y = model/checkpoint, X = layer, colour = metric):
+# Heatmap (Y = model/checkpoint, X = all 32 layers labelled, colour = metric):
 python plot_layer_accuracy.py --plot_type heatmap --metric accuracy
+
+# Heatmap — checkpoints mode, one method:
+python plot_layer_accuracy.py --mode checkpoints --method GradDiff --plot_type heatmap --metric f1
 
 # Submit 8 parallel SLURM jobs (one per method):
 bash submit_plot_checkpoints.sh
@@ -325,6 +328,8 @@ bash submit_plot_checkpoints.sh --plot_type heatmap --metric f1
 ```
 
 Available metrics: `accuracy`, `true_accuracy`, `false_accuracy`, `precision`, `recall`, `f1`, `auc`
+
+**Fallback when npy files are deleted:** if a sweep checkpoint's `hs_test.npy` is gone, `plot_layer_accuracy.py` automatically reads per-layer stats from that checkpoint's `results.json` instead (keys `all_layers_base_probe_stats` / `all_layers_method_probe_stats`). These are written by the sweep pipeline for every new run.
 
 ---
 
@@ -402,3 +407,36 @@ Key constants at the top of `hidden_knowledge_after_unlearning.py`:
 | `GENERATION_BATCH_SIZE` | 8 | Batch size during text generation |
 | `HIDDEN_STATE_BATCH_SIZE` | 8 | Batch size during hidden-state extraction |
 | `LOGIT_BATCH_SIZE` | 16 | Batch size during logit scoring |
+
+---
+
+## Disk-space management and recovery
+
+### Sweep pipeline
+
+Each sweep checkpoint `results.json` stores per-layer probe stats for **all 32 layers** under `all_layers_base_probe_stats`, `all_layers_method_probe_stats`, `cyber_all_layers_base_probe_stats`, and `cyber_all_layers_method_probe_stats`. This means you can safely delete the large `hs_test.npy` files after the sweep completes — `plot_layer_accuracy.py` will fall back to the JSON automatically.
+
+The sweep CSV (`data/sweep_<method>/<method>_sweep.csv`) now includes `gen_valid_acc` (parsable-only generation accuracy, i.e. accuracy computed only on examples where the model gave a True/False answer rather than gibberish) for both bio and cyber.
+
+### Llama-3-70B — re-running after chunk npy files are deleted
+
+```bash
+# 1. Reset missing chunks back to "pending" (safe to re-run; keeps chunks
+#    whose .npy file still exists as "done"):
+python run_70b_distributed.py --init
+
+# 2. Check status:
+python run_70b_distributed.py --status
+
+# 3. Re-submit workers:
+bash submit_70b_smart.sh
+
+# 4. Merge when done:
+python run_70b_distributed.py --merge
+```
+
+To produce a partial `llama70b_results.json` with whatever chunks are available (zeros for missing ones):
+
+```bash
+python run_70b_distributed.py --merge
+```
