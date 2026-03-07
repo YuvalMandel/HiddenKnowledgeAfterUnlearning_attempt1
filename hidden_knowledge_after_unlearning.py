@@ -202,7 +202,8 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
                          cyber_subsets=None,
                          cyber_mcq_stats=None,
                          bio_mcq_logit_stats=None,
-                         cyber_mcq_logit_stats=None):
+                         cyber_mcq_logit_stats=None,
+                         cyber_y_test=None):
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     _save_npy(hs_train,       CHECKPOINT_DIR / "base_hs_train.npy")
     _save_npy(hs_val,         CHECKPOINT_DIR / "base_hs_val.npy")
@@ -210,6 +211,8 @@ def save_base_checkpoint(hs_train, hs_val, hs_test,
     _save_npy(cyber_hs_train, CHECKPOINT_DIR / "base_cyber_hs_train.npy")
     _save_npy(cyber_hs_val,   CHECKPOINT_DIR / "base_cyber_hs_val.npy")
     _save_npy(cyber_hs_test,  CHECKPOINT_DIR / "base_cyber_hs_test.npy")
+    if cyber_y_test is not None:
+        _save_npy(cyber_y_test, CHECKPOINT_DIR / "base_cyber_y_test.npy")
     with open(CHECKPOINT_DIR / "base_probes.pkl", "wb") as f:
         pickle.dump(probe_set, f)
     with open(CHECKPOINT_DIR / "base_cyber_probes.pkl", "wb") as f:
@@ -2595,7 +2598,8 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                          cyber_subsets=cyber_subsets_v,
                          cyber_mcq_stats=cyber_mcq_stats_v,
                          bio_mcq_logit_stats=bio_mcq_logit_stats_v,
-                         cyber_mcq_logit_stats=cyber_mcq_logit_stats_v)
+                         cyber_mcq_logit_stats=cyber_mcq_logit_stats_v,
+                         cyber_y_test=cyber_y_test)
     print("\n[base] Done.")
 
 

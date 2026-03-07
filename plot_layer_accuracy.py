@@ -64,6 +64,7 @@ import csv
 import gc
 import json
 import pickle
+import random
 import numpy as np
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 import matplotlib
@@ -127,7 +128,11 @@ CK_COLORS.update({f"ck{n}": tuple(_CK_PLASMA[n - 1]) for n in range(1, N_CHECKPO
 # Ordered label list for checkpoint plots (base first, then ck1..ck8)
 CK_LABELS    = ["Base (Instruct)"] + [f"ck{n}" for n in range(1, N_CHECKPOINTS + 1)]
 
-DATA_DIR = Path("data")    # where CSVs (wmdp_tf_pairs.csv, summary tables) live
+DATA_DIR         = Path("data")    # where CSVs (wmdp_tf_pairs.csv, summary tables) live
+CYBER_CSV_PATH   = DATA_DIR / "wmdp_cyber_true_false_balanced.csv"
+CYBER_TRAIN_SIZE = 500
+CYBER_VAL_SIZE   = 200
+RANDOM_SEED      = 42
 
 Y_MIN    = 0.4    # fixed lower bound of y-axis
 Y_PAD    = 0.05   # padding fraction above the highest point
@@ -212,16 +217,65 @@ def load_y_test(csv_path: Path) -> np.ndarray:
     return np.array(labels, dtype=np.int32)
 
 
-def load_hs(sn: str, checkpoint_dir: Path):
-    path = checkpoint_dir / f"{sn}_hs_test.npy"
+def load_cyber_y_test_methods(checkpoint_dir: Path) -> np.ndarray:
+    """Load cyber y_test for methods mode from the saved npy file.
+
+    Written by run_base() as base_cyber_y_test.npy.  Reflects the same RNG
+    state (post-load_datasets) used by run_base() / run_method().
+    """
+    path = checkpoint_dir / "base_cyber_y_test.npy"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found.\n"
+            "Re-run --stage base so it saves base_cyber_y_test.npy."
+        )
+    return np.load(path).astype(np.int32)
+
+
+def load_cyber_y_test_sweep() -> np.ndarray:
+    """Derive cyber y_test for checkpoints/sweep mode.
+
+    Replicates _sweep_load_shared(): fresh random.Random(42) → shuffle CSV
+    question_ids → take test portion (after CYBER_TRAIN_SIZE+CYBER_VAL_SIZE).
+    Labels: 1 = True row, 0 = False row, interleaved (true, false) per question.
+    """
+    if not CYBER_CSV_PATH.exists():
+        raise FileNotFoundError(f"Cyber CSV not found at {CYBER_CSV_PATH}")
+    by_qid: dict = {}
+    with open(CYBER_CSV_PATH, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            qid = row["question_id"]
+            if qid not in by_qid:
+                by_qid[qid] = {}
+            by_qid[qid][row["label"]] = row
+
+    question_ids = list(by_qid.keys())
+    rng = random.Random(RANDOM_SEED)
+    rng.shuffle(question_ids)
+    test_ids = question_ids[CYBER_TRAIN_SIZE + CYBER_VAL_SIZE:]
+
+    labels = []
+    for qid in test_ids:
+        g = by_qid[qid]
+        if "True" not in g or "False" not in g:
+            continue
+        labels.append(1)   # True pair
+        labels.append(0)   # False pair
+    return np.array(labels, dtype=np.int32)
+
+
+def load_hs(sn: str, checkpoint_dir: Path, dataset: str = "bio"):
+    fname = f"{sn}_cyber_hs_test.npy" if dataset == "cyber" else f"{sn}_hs_test.npy"
+    path = checkpoint_dir / fname
     if not path.exists():
         print(f"  [skip] {path.name} not found")
         return None
     return np.load(path)
 
 
-def load_probe_set(sn: str, checkpoint_dir: Path):
-    path = checkpoint_dir / f"{sn}_probes.pkl"
+def load_probe_set(sn: str, checkpoint_dir: Path, dataset: str = "bio"):
+    fname = f"{sn}_cyber_probes.pkl" if dataset == "cyber" else f"{sn}_probes.pkl"
+    path = checkpoint_dir / fname
     if not path.exists():
         print(f"  [skip] {path.name} not found")
         return None
@@ -233,25 +287,29 @@ def load_probe_set(sn: str, checkpoint_dir: Path):
     return ps
 
 
-def load_hs_ck(method_name: str, ck_num: int, checkpoint_dir: Path):
-    """Load hidden states for a sweep checkpoint (no method-name prefix)."""
-    path = _ck_dir(method_name, ck_num, checkpoint_dir) / "hs_test.npy"
+def load_hs_ck(method_name: str, ck_num: int, checkpoint_dir: Path,
+               dataset: str = "bio"):
+    """Load hidden states for a sweep checkpoint."""
+    fname = "cyber_hs_test.npy" if dataset == "cyber" else "hs_test.npy"
+    path = _ck_dir(method_name, ck_num, checkpoint_dir) / fname
     if not path.exists():
-        print(f"  [skip] sweep/{_safe_name(method_name)}/ck{ck_num}/hs_test.npy not found")
+        print(f"  [skip] sweep/{_safe_name(method_name)}/ck{ck_num}/{fname} not found")
         return None
     return np.load(path)
 
 
-def load_probe_set_ck(method_name: str, ck_num: int, checkpoint_dir: Path):
-    """Load probe set for a sweep checkpoint (no method-name prefix)."""
-    path = _ck_dir(method_name, ck_num, checkpoint_dir) / "probes.pkl"
+def load_probe_set_ck(method_name: str, ck_num: int, checkpoint_dir: Path,
+                      dataset: str = "bio"):
+    """Load probe set for a sweep checkpoint."""
+    fname = "cyber_probes.pkl" if dataset == "cyber" else "probes.pkl"
+    path = _ck_dir(method_name, ck_num, checkpoint_dir) / fname
     if not path.exists():
-        print(f"  [skip] sweep/{_safe_name(method_name)}/ck{ck_num}/probes.pkl not found")
+        print(f"  [skip] sweep/{_safe_name(method_name)}/ck{ck_num}/{fname} not found")
         return None
     with open(path, "rb") as f:
         ps = pickle.load(f)
     if not isinstance(ps, dict) or "per_layer" not in ps:
-        print(f"  [skip] sweep/ck{ck_num}/probes.pkl: old probe format")
+        print(f"  [skip] sweep/ck{ck_num}/{fname}: old probe format")
         return None
     return ps
 
@@ -261,28 +319,36 @@ def load_probe_set_ck(method_name: str, ck_num: int, checkpoint_dir: Path):
 # ---------------------------------------------------------------------------
 
 # Map each model display name → (results filename, logit_stats key in that JSON)
-_LOGIT_SOURCES = {
+# Bio: base uses "logit_stats"; method checkpoints use "logit"; 70B uses "bio_logit_stats".
+_LOGIT_SOURCES_BIO = {
     "Base (Instruct)": ("base_results.json",      "logit_stats"),
-    "GradDiff":        ("GradDiff_results.json",   "logit_stats"),
-    "RMU":             ("RMU_results.json",         "logit_stats"),
-    "RMU-LAT":         ("RMU-LAT_results.json",     "logit_stats"),
-    "RepNoise":        ("RepNoise_results.json",     "logit_stats"),
-    "ELM":             ("ELM_results.json",          "logit_stats"),
-    "RR":              ("RR_results.json",           "logit_stats"),
-    "TAR":             ("TAR_results.json",          "logit_stats"),
-    "PB&J":            ("PB_J_results.json",         "logit_stats"),
-    "Llama3-8B":       ("Llama3-8B_results.json",   "logit_stats"),
+    "GradDiff":        ("GradDiff_results.json",   "logit"),
+    "RMU":             ("RMU_results.json",         "logit"),
+    "RMU-LAT":         ("RMU-LAT_results.json",     "logit"),
+    "RepNoise":        ("RepNoise_results.json",     "logit"),
+    "ELM":             ("ELM_results.json",          "logit"),
+    "RR":              ("RR_results.json",           "logit"),
+    "TAR":             ("TAR_results.json",          "logit"),
+    "PB&J":            ("PB_J_results.json",         "logit"),
+    "Llama3-8B":       ("Llama3-8B_results.json",   "logit"),
     LLAMA70B_LABEL:    ("llama70b_results.json",     "bio_logit_stats"),
 }
 
+# Cyber: only 70B has cyber_logit_stats; base/methods do not store it pre-computed.
+_LOGIT_SOURCES_CYBER = {
+    LLAMA70B_LABEL:    ("llama70b_results.json",     "cyber_logit_stats"),
+}
 
-def load_external_logit(checkpoint_dir: Path, metrics: list) -> dict:
+
+def load_external_logit(checkpoint_dir: Path, metrics: list,
+                        dataset: str = "bio") -> dict:
     """
     Return ext[metric][model_name] = float for all available (metric, model) pairs.
     Reads *_results.json; missing files / keys are silently skipped.
     """
+    sources = _LOGIT_SOURCES_CYBER if dataset == "cyber" else _LOGIT_SOURCES_BIO
     ext = {m: {} for m in metrics}
-    for name, (fname, stats_key) in _LOGIT_SOURCES.items():
+    for name, (fname, stats_key) in sources.items():
         path = checkpoint_dir / fname
         if not path.exists():
             continue
@@ -301,7 +367,8 @@ def load_external_logit(checkpoint_dir: Path, metrics: list) -> dict:
 
 def load_external_logit_checkpoints(checkpoint_dir: Path,
                                      method_name: str,
-                                     metrics: list) -> dict:
+                                     metrics: list,
+                                     dataset: str = "bio") -> dict:
     """
     Return ext[metric][label] = float for checkpoints mode.
     Labels: "Base (Instruct)", LLAMA70B_LABEL, "ck1".."ck8".
@@ -317,27 +384,42 @@ def load_external_logit_checkpoints(checkpoint_dir: Path,
         except Exception:
             return {}
 
-    # Base (Instruct)
-    for m in metrics:
-        val = _read(checkpoint_dir / "base_results.json", "logit_stats").get(m)
-        if val is not None:
-            ext[m]["Base (Instruct)"] = float(val)
-
-    # Llama-3-70B-Instruct — constant reference line
-    for m in metrics:
-        val = _read(checkpoint_dir / "llama70b_results.json", "bio_logit_stats").get(m)
-        if val is not None:
-            ext[m][LLAMA70B_LABEL] = float(val)
-
-    # Sweep checkpoints
-    for ck_num in range(1, N_CHECKPOINTS + 1):
-        label   = f"ck{ck_num}"
-        ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
-        stats   = _read(ck_path, "logit_stats")
+    if dataset == "cyber":
+        # Base (Instruct) — no pre-computed cyber_logit_stats in base_results.json; skip.
+        # Llama-3-70B-Instruct — constant reference line
         for m in metrics:
-            val = stats.get(m)
+            val = _read(checkpoint_dir / "llama70b_results.json", "cyber_logit_stats").get(m)
             if val is not None:
-                ext[m][label] = float(val)
+                ext[m][LLAMA70B_LABEL] = float(val)
+        # Sweep checkpoints — key is "cyber_logit"
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            label   = f"ck{ck_num}"
+            ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
+            stats   = _read(ck_path, "cyber_logit")
+            for m in metrics:
+                val = stats.get(m)
+                if val is not None:
+                    ext[m][label] = float(val)
+    else:
+        # Base (Instruct)
+        for m in metrics:
+            val = _read(checkpoint_dir / "base_results.json", "logit_stats").get(m)
+            if val is not None:
+                ext[m]["Base (Instruct)"] = float(val)
+        # Llama-3-70B-Instruct — constant reference line
+        for m in metrics:
+            val = _read(checkpoint_dir / "llama70b_results.json", "bio_logit_stats").get(m)
+            if val is not None:
+                ext[m][LLAMA70B_LABEL] = float(val)
+        # Sweep checkpoints — key is "logit" (not "logit_stats")
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            label   = f"ck{ck_num}"
+            ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
+            stats   = _read(ck_path, "logit")
+            for m in metrics:
+                val = stats.get(m)
+                if val is not None:
+                    ext[m][label] = float(val)
 
     return ext
 
@@ -399,7 +481,7 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
 
 def collect_data(checkpoint_dir: Path, clfs: list,
                  y_test: np.ndarray, metrics: list,
-                 probe_source: str) -> dict:
+                 probe_source: str, dataset: str = "bio") -> dict:
     """
     Returns data[metric][clf_name][model_name] = (layers_list, values_list).
 
@@ -413,21 +495,22 @@ def collect_data(checkpoint_dir: Path, clfs: list,
 
     base_probe_set = None
     if probe_source == "base":
-        base_probe_set = load_probe_set("base", checkpoint_dir)
+        base_probe_set = load_probe_set("base", checkpoint_dir, dataset)
         if base_probe_set is None:
-            raise RuntimeError("base_probes.pkl not found — run --stage base first.")
+            probe_label = "base_cyber_probes.pkl" if dataset == "cyber" else "base_probes.pkl"
+            raise RuntimeError(f"{probe_label} not found — run --stage base first.")
         print("  Base probe set loaded.")
 
     for model_name, sn in ALL_MODELS.items():
         print(f"  Loading {model_name} ({sn}) ...")
 
-        hs = load_hs(sn, checkpoint_dir)
+        hs = load_hs(sn, checkpoint_dir, dataset)
         if hs is None:
             continue
 
         # Determine which probe set to use for this model.
         if probe_source == "method" or model_name in OWN_PROBE_MODELS:
-            probe_set = load_probe_set(sn, checkpoint_dir)
+            probe_set = load_probe_set(sn, checkpoint_dir, dataset)
             if probe_set is None:
                 continue
         else:
@@ -450,7 +533,7 @@ def collect_data(checkpoint_dir: Path, clfs: list,
 
 def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
                               y_test: np.ndarray, metrics: list,
-                              probe_source: str) -> dict:
+                              probe_source: str, dataset: str = "bio") -> dict:
     """
     Returns data[metric][clf_name][label] = (layers_list, values_list)
     where label is "Base (Instruct)", "ck1", ..., "ck8".
@@ -463,14 +546,15 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
     """
     data = {m: {clf: {} for clf in clfs} for m in metrics}
 
-    # Always load base probe set (needed for base (Instruct) curve and optionally probe_source=base)
-    base_probe_set = load_probe_set("base", checkpoint_dir)
+    # Always load base probe set (needed for Base (Instruct) curve and probe_source=base)
+    base_probe_set = load_probe_set("base", checkpoint_dir, dataset)
     if base_probe_set is None:
-        raise RuntimeError("base_probes.pkl not found — run --stage base first.")
+        probe_label = "base_cyber_probes.pkl" if dataset == "cyber" else "base_probes.pkl"
+        raise RuntimeError(f"{probe_label} not found — run --stage base first.")
 
     # --- Base (Instruct) — always own probes ---
     print("  Loading Base (Instruct) ...")
-    base_hs = load_hs("base", checkpoint_dir)
+    base_hs = load_hs("base", checkpoint_dir, dataset)
     if base_hs is not None:
         for metric in metrics:
             for clf_name in clfs:
@@ -485,13 +569,19 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
     # --- Sweep checkpoints — one at a time to keep peak memory low ---
     ck_probe_set = base_probe_set if probe_source == "base" else None
 
+    if dataset == "cyber":
+        json_base_key   = "cyber_all_layers_base_probe_stats"
+        json_method_key = "cyber_all_layers_method_probe_stats"
+    else:
+        json_base_key   = "all_layers_base_probe_stats"
+        json_method_key = "all_layers_method_probe_stats"
+
     for ck_num in range(1, N_CHECKPOINTS + 1):
-        label   = f"ck{ck_num}"
-        json_key = ("all_layers_base_probe_stats"   if probe_source == "base"
-                    else "all_layers_method_probe_stats")
+        label    = f"ck{ck_num}"
+        json_key = json_base_key if probe_source == "base" else json_method_key
         print(f"  Loading {method_name} {label} ...")
 
-        hs = load_hs_ck(method_name, ck_num, checkpoint_dir)
+        hs = load_hs_ck(method_name, ck_num, checkpoint_dir, dataset)
 
         if hs is None:
             # Fall back to pre-computed per-layer stats stored in results.json.
@@ -518,7 +608,7 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
             continue
 
         if probe_source == "method":
-            ck_probe_set = load_probe_set_ck(method_name, ck_num, checkpoint_dir)
+            ck_probe_set = load_probe_set_ck(method_name, ck_num, checkpoint_dir, dataset)
             if ck_probe_set is None:
                 del hs
                 gc.collect()
@@ -590,10 +680,10 @@ def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
 
 def _auto_out_path(plot_type: str, mode: str, method: str | None,
                    metric: str | None, clf: str | None,
-                   probe_source: str) -> Path:
+                   probe_source: str, dataset: str = "bio") -> Path:
     """
     Build a descriptive output filename from the run parameters.
-    Example: heatmap_checkpoints_GradDiff_f1_LR_method.png
+    Example: heatmap_checkpoints_GradDiff_f1_LR_method_cyber.png
     """
     parts = [plot_type, mode]
     if mode == "checkpoints" and method and method != "all":
@@ -601,6 +691,7 @@ def _auto_out_path(plot_type: str, mode: str, method: str | None,
     parts.append(_safe_name(metric) if metric else "all_metrics")
     parts.append(clf.lower() if clf else "all_clf")
     parts.append(probe_source)
+    parts.append(dataset)
     return Path("_".join(parts) + ".png")
 
 
@@ -699,25 +790,29 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 
 def make_plot(checkpoint_dir: Path, out_path: Path,
               clf_filter: list, metric: str | None, probe_source: str,
-              data_dir: Path = DATA_DIR):
+              data_dir: Path = DATA_DIR, dataset: str = "bio"):
 
-    csv_path = data_dir / "wmdp_tf_pairs.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"WMDP CSV not found at {csv_path}. "
-            "Run --stage base first to generate it."
-        )
-
-    print("Loading y_test from CSV ...")
-    y_test = load_y_test(csv_path)
+    if dataset == "cyber":
+        print("Loading cyber y_test ...")
+        y_test = load_cyber_y_test_methods(checkpoint_dir)
+    else:
+        csv_path = data_dir / "wmdp_tf_pairs.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"WMDP CSV not found at {csv_path}. "
+                "Run --stage base first to generate it."
+            )
+        print("Loading y_test from CSV ...")
+        y_test = load_y_test(csv_path)
     print(f"  Test set size: {len(y_test)}  "
           f"(pos={y_test.sum()}  neg={(y_test==0).sum()})")
 
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
-    data      = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot, probe_source)
-    ext_logit = load_external_logit(checkpoint_dir, metrics_to_plot)
+    data      = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot,
+                             probe_source, dataset)
+    ext_logit = load_external_logit(checkpoint_dir, metrics_to_plot, dataset)
 
     row_ymax = {}
     for m in metrics_to_plot:
@@ -817,18 +912,21 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
                            method_name: str,
                            clf_filter: list, metric: str | None,
                            probe_source: str,
-                           data_dir: Path = DATA_DIR):
+                           data_dir: Path = DATA_DIR, dataset: str = "bio"):
 
-    csv_path = data_dir / "wmdp_tf_pairs.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"WMDP CSV not found at {csv_path}. "
-            "Run --stage base first to generate it."
-        )
-
-    print(f"\n=== Checkpoints mode: {method_name} ===")
-    print("Loading y_test from CSV ...")
-    y_test = load_y_test(csv_path)
+    print(f"\n=== Checkpoints mode: {method_name} ({dataset}) ===")
+    if dataset == "cyber":
+        print("Loading cyber y_test ...")
+        y_test = load_cyber_y_test_sweep()
+    else:
+        csv_path = data_dir / "wmdp_tf_pairs.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"WMDP CSV not found at {csv_path}. "
+                "Run --stage base first to generate it."
+            )
+        print("Loading y_test from CSV ...")
+        y_test = load_y_test(csv_path)
     print(f"  Test set size: {len(y_test)}  "
           f"(pos={y_test.sum()}  neg={(y_test==0).sum()})")
 
@@ -836,7 +934,8 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data = collect_data_checkpoints(
-        checkpoint_dir, method_name, clfs, y_test, metrics_to_plot, probe_source
+        checkpoint_dir, method_name, clfs, y_test, metrics_to_plot,
+        probe_source, dataset
     )
 
     row_ymax = {}
@@ -917,18 +1016,23 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
                          clf_filter: list, metric: str | None,
                          probe_source: str,
                          data_dir: Path = DATA_DIR,
-                         vmin: float | None = None, vmax: float | None = None):
-    csv_path = data_dir / "wmdp_tf_pairs.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
-
-    print("Loading y_test from CSV ...")
-    y_test = load_y_test(csv_path)
+                         vmin: float | None = None, vmax: float | None = None,
+                         dataset: str = "bio"):
+    if dataset == "cyber":
+        print("Loading cyber y_test ...")
+        y_test = load_cyber_y_test_methods(checkpoint_dir)
+    else:
+        csv_path = data_dir / "wmdp_tf_pairs.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
+        print("Loading y_test from CSV ...")
+        y_test = load_y_test(csv_path)
 
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
-    data = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot, probe_source)
+    data = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot,
+                        probe_source, dataset)
 
     row_labels = list(ALL_MODELS.keys())   # model display names in palette order
     title = (
@@ -947,19 +1051,23 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
                               clf_filter: list, metric: str | None,
                               probe_source: str,
                               data_dir: Path = DATA_DIR,
-                              vmin: float | None = None, vmax: float | None = None):
-    csv_path = data_dir / "wmdp_tf_pairs.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
-
-    print(f"\n=== Heatmap checkpoints mode: {method_name} ===")
-    y_test = load_y_test(csv_path)
+                              vmin: float | None = None, vmax: float | None = None,
+                              dataset: str = "bio"):
+    print(f"\n=== Heatmap checkpoints mode: {method_name} ({dataset}) ===")
+    if dataset == "cyber":
+        y_test = load_cyber_y_test_sweep()
+    else:
+        csv_path = data_dir / "wmdp_tf_pairs.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
+        y_test = load_y_test(csv_path)
 
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data = collect_data_checkpoints(
-        checkpoint_dir, method_name, clfs, y_test, metrics_to_plot, probe_source
+        checkpoint_dir, method_name, clfs, y_test, metrics_to_plot,
+        probe_source, dataset
     )
 
     probe_lbl = "Method Probes" if probe_source == "method" else "Base Probes"
@@ -1038,11 +1146,22 @@ def main():
             "  base   — base probes on all models"
         ),
     )
+    parser.add_argument(
+        "--dataset", choices=["bio", "cyber"], default="bio",
+        help=(
+            "Which dataset to plot probes for (default: bio).\n"
+            "  bio   — WMDP-bio forget set\n"
+            "  cyber — WMDP-cyber set\n"
+            "Note: --dataset cyber (methods mode) requires base_cyber_y_test.npy\n"
+            "      in the checkpoint dir (saved automatically by --stage base)."
+        ),
+    )
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
     data_dir       = Path(args.data_dir)
     clf_filter     = [args.clf] if args.clf else []
+    dataset        = args.dataset
 
     # Resolve base output path (auto-generate if not given)
     if args.out is not None:
@@ -1051,7 +1170,7 @@ def main():
         base_out = _auto_out_path(
             args.plot_type, args.mode,
             args.method if args.mode == "checkpoints" else None,
-            args.metric, args.clf, args.probe_source,
+            args.metric, args.clf, args.probe_source, dataset,
         )
 
     # ── methods mode ─────────────────────────────────────────────────────────
@@ -1064,6 +1183,7 @@ def main():
                 metric=args.metric,
                 probe_source=args.probe_source,
                 data_dir=data_dir,
+                dataset=dataset,
             )
         else:
             make_plot(
@@ -1073,6 +1193,7 @@ def main():
                 metric=args.metric,
                 probe_source=args.probe_source,
                 data_dir=data_dir,
+                dataset=dataset,
             )
 
     # ── checkpoints mode ──────────────────────────────────────────────────────
@@ -1093,15 +1214,19 @@ def main():
             # only — raw hs arrays are deleted inside collect_data_checkpoints).
             clfs            = clf_filter if clf_filter else CLF_NAMES
             metrics_to_plot = [args.metric] if args.metric else METRIC_NAMES
-            csv_path        = data_dir / "wmdp_tf_pairs.csv"
-            y_test          = load_y_test(csv_path)
+            if dataset == "cyber":
+                y_test = load_cyber_y_test_sweep()
+            else:
+                csv_path = data_dir / "wmdp_tf_pairs.csv"
+                y_test   = load_y_test(csv_path)
 
             print("Computing global colour scale across all methods ...")
             global_vmin, global_vmax = 1.0, 0.0
             all_data = {}
             for method in methods:
                 d = collect_data_checkpoints(
-                    checkpoint_dir, method, clfs, y_test, metrics_to_plot, args.probe_source
+                    checkpoint_dir, method, clfs, y_test, metrics_to_plot,
+                    args.probe_source, dataset
                 )
                 all_data[method] = d
                 lo, hi = _data_range(d, metrics_to_plot, clfs)
@@ -1117,7 +1242,8 @@ def main():
 
                 probe_lbl = "Method Probes" if args.probe_source == "method" else "Base Probes"
                 title = (
-                    f"{method} — Probe Heatmap Over Training Checkpoints  [{probe_lbl}]"
+                    f"{method} — Probe Heatmap Over Training Checkpoints"
+                    f"  [{probe_lbl}]  [{dataset.upper()}]"
                 )
                 _render_heatmap(
                     all_data[method], metrics_to_plot, clfs, CK_LABELS,
@@ -1140,6 +1266,7 @@ def main():
                     metric=args.metric,
                     probe_source=args.probe_source,
                     data_dir=data_dir,
+                    dataset=dataset,
                 )
 
 
