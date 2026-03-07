@@ -23,6 +23,7 @@
 #   PLOT_CLF            (default: all)
 #   PLOT_METRIC         (default: all)
 #   PLOT_PLOT_TYPE      (default: line)
+#   PLOT_DATASET        (default: bio)
 #   PLOT_OUT            (default: auto-generated from params)
 #   PLOT_CHECKPOINT_DIR (default: checkpoints)
 #   CONDA_ENV           (default: htm_keyboard_1)
@@ -50,6 +51,7 @@ EXTRA_ARGS=""
 [[ -n "${PLOT_CLF}"            ]] && EXTRA_ARGS="$EXTRA_ARGS --clf ${PLOT_CLF}"
 [[ -n "${PLOT_METRIC}"         ]] && EXTRA_ARGS="$EXTRA_ARGS --metric ${PLOT_METRIC}"
 [[ -n "${PLOT_PLOT_TYPE}"      ]] && EXTRA_ARGS="$EXTRA_ARGS --plot_type ${PLOT_PLOT_TYPE}"
+[[ -n "${PLOT_DATASET}"        ]] && EXTRA_ARGS="$EXTRA_ARGS --dataset ${PLOT_DATASET}"
 [[ -n "${PLOT_CHECKPOINT_DIR}" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint_dir ${PLOT_CHECKPOINT_DIR}"
 
 if [[ -n "${PLOT_OUT}" ]]; then
