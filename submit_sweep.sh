@@ -26,11 +26,13 @@
 #   bash submit_sweep.sh --method GradDiff --checkpoint 3  # single job
 #
 # Plot options (only used when --summary is passed):
-#   --plot_type  line|heatmap        (default: line)
-#   --metric     accuracy|f1|auc|…  (default: all)
-#   --clf        LR|RF|AdaBoost      (default: all)
-#   --probe_source method|base       (default: method)
-#   --out        filename template   (default: auto-generated)
+#   --plot_type    line|heatmap          (default: line)
+#   --metric       accuracy|f1|auc|…    (default: all)
+#   --clf          LR|RF|AdaBoost        (default: all)
+#   --probe_source method|base           (default: method)
+#   --dataset      bio|cyber             (default: bio)
+#   --cyber_subset og|pattern|gibberish|both  (default: none; only with --dataset cyber)
+#   --out          filename template     (default: auto-generated)
 
 set -e
 mkdir -p logs
@@ -45,6 +47,8 @@ export PLOT_PLOT_TYPE=""
 export PLOT_METRIC=""
 export PLOT_CLF=""
 export PLOT_PROBE_SOURCE=""
+export PLOT_DATASET=""
+export PLOT_CYBER_SUBSET=""
 export PLOT_OUT=""
 export PLOT_CHECKPOINT_DIR="checkpoints"
 
@@ -52,13 +56,15 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --summary)        WITH_SUMMARY=true ;;
         --summary-only)   SUMMARY_ONLY=true ;;
-        --method)         SINGLE_METHOD="$2";          shift ;;
-        --checkpoint)     SINGLE_CK="$2";              shift ;;
-        --plot_type)      export PLOT_PLOT_TYPE="$2";  shift ;;
-        --metric)         export PLOT_METRIC="$2";     shift ;;
-        --clf)            export PLOT_CLF="$2";        shift ;;
-        --probe_source)   export PLOT_PROBE_SOURCE="$2"; shift ;;
-        --out)            export PLOT_OUT="$2";        shift ;;
+        --method)         SINGLE_METHOD="$2";               shift ;;
+        --checkpoint)     SINGLE_CK="$2";                   shift ;;
+        --plot_type)      export PLOT_PLOT_TYPE="$2";       shift ;;
+        --metric)         export PLOT_METRIC="$2";          shift ;;
+        --clf)            export PLOT_CLF="$2";             shift ;;
+        --probe_source)   export PLOT_PROBE_SOURCE="$2";    shift ;;
+        --dataset)        export PLOT_DATASET="$2";         shift ;;
+        --cyber_subset)   export PLOT_CYBER_SUBSET="$2";   shift ;;
+        --out)            export PLOT_OUT="$2";             shift ;;
         --checkpoint_dir) export PLOT_CHECKPOINT_DIR="$2"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -108,7 +114,7 @@ fi
 # ── Summary-only: skip the sweep, submit summary jobs immediately ──────────────
 if $SUMMARY_ONLY; then
     echo "Submitting summary+plot only (no sweep): ${DESC}"
-    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}"
+    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}  dataset=${PLOT_DATASET:-bio}  cyber_subset=${PLOT_CYBER_SUBSET:-none}"
     SUM_JOB=$(sbatch --parsable \
         --array="${SUM_RANGE}" \
         --export=ALL \
@@ -127,7 +133,7 @@ echo "  Sweep job ID: ${SWEEP_JOB}"
 
 # ── Optionally submit summary jobs after sweep completes ──────────────────────
 if $WITH_SUMMARY; then
-    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}"
+    echo "  Plot options: type=${PLOT_PLOT_TYPE:-line}  metric=${PLOT_METRIC:-all}  clf=${PLOT_CLF:-all}  probe_source=${PLOT_PROBE_SOURCE:-method}  dataset=${PLOT_DATASET:-bio}  cyber_subset=${PLOT_CYBER_SUBSET:-none}"
     SUM_JOB=$(sbatch --parsable \
         --dependency=afterok:${SWEEP_JOB} \
         --array="${SUM_RANGE}" \

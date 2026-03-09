@@ -269,6 +269,8 @@ Plot options are forwarded via environment variables:
 | `--metric accuracy\|f1\|…` | `PLOT_METRIC` | all metrics |
 | `--clf LR\|RF\|AdaBoost` | `PLOT_CLF` | all |
 | `--probe_source method\|base` | `PLOT_PROBE_SOURCE` | `method` |
+| `--dataset bio\|cyber` | `PLOT_DATASET` | `bio` |
+| `--cyber_subset og\|pattern\|gibberish\|both` | `PLOT_CYBER_SUBSET` | none |
 | `--out filename` | `PLOT_OUT` | auto-generated |
 
 ### Running a single method manually
@@ -313,6 +315,10 @@ python hidden_knowledge_after_unlearning.py --stage llama70b
 ```
 
 Results are saved to `checkpoints/Llama70B_results.json` and included automatically in the summary tables when present.
+
+### Context isolation between questions
+
+Each call to `model.generate()` (generation) and `model(**enc)` (hidden-state extraction) encodes its input from scratch with no `past_key_values` carried over from previous calls. Questions in different batches — or successive inference calls — cannot influence each other's outputs. No explicit "flush" or cache clearing is needed between questions. This is a property of standard HuggingFace causal-LM inference, not something the pipeline needs to manage explicitly.
 
 ### Resubmitting after preemption
 
@@ -515,9 +521,30 @@ heatmap_methods_accuracy_all_clf_method.png
 
 When `--out` is given with `--method all`, it is used as a template and the method name is appended to the stem.
 
+### Cyber subset filtering (`--cyber_subset`)
+
+When plotting with `--dataset cyber`, the full cyber test set includes computational questions (argument-finding, assembly return values) that the True/False format cannot meaningfully probe. The `--cyber_subset` option restricts evaluation to a cleaner slice, making heatmap comparisons against the Base (Instruct) model more meaningful.
+
+| Value | Excluded questions |
+|---|---|
+| *(omitted)* | None — full test set |
+| `og` | None — explicit alias for the full set |
+| `pattern` | Computational/code-execution questions (~35% of the dataset) |
+| `gibberish` | Questions where the base model produced gibberish (fixed mask, same for all methods) |
+| `both` | Both computational AND base-gibberish questions *(recommended for cleanest comparison)* |
+
+**Requirements:**
+- Requires the hidden-state `.npy` files (`hs_test.npy` / `cyber_hs_test.npy`) to be present for each checkpoint. Pre-computed per-layer stats in `results.json` are computed on the full set and cannot be retroactively subset-filtered.
+- **Methods mode** additionally requires `checkpoints/base_cyber_test_meta.json`, which is written automatically by `--stage base`. If this file is missing, re-run `--stage base` to generate it.
+- **Checkpoints/sweep mode** derives the filter directly from the CSV — no additional files needed beyond the hidden-state arrays.
+
+**Combined with `--relative`:** The `--relative` flag normalises each cell by subtracting the Base (Instruct) value (so the base row is always 0.0). This combination makes it easy to see which layers and methods deviate most from the unmodified model on the cleaned subset.
+
 ### Fallback to JSON when npy files are missing
 
 `plot_layer_accuracy.py` (checkpoints mode) normally loads `hs_test.npy` + `probes.pkl` from each sweep checkpoint directory and recomputes per-layer accuracy on the fly. If those large files have been deleted to save disk space, it automatically falls back to the pre-computed per-layer stats stored in the checkpoint's `results.json` (keys `all_layers_base_probe_stats` / `all_layers_method_probe_stats`). These keys are written by the sweep pipeline starting from the version that introduced this feature. Older `results.json` files without these keys simply produce no curve for that checkpoint.
+
+**Note:** The JSON-fallback path is disabled when `--cyber_subset` is active, because the pre-computed stats cover the full test set. Hidden-state arrays must be available to apply subset filtering.
 
 ### Examples
 
@@ -555,6 +582,20 @@ python plot_layer_accuracy.py --mode checkpoints --method RMU --plot_type heatma
 
 # All 8 methods, heatmap, one PNG each (auto-named):
 python plot_layer_accuracy.py --mode checkpoints --method all --plot_type heatmap --metric f1
+
+# ── Cyber subset heatmaps (recommended for cleaner comparisons) ──────────────
+
+# All methods, cyber "both" subset, relative to base — reveals which layers deviate:
+python plot_layer_accuracy.py --plot_type heatmap --dataset cyber \
+    --cyber_subset both --relative --metric auc
+
+# Sweep checkpoints for GradDiff, cyber "pattern" subset:
+python plot_layer_accuracy.py --mode checkpoints --method GradDiff \
+    --plot_type heatmap --dataset cyber --cyber_subset pattern --metric f1
+
+# All 8 methods, cyber subset + normalisation (one PNG per method):
+python plot_layer_accuracy.py --mode checkpoints --method all \
+    --plot_type heatmap --dataset cyber --cyber_subset both --relative
 ```
 
 ### SLURM checkpoint plots

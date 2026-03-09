@@ -34,10 +34,22 @@ Metrics (--metric):
   accuracy | true_accuracy | false_accuracy | precision | recall | f1 | auc
   If omitted all metrics are shown as separate rows.
 
+Cyber subset filtering (--cyber_subset, only with --dataset cyber):
+  og        — full test set (no filter)
+  pattern   — exclude computational/code-execution questions
+  gibberish — exclude questions where the base model produced gibberish
+  both      — exclude both (recommended for cleaner comparison with bio)
+
+  The "both" and "pattern" subsets remove questions that cannot be meaningfully
+  answered in True/False format, making heatmap comparisons against the Base
+  (Instruct) model more meaningful.  Subset filtering requires hidden-state
+  .npy files to exist (pre-computed per-layer stats in results.json are for the
+  full set and cannot be re-filtered without the original arrays).
+
 Output filenames are auto-generated from parameters when --out is not given:
-  {plot_type}_{mode}[_{method}]_{metric}_{clf}_{probe_source}.png
-  e.g.  heatmap_checkpoints_GradDiff_f1_LR_method.png
-        line_methods_all_metrics_all_clf_base.png
+  {plot_type}_{mode}[_{method}]_{metric}_{clf}_{probe_source}[_{subset}].png
+  e.g.  heatmap_checkpoints_GradDiff_f1_LR_method_cyber_both.png
+        line_methods_all_metrics_all_clf_base_cyber_both_relative.png
 
 Usage:
     # --- methods / line ---
@@ -49,6 +61,10 @@ Usage:
     python plot_layer_accuracy.py --plot_type heatmap --metric accuracy
     python plot_layer_accuracy.py --plot_type heatmap --metric f1 --clf LR
 
+    # --- methods / heatmap / cyber subset ---
+    python plot_layer_accuracy.py --plot_type heatmap --dataset cyber --cyber_subset both --relative
+    python plot_layer_accuracy.py --plot_type heatmap --dataset cyber --cyber_subset pattern --metric auc
+
     # --- checkpoints / line ---
     python plot_layer_accuracy.py --mode checkpoints --method GradDiff
     python plot_layer_accuracy.py --mode checkpoints --method RMU --probe_source base
@@ -57,6 +73,10 @@ Usage:
     # --- checkpoints / heatmap ---
     python plot_layer_accuracy.py --mode checkpoints --method GradDiff --plot_type heatmap --metric f1
     python plot_layer_accuracy.py --mode checkpoints --method all --plot_type heatmap --metric auc
+
+    # --- checkpoints / heatmap / cyber subset with normalization ---
+    python plot_layer_accuracy.py --mode checkpoints --method GradDiff \\
+        --plot_type heatmap --dataset cyber --cyber_subset both --relative
 """
 
 import argparse
@@ -133,6 +153,22 @@ CYBER_CSV_PATH   = DATA_DIR / "wmdp_cyber_true_false_balanced.csv"
 CYBER_TRAIN_SIZE = 500
 CYBER_VAL_SIZE   = 200
 RANDOM_SEED      = 42
+
+# Cyber subsets (mirrors hidden_knowledge_after_unlearning.py)
+CYBER_SUBSETS = ["og", "pattern", "gibberish", "both"]
+
+# Questions requiring code execution / computation — excluded from "pattern" and "both" subsets
+import re as _re
+_COMP_PATTERNS = [_re.compile(p) for p in [
+    r'Which arguments will cause',
+    r'What is the output of the following',
+    r'extern "C"',
+    r'following.*assembly function',
+    r'following ve assembly',
+]]
+
+def _is_computational(question: str) -> bool:
+    return any(p.search(question) for p in _COMP_PATTERNS)
 
 Y_MIN    = 0.4    # fixed lower bound of y-axis
 Y_PAD    = 0.05   # padding fraction above the highest point
@@ -232,12 +268,14 @@ def load_cyber_y_test_methods(checkpoint_dir: Path) -> np.ndarray:
     return np.load(path).astype(np.int32)
 
 
-def load_cyber_y_test_sweep() -> np.ndarray:
-    """Derive cyber y_test for checkpoints/sweep mode.
+def load_cyber_test_pairs_sweep() -> list:
+    """Return cyber test pairs in the exact shuffled order used by _sweep_load_shared().
 
-    Replicates _sweep_load_shared(): fresh random.Random(42) → shuffle CSV
-    question_ids → take test portion (after CYBER_TRAIN_SIZE+CYBER_VAL_SIZE).
-    Labels: 1 = True row, 0 = False row, interleaved (true, false) per question.
+    Replicates load_cyber_tf_pairs(rng) with a fresh random.Random(RANDOM_SEED):
+      1. Shuffle question_ids
+      2. Advance rng past train-pair shuffle and val-pair shuffle
+      3. Shuffle test pairs
+    Returns list of dicts: {question_id, question, label (1=True/0=False)}.
     """
     if not CYBER_CSV_PATH.exists():
         raise FileNotFoundError(f"Cyber CSV not found at {CYBER_CSV_PATH}")
@@ -252,16 +290,85 @@ def load_cyber_y_test_sweep() -> np.ndarray:
     question_ids = list(by_qid.keys())
     rng = random.Random(RANDOM_SEED)
     rng.shuffle(question_ids)
-    test_ids = question_ids[CYBER_TRAIN_SIZE + CYBER_VAL_SIZE:]
+    train_ids = question_ids[:CYBER_TRAIN_SIZE]
+    val_ids   = question_ids[CYBER_TRAIN_SIZE:CYBER_TRAIN_SIZE + CYBER_VAL_SIZE]
+    test_ids  = question_ids[CYBER_TRAIN_SIZE + CYBER_VAL_SIZE:]
 
-    labels = []
-    for qid in test_ids:
-        g = by_qid[qid]
-        if "True" not in g or "False" not in g:
-            continue
-        labels.append(1)   # True pair
-        labels.append(0)   # False pair
-    return np.array(labels, dtype=np.int32)
+    def _make(ids):
+        pairs = []
+        for qid in ids:
+            g = by_qid[qid]
+            if "True" not in g or "False" not in g:
+                continue
+            question = g["True"]["question"]
+            pairs.append({"question_id": qid, "question": question, "label": 1})
+            pairs.append({"question_id": qid, "question": question, "label": 0})
+        rng.shuffle(pairs)
+        return pairs
+
+    _make(train_ids)   # advance rng past train-pair shuffle
+    _make(val_ids)     # advance rng past val-pair shuffle
+    return _make(test_ids)
+
+
+def load_cyber_y_test_sweep() -> np.ndarray:
+    """Derive cyber y_test for checkpoints/sweep mode (correctly applies pair shuffle)."""
+    pairs = load_cyber_test_pairs_sweep()
+    return np.array([p["label"] for p in pairs], dtype=np.int32)
+
+
+def load_cyber_test_meta_methods(checkpoint_dir: Path) -> list | None:
+    """Load per-pair metadata saved by run_base() for methods-mode subset filtering.
+
+    Returns list of {question_id, is_comp} dicts in the same order as
+    base_cyber_hs_test.npy, or None if the file hasn't been written yet
+    (run --stage base to generate it).
+    """
+    path = checkpoint_dir / "base_cyber_test_meta.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_base_cyber_gib_qids(checkpoint_dir: Path) -> list:
+    """Load cyber gibberish question-IDs from base_results.json."""
+    path = checkpoint_dir / "base_results.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("cyber_gibberish_qids") or []
+    except Exception:
+        return []
+
+
+def compute_cyber_subset_mask(subset_name: str, pairs_meta: list,
+                               gib_qids) -> np.ndarray:
+    """Return boolean mask for the named cyber subset.
+
+    pairs_meta: list of dicts with keys 'question_id' and optionally 'is_comp'.
+    gib_qids:   iterable of question_ids where the base model gave gibberish.
+
+    Subsets:
+      og        — all pairs (no filter)
+      pattern   — exclude computational questions
+      gibberish — exclude questions where base model gave gibberish
+      both      — exclude computational AND base-gibberish questions
+    """
+    gib_set   = set(gib_qids or [])
+    comp_excl = subset_name in ("pattern", "both")
+    gib_excl  = subset_name in ("gibberish", "both")
+
+    mask = []
+    for m in pairs_meta:
+        exclude = False
+        if comp_excl and m.get("is_comp", False):
+            exclude = True
+        if gib_excl and m["question_id"] in gib_set:
+            exclude = True
+        mask.append(not exclude)
+    return np.array(mask, dtype=bool)
 
 
 def load_hs(sn: str, checkpoint_dir: Path, dataset: str = "bio"):
@@ -481,7 +588,8 @@ def per_layer_metric(probe_set: dict, hs_test: np.ndarray,
 
 def collect_data(checkpoint_dir: Path, clfs: list,
                  y_test: np.ndarray, metrics: list,
-                 probe_source: str, dataset: str = "bio") -> dict:
+                 probe_source: str, dataset: str = "bio",
+                 mask: np.ndarray | None = None) -> dict:
     """
     Returns data[metric][clf_name][model_name] = (layers_list, values_list).
 
@@ -490,6 +598,9 @@ def collect_data(checkpoint_dir: Path, clfs: list,
     probe_source == "base":
         Base model's probes on every model's hidden states, EXCEPT models in
         OWN_PROBE_MODELS (currently Llama3-8B) which use their own probes.
+
+    mask: optional boolean array of shape (n_test,).  When supplied, only the
+        masked-True examples are evaluated (used for cyber subset filtering).
     """
     data = {m: {clf: {} for clf in clfs} for m in metrics}
 
@@ -508,6 +619,10 @@ def collect_data(checkpoint_dir: Path, clfs: list,
         if hs is None:
             continue
 
+        # Apply subset mask when requested.
+        hs_eff = hs[mask] if mask is not None else hs
+        y_eff  = y_test[mask] if mask is not None else y_test
+
         # Determine which probe set to use for this model.
         if probe_source == "method" or model_name in OWN_PROBE_MODELS:
             probe_set = load_probe_set(sn, checkpoint_dir, dataset)
@@ -518,11 +633,14 @@ def collect_data(checkpoint_dir: Path, clfs: list,
 
         for metric in metrics:
             for clf_name in clfs:
-                pairs = per_layer_metric(probe_set, hs, y_test,
+                pairs = per_layer_metric(probe_set, hs_eff, y_eff,
                                          clf_name, metric=metric, layer_start=1)
                 if pairs:
                     layers, vals = zip(*pairs)
                     data[metric][clf_name][model_name] = (list(layers), list(vals))
+
+        del hs
+        gc.collect()
 
     return data
 
@@ -533,7 +651,8 @@ def collect_data(checkpoint_dir: Path, clfs: list,
 
 def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
                               y_test: np.ndarray, metrics: list,
-                              probe_source: str, dataset: str = "bio") -> dict:
+                              probe_source: str, dataset: str = "bio",
+                              mask: np.ndarray | None = None) -> dict:
     """
     Returns data[metric][clf_name][label] = (layers_list, values_list)
     where label is "Base (Instruct)", "ck1", ..., "ck8".
@@ -543,6 +662,11 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
     probe_source == "base":
         All checkpoints are evaluated with the base model's probes.
         Base (Instruct) still uses its own probes.
+
+    mask: optional boolean array of shape (n_test,).  When supplied, only the
+        masked-True examples are evaluated (used for cyber subset filtering).
+        Note: when mask is active the fallback (pre-computed per-layer stats in
+        results.json) is skipped because those stats were computed on the full set.
     """
     data = {m: {clf: {} for clf in clfs} for m in metrics}
 
@@ -556,9 +680,11 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
     print("  Loading Base (Instruct) ...")
     base_hs = load_hs("base", checkpoint_dir, dataset)
     if base_hs is not None:
+        base_hs_eff = base_hs[mask] if mask is not None else base_hs
+        y_eff       = y_test[mask]  if mask is not None else y_test
         for metric in metrics:
             for clf_name in clfs:
-                pairs = per_layer_metric(base_probe_set, base_hs, y_test,
+                pairs = per_layer_metric(base_probe_set, base_hs_eff, y_eff,
                                          clf_name, metric=metric, layer_start=1)
                 if pairs:
                     layers, vals = zip(*pairs)
@@ -584,6 +710,10 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
         hs = load_hs_ck(method_name, ck_num, checkpoint_dir, dataset)
 
         if hs is None:
+            if mask is not None:
+                # Pre-computed stats were computed on the full set — can't apply mask.
+                print(f"    [skip] No hs file for {label}; subset mask requires hs.")
+                continue
             # Fall back to pre-computed per-layer stats stored in results.json.
             ck_path = _ck_dir(method_name, ck_num, checkpoint_dir) / "results.json"
             if ck_path.exists():
@@ -614,9 +744,12 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
                 gc.collect()
                 continue
 
+        hs_eff = hs[mask] if mask is not None else hs
+        y_eff  = y_test[mask] if mask is not None else y_test
+
         for metric in metrics:
             for clf_name in clfs:
-                pairs = per_layer_metric(ck_probe_set, hs, y_test,
+                pairs = per_layer_metric(ck_probe_set, hs_eff, y_eff,
                                          clf_name, metric=metric, layer_start=1)
                 if pairs:
                     layers, vals = zip(*pairs)
@@ -680,10 +813,12 @@ def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
 
 def _auto_out_path(plot_type: str, mode: str, method: str | None,
                    metric: str | None, clf: str | None,
-                   probe_source: str, dataset: str = "bio") -> Path:
+                   probe_source: str, dataset: str = "bio",
+                   normalize: bool = False,
+                   cyber_subset: str | None = None) -> Path:
     """
     Build a descriptive output filename from the run parameters.
-    Example: heatmap_checkpoints_GradDiff_f1_LR_method_cyber.png
+    Example: heatmap_checkpoints_GradDiff_f1_LR_method_cyber_both.png
     """
     parts = [plot_type, mode]
     if mode == "checkpoints" and method and method != "all":
@@ -692,6 +827,10 @@ def _auto_out_path(plot_type: str, mode: str, method: str | None,
     parts.append(clf.lower() if clf else "all_clf")
     parts.append(probe_source)
     parts.append(dataset)
+    if cyber_subset and dataset == "cyber":
+        parts.append(cyber_subset)
+    if normalize:
+        parts.append("relative")
     return Path("_".join(parts) + ".png")
 
 
@@ -711,9 +850,38 @@ def _data_range(data: dict, metrics: list, clfs: list):
     return float(np.min(all_vals)), float(np.max(all_vals))
 
 
+def _relative_data_range(data: dict, metrics: list, clfs: list):
+    """Return (-max_abs, max_abs) of delta values (value - base) for relative heatmap."""
+    # Gather base (Instruct) values per (metric, clf, layer)
+    base_vals = {}
+    for m in metrics:
+        for clf in clfs:
+            clf_data = data[m].get(clf, {})
+            if "Base (Instruct)" in clf_data:
+                layers, vals = clf_data["Base (Instruct)"]
+                for l, v in zip(layers, vals):
+                    base_vals[(m, clf, l)] = v
+
+    deltas = []
+    for m in metrics:
+        for clf in clfs:
+            clf_data = data[m].get(clf, {})
+            for label, (layers, vals) in clf_data.items():
+                for l, v in zip(layers, vals):
+                    bv = base_vals.get((m, clf, l))
+                    if bv is not None and not np.isnan(bv):
+                        deltas.append(v - bv)
+
+    if not deltas:
+        return -0.1, 0.1
+    max_abs = max(abs(min(deltas)), abs(max(deltas)))
+    return (-max_abs or -0.01), (max_abs or 0.01)
+
+
 def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                     row_labels: list, out_path: Path, title: str,
-                    vmin: float | None = None, vmax: float | None = None):
+                    vmin: float | None = None, vmax: float | None = None,
+                    normalize: bool = False):
     """
     Render a heatmap figure.
 
@@ -757,9 +925,26 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                     if 1 <= l <= N_LAYERS:
                         mat[ri, l - 1] = v
 
+            if normalize:
+                # Subtract Base (Instruct) row to show delta from base
+                base_row = None
+                if "Base (Instruct)" in present:
+                    base_idx = present.index("Base (Instruct)")
+                    base_row = mat[base_idx, :].copy()
+                if base_row is not None:
+                    mat = mat - base_row[np.newaxis, :]
+                cmap_use = "RdYlGn"
+                # Use symmetric colour scale around 0
+                local_max = np.nanmax(np.abs(mat)) if not np.all(np.isnan(mat)) else 0.1
+                _vmin = -(local_max or 0.01) if vmin is None else vmin
+                _vmax =  (local_max or 0.01) if vmax is None else vmax
+            else:
+                cmap_use = "RdYlGn"
+                _vmin, _vmax = vmin, vmax
+
             im = ax.imshow(
                 mat, aspect="auto", origin="upper",
-                vmin=vmin, vmax=vmax, cmap="RdYlGn",
+                vmin=_vmin, vmax=_vmax, cmap=cmap_use,
                 interpolation="nearest",
             )
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -790,7 +975,8 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 
 def make_plot(checkpoint_dir: Path, out_path: Path,
               clf_filter: list, metric: str | None, probe_source: str,
-              data_dir: Path = DATA_DIR, dataset: str = "bio"):
+              data_dir: Path = DATA_DIR, dataset: str = "bio",
+              cyber_subset: str | None = None):
 
     if dataset == "cyber":
         print("Loading cyber y_test ...")
@@ -807,11 +993,23 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
     print(f"  Test set size: {len(y_test)}  "
           f"(pos={y_test.sum()}  neg={(y_test==0).sum()})")
 
+    mask = None
+    if dataset == "cyber" and cyber_subset is not None:
+        meta = load_cyber_test_meta_methods(checkpoint_dir)
+        if meta is None:
+            print("  [warn] base_cyber_test_meta.json not found; ignoring --cyber_subset."
+                  " Re-run --stage base to generate it.")
+        else:
+            gib_qids = load_base_cyber_gib_qids(checkpoint_dir)
+            mask = compute_cyber_subset_mask(cyber_subset, meta, gib_qids)
+            n_kept = mask.sum()
+            print(f"  Cyber subset '{cyber_subset}': {n_kept}/{len(mask)} pairs kept.")
+
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data      = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot,
-                             probe_source, dataset)
+                             probe_source, dataset, mask=mask)
     ext_logit = load_external_logit(checkpoint_dir, metrics_to_plot, dataset)
 
     row_ymax = {}
@@ -912,7 +1110,8 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
                            method_name: str,
                            clf_filter: list, metric: str | None,
                            probe_source: str,
-                           data_dir: Path = DATA_DIR, dataset: str = "bio"):
+                           data_dir: Path = DATA_DIR, dataset: str = "bio",
+                           cyber_subset: str | None = None):
 
     print(f"\n=== Checkpoints mode: {method_name} ({dataset}) ===")
     if dataset == "cyber":
@@ -930,12 +1129,19 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
     print(f"  Test set size: {len(y_test)}  "
           f"(pos={y_test.sum()}  neg={(y_test==0).sum()})")
 
+    mask = None
+    if dataset == "cyber" and cyber_subset is not None:
+        pairs_meta = load_cyber_test_pairs_sweep()
+        gib_qids   = load_base_cyber_gib_qids(checkpoint_dir)
+        mask = compute_cyber_subset_mask(cyber_subset, pairs_meta, gib_qids)
+        print(f"  Cyber subset '{cyber_subset}': {mask.sum()}/{len(mask)} pairs kept.")
+
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data = collect_data_checkpoints(
         checkpoint_dir, method_name, clfs, y_test, metrics_to_plot,
-        probe_source, dataset
+        probe_source, dataset, mask=mask
     )
 
     row_ymax = {}
@@ -1017,7 +1223,9 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
                          probe_source: str,
                          data_dir: Path = DATA_DIR,
                          vmin: float | None = None, vmax: float | None = None,
-                         dataset: str = "bio"):
+                         dataset: str = "bio",
+                         normalize: bool = False,
+                         cyber_subset: str | None = None):
     if dataset == "cyber":
         print("Loading cyber y_test ...")
         y_test = load_cyber_y_test_methods(checkpoint_dir)
@@ -1028,18 +1236,33 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
         print("Loading y_test from CSV ...")
         y_test = load_y_test(csv_path)
 
+    mask = None
+    if dataset == "cyber" and cyber_subset is not None:
+        meta = load_cyber_test_meta_methods(checkpoint_dir)
+        if meta is None:
+            print("  [warn] base_cyber_test_meta.json not found; ignoring --cyber_subset."
+                  " Re-run --stage base to generate it.")
+        else:
+            gib_qids = load_base_cyber_gib_qids(checkpoint_dir)
+            mask = compute_cyber_subset_mask(cyber_subset, meta, gib_qids)
+            print(f"  Cyber subset '{cyber_subset}': {mask.sum()}/{len(mask)} pairs kept.")
+
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data = collect_data(checkpoint_dir, clfs, y_test, metrics_to_plot,
-                        probe_source, dataset)
+                        probe_source, dataset, mask=mask)
 
-    row_labels = list(ALL_MODELS.keys())   # model display names in palette order
+    subset_lbl  = f" [{cyber_subset}]" if cyber_subset and dataset == "cyber" else ""
+    row_labels  = list(ALL_MODELS.keys())   # model display names in palette order
     title = (
-        f"Probe Heatmap — all models  [{PROBE_SOURCE_TITLES[probe_source].split(' —')[0]}]"
+        f"Probe Heatmap — all models  "
+        f"[{PROBE_SOURCE_TITLES[probe_source].split(' —')[0]}]{subset_lbl}"
     )
+    if normalize:
+        vmin, vmax = _relative_data_range(data, metrics_to_plot, clfs)
     _render_heatmap(data, metrics_to_plot, clfs, row_labels, out_path, title,
-                    vmin=vmin, vmax=vmax)
+                    vmin=vmin, vmax=vmax, normalize=normalize)
 
 
 # ---------------------------------------------------------------------------
@@ -1052,7 +1275,9 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
                               probe_source: str,
                               data_dir: Path = DATA_DIR,
                               vmin: float | None = None, vmax: float | None = None,
-                              dataset: str = "bio"):
+                              dataset: str = "bio",
+                              normalize: bool = False,
+                              cyber_subset: str | None = None):
     print(f"\n=== Heatmap checkpoints mode: {method_name} ({dataset}) ===")
     if dataset == "cyber":
         y_test = load_cyber_y_test_sweep()
@@ -1062,20 +1287,31 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
             raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
         y_test = load_y_test(csv_path)
 
+    mask = None
+    if dataset == "cyber" and cyber_subset is not None:
+        pairs_meta = load_cyber_test_pairs_sweep()
+        gib_qids   = load_base_cyber_gib_qids(checkpoint_dir)
+        mask = compute_cyber_subset_mask(cyber_subset, pairs_meta, gib_qids)
+        print(f"  Cyber subset '{cyber_subset}': {mask.sum()}/{len(mask)} pairs kept.")
+
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
 
     data = collect_data_checkpoints(
         checkpoint_dir, method_name, clfs, y_test, metrics_to_plot,
-        probe_source, dataset
+        probe_source, dataset, mask=mask
     )
 
-    probe_lbl = "Method Probes" if probe_source == "method" else "Base Probes"
+    probe_lbl  = "Method Probes" if probe_source == "method" else "Base Probes"
+    subset_lbl = f" [{cyber_subset}]" if cyber_subset and dataset == "cyber" else ""
     title = (
-        f"{method_name} — Probe Heatmap Over Training Checkpoints  [{probe_lbl}]"
+        f"{method_name} — Probe Heatmap Over Training Checkpoints"
+        f"  [{probe_lbl}]{subset_lbl}"
     )
+    if normalize:
+        vmin, vmax = _relative_data_range(data, metrics_to_plot, clfs)
     _render_heatmap(data, metrics_to_plot, clfs, CK_LABELS, out_path, title,
-                    vmin=vmin, vmax=vmax)
+                    vmin=vmin, vmax=vmax, normalize=normalize)
 
 
 # ---------------------------------------------------------------------------
@@ -1156,12 +1392,38 @@ def main():
             "      in the checkpoint dir (saved automatically by --stage base)."
         ),
     )
+    parser.add_argument(
+        "--relative", action="store_true", default=False,
+        help=(
+            "Normalize heatmap values relative to Base (Instruct).\n"
+            "Each cell shows (value - base_value) so the base row is always 0.\n"
+            "Green = above base, red = below base. Only affects --plot_type heatmap."
+        ),
+    )
+    parser.add_argument(
+        "--cyber_subset", choices=CYBER_SUBSETS, default=None,
+        help=(
+            "Filter the cyber test set to a named subset before evaluating probes.\n"
+            "Only active when --dataset cyber is set.\n"
+            "  og        — full test set (no filter)\n"
+            "  pattern   — exclude computational/code-execution questions\n"
+            "  gibberish — exclude questions where the base model produced gibberish\n"
+            "  both      — exclude both computational AND base-gibberish questions\n"
+            "Subset filtering requires hidden-state .npy files to be present for each\n"
+            "checkpoint (pre-computed stats in results.json are computed on the full set\n"
+            "and cannot be subset-filtered without the original hidden states).\n"
+            "For methods mode, also requires base_cyber_test_meta.json (saved by\n"
+            "--stage base). For checkpoints/sweep mode, derived from the CSV directly."
+        ),
+    )
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
     data_dir       = Path(args.data_dir)
     clf_filter     = [args.clf] if args.clf else []
     dataset        = args.dataset
+    normalize      = args.relative
+    cyber_subset   = args.cyber_subset if dataset == "cyber" else None
 
     # Resolve base output path (auto-generate if not given)
     if args.out is not None:
@@ -1171,6 +1433,8 @@ def main():
             args.plot_type, args.mode,
             args.method if args.mode == "checkpoints" else None,
             args.metric, args.clf, args.probe_source, dataset,
+            normalize=normalize,
+            cyber_subset=cyber_subset,
         )
 
     # ── methods mode ─────────────────────────────────────────────────────────
@@ -1184,6 +1448,7 @@ def main():
                 probe_source=args.probe_source,
                 data_dir=data_dir,
                 dataset=dataset,
+                cyber_subset=cyber_subset,
             )
         else:
             make_plot(
@@ -1194,6 +1459,7 @@ def main():
                 probe_source=args.probe_source,
                 data_dir=data_dir,
                 dataset=dataset,
+                cyber_subset=cyber_subset,
             )
 
     # ── checkpoints mode ──────────────────────────────────────────────────────
@@ -1220,13 +1486,21 @@ def main():
                 csv_path = data_dir / "wmdp_tf_pairs.csv"
                 y_test   = load_y_test(csv_path)
 
+            # Pre-compute subset mask once (shared across all methods)
+            mask = None
+            if dataset == "cyber" and cyber_subset is not None:
+                pairs_meta = load_cyber_test_pairs_sweep()
+                gib_qids   = load_base_cyber_gib_qids(checkpoint_dir)
+                mask = compute_cyber_subset_mask(cyber_subset, pairs_meta, gib_qids)
+                print(f"  Cyber subset '{cyber_subset}': {mask.sum()}/{len(mask)} pairs kept.")
+
             print("Computing global colour scale across all methods ...")
             global_vmin, global_vmax = 1.0, 0.0
             all_data = {}
             for method in methods:
                 d = collect_data_checkpoints(
                     checkpoint_dir, method, clfs, y_test, metrics_to_plot,
-                    args.probe_source, dataset
+                    args.probe_source, dataset, mask=mask
                 )
                 all_data[method] = d
                 lo, hi = _data_range(d, metrics_to_plot, clfs)
@@ -1240,10 +1514,11 @@ def main():
                 else:
                     file_out = base_out
 
-                probe_lbl = "Method Probes" if args.probe_source == "method" else "Base Probes"
+                probe_lbl  = "Method Probes" if args.probe_source == "method" else "Base Probes"
+                subset_lbl = f" [{cyber_subset}]" if cyber_subset else ""
                 title = (
                     f"{method} — Probe Heatmap Over Training Checkpoints"
-                    f"  [{probe_lbl}]  [{dataset.upper()}]"
+                    f"  [{probe_lbl}]  [{dataset.upper()}]{subset_lbl}"
                 )
                 _render_heatmap(
                     all_data[method], metrics_to_plot, clfs, CK_LABELS,
@@ -1267,6 +1542,7 @@ def main():
                     probe_source=args.probe_source,
                     data_dir=data_dir,
                     dataset=dataset,
+                    cyber_subset=cyber_subset,
                 )
 
 

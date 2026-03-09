@@ -18,6 +18,8 @@
 #   PLOT_METRIC         accuracy | f1 | auc …   (default: all metrics)
 #   PLOT_CLF            LR | RF | AdaBoost       (default: all)
 #   PLOT_PROBE_SOURCE   method | base            (default: method)
+#   PLOT_DATASET        bio | cyber              (default: bio)
+#   PLOT_CYBER_SUBSET   og|pattern|gibberish|both (default: none)
 #   PLOT_OUT            filename template         (default: auto-generated)
 #   PLOT_CHECKPOINT_DIR path to checkpoints dir  (default: checkpoints)
 #   CONDA_ENV           conda environment name   (default: unlearning)
@@ -55,6 +57,8 @@ PLOT_ARGS="${PLOT_ARGS} --checkpoint_dir ${CKPT_DIR}"
 [[ -n "${PLOT_METRIC}"       ]] && PLOT_ARGS="${PLOT_ARGS} --metric ${PLOT_METRIC}"
 [[ -n "${PLOT_CLF}"          ]] && PLOT_ARGS="${PLOT_ARGS} --clf ${PLOT_CLF}"
 [[ -n "${PLOT_PROBE_SOURCE}" ]] && PLOT_ARGS="${PLOT_ARGS} --probe_source ${PLOT_PROBE_SOURCE}"
+[[ -n "${PLOT_DATASET}"      ]] && PLOT_ARGS="${PLOT_ARGS} --dataset ${PLOT_DATASET}"
+[[ -n "${PLOT_CYBER_SUBSET}" ]] && PLOT_ARGS="${PLOT_ARGS} --cyber_subset ${PLOT_CYBER_SUBSET}"
 
 if [[ -n "${PLOT_OUT}" ]]; then
     SAFE_METHOD="${METHOD//&/_}"

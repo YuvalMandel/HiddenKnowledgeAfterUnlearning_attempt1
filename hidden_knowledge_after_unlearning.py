@@ -847,6 +847,10 @@ def _apply_template(pairs, tokenizer, add_generation_prompt: bool):
 @torch.no_grad()
 def batch_generate(model, tokenizer, pairs, batch_size, desc="",
                    checkpoint_fn=None, save_every=10, resume_from=None):
+    # Context isolation: each call to model.generate() encodes its inputs
+    # from scratch with no past_key_values carried from a previous call.
+    # Questions in different batches — or successive calls — cannot influence
+    # each other.  No explicit "flush" is needed.
     # add_generation_prompt=True so the model continues from the assistant turn.
     texts       = _apply_template(pairs, tokenizer, add_generation_prompt=True)
     answers     = list(resume_from) if resume_from else []
@@ -886,6 +890,9 @@ def batch_generate(model, tokenizer, pairs, batch_size, desc="",
 def extract_hidden_states(model, tokenizer, pairs, batch_size, desc=""):
     """
     Returns float32 numpy array of shape (n_pairs, n_layers+1, hidden_dim).
+
+    Context isolation: each batch is a fresh forward pass with no shared
+    past_key_values across batches or questions.  No flushing is needed.
 
     add_generation_prompt=False: hidden states are extracted from the last real
     input token (the final token of the user message), not from a generation
@@ -1526,6 +1533,28 @@ def _compute_cyber_subsets_method(pairs, answers, logit_scores,
             "base_probes":  compute_all_probe_stats(base_probe_set,   hs_un_s,  y_s),
             "method_probes":compute_all_probe_stats(method_probe_set, hs_un_s,  y_s),
             "cross_probes": compute_all_probe_stats(method_probe_set, hs_base_s, y_s),
+        }
+    return result
+
+
+def _compute_cyber_subsets_sweep(pairs, answers, logit_scores, hs_test,
+                                  base_probe_set, method_probe_set, gib_qids):
+    """Compute gen/logit/probe stats for all 4 cyber subsets — sweep checkpoint.
+
+    Like _compute_cyber_subsets_method but omits cross_probes (base hs not
+    available in sweep after the base stage deletes them to save disk space).
+    """
+    result = {}
+    for sname in CYBER_SUBSETS:
+        (pairs_s, answers_s, logit_s, hs_s) = _get_cyber_subset(
+            sname, pairs, gib_qids, answers, logit_scores, hs_test)
+        y_s = pairs_to_labels(pairs_s)
+        result[sname] = {
+            "n_pairs":       len(pairs_s),
+            "gen":           generation_stats(answers_s, pairs_s),
+            "logit":         logit_stats(logit_s, pairs_s),
+            "base_probes":   compute_all_probe_stats(base_probe_set,   hs_s, y_s),
+            "method_probes": compute_all_probe_stats(method_probe_set, hs_s, y_s),
         }
     return result
 
@@ -2303,6 +2332,21 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     cyber_y_train = pairs_to_labels(cyber_train_pairs)
     cyber_y_val   = pairs_to_labels(cyber_val_pairs)
     cyber_y_test  = pairs_to_labels(cyber_test_pairs)
+
+    # Save per-pair metadata (question_id + computational flag) so that
+    # plot_layer_accuracy.py can apply cyber subset filters without reloading
+    # the model.  Written once; idempotent on subsequent runs.
+    _cyber_meta_path = CHECKPOINT_DIR / "base_cyber_test_meta.json"
+    if not _cyber_meta_path.exists():
+        CHECKPOINT_DIR.mkdir(exist_ok=True)
+        _meta = [
+            {"question_id": p["question_id"],
+             "is_comp":     _is_computational(p["question"])}
+            for p in cyber_test_pairs
+        ]
+        with open(_cyber_meta_path, "w") as _mf:
+            json.dump(_meta, _mf)
+        print(f"  [cache] Saved {_cyber_meta_path.name}", flush=True)
 
     # ── Check for complete checkpoint ─────────────────────────────────────────
     if (CHECKPOINT_DIR / "base_results.json").exists():
@@ -3646,6 +3690,7 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
                                y_test: np.ndarray,
                                cyber_y_train: np.ndarray, cyber_y_val: np.ndarray,
                                cyber_y_test: np.ndarray,
+                               base_cyber_gib_qids: list,
                                multi_layer_start: int,
                                multi_layer_end: int) -> dict:
     """
@@ -3669,7 +3714,31 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
         with open(results_path) as f:
             r = json.load(f)
         if _sweep_complete(r):
-            print(f"  [sweep] ck{ck_num} complete — loading from cache.")
+            if "cyber_subsets" in r:
+                print(f"  [sweep] ck{ck_num} complete — loading from cache.")
+                return r
+            # Complete but cyber_subsets not yet computed; derive from saved files
+            # without reloading the model.
+            _c_hs = _load_npy(ck_d / "cyber_hs_test.npy")
+            _c_partial = _load_sweep_partial(ck_d)
+            _c_answers = _c_partial.get("cyber_test_answers")
+            _c_logit   = _c_partial.get("cyber_logit_scores")
+            _c_probe   = None
+            _c_probe_path = ck_d / "cyber_probes.pkl"
+            if _c_probe_path.exists():
+                with open(_c_probe_path, "rb") as _f:
+                    _ps = pickle.load(_f)
+                if isinstance(_ps, dict) and "per_layer" in _ps:
+                    _c_probe = _ps
+            if _c_hs is not None and _c_answers and _c_logit and _c_probe:
+                r["cyber_subsets"] = _compute_cyber_subsets_sweep(
+                    cyber_test_pairs, _c_answers, _c_logit, _c_hs,
+                    base_cyber_probe_set, _c_probe, base_cyber_gib_qids)
+                with open(results_path, "w") as _f:
+                    json.dump(r, _f)
+                print(f"  [sweep] ck{ck_num} cyber_subsets patched into cache.", flush=True)
+            else:
+                print(f"  [sweep] ck{ck_num} complete (no cyber_subsets data available).")
             return r
 
     # ── Load cached arrays & partial state ────────────────────────────────────
@@ -3860,6 +3929,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
         "cyber_all_method_probe_stats":     compute_all_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
         "cyber_all_layers_base_probe_stats":  compute_all_layers_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
         "cyber_all_layers_method_probe_stats":compute_all_layers_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
+        "cyber_subsets":                      _compute_cyber_subsets_sweep(
+            cyber_test_pairs, cyber_test_answers, cyber_logit_scores,
+            cyber_hs_test, base_cyber_probe_set, cyber_probe_set,
+            base_cyber_gib_qids),
     }
     with open(results_path, "w") as f:
         json.dump(r, f)
@@ -3907,6 +3980,7 @@ def _sweep_load_shared(method_name: str):
         pairs_to_labels(cyber_train_pairs),
         pairs_to_labels(cyber_val_pairs),
         pairs_to_labels(cyber_test_pairs),
+        base.get("cyber_gibberish_qids") or [],
     )
 
 
@@ -3931,7 +4005,8 @@ def run_sweep_checkpoint(method_name: str, ck_num: int,
      cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
      mcq_pairs_v,
      y_train, y_val, y_test,
-     cyber_y_train, cyber_y_val, cyber_y_test) = _sweep_load_shared(method_name)
+     cyber_y_train, cyber_y_val, cyber_y_test,
+     base_cyber_gib_qids) = _sweep_load_shared(method_name)
 
     _run_one_sweep_checkpoint(
         method_name, ck_num,
@@ -3941,6 +4016,7 @@ def run_sweep_checkpoint(method_name: str, ck_num: int,
         mcq_pairs_v,
         y_train, y_val, y_test,
         cyber_y_train, cyber_y_val, cyber_y_test,
+        base_cyber_gib_qids,
         multi_layer_start, multi_layer_end,
     )
     print(f"\n[sweep] Checkpoint {ck_num} for {method_name} complete.")
@@ -3968,7 +4044,8 @@ def run_sweep(method_name: str,
      cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
      mcq_pairs_v,
      y_train, y_val, y_test,
-     cyber_y_train, cyber_y_val, cyber_y_test) = _sweep_load_shared(method_name)
+     cyber_y_train, cyber_y_val, cyber_y_test,
+     base_cyber_gib_qids) = _sweep_load_shared(method_name)
 
     # ── Smart ordering: complete (instant) → cached model → needs download ─────
     all_ck = list(range(1, n_checkpoints + 1))
@@ -3999,6 +4076,7 @@ def run_sweep(method_name: str,
             mcq_pairs_v,
             y_train, y_val, y_test,
             cyber_y_train, cyber_y_val, cyber_y_test,
+            base_cyber_gib_qids,
             multi_layer_start, multi_layer_end,
         )
         results_map[ck_num] = r
