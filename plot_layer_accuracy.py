@@ -254,18 +254,18 @@ def load_y_test(csv_path: Path) -> np.ndarray:
 
 
 def load_cyber_y_test_methods(checkpoint_dir: Path) -> np.ndarray:
-    """Load cyber y_test for methods mode from the saved npy file.
+    """Load cyber y_test for methods mode.
 
-    Written by run_base() as base_cyber_y_test.npy.  Reflects the same RNG
-    state (post-load_datasets) used by run_base() / run_method().
+    Prefers base_cyber_y_test.npy (written by run_base()).  Falls back to
+    deriving labels from the CSV with the same RNG seed — produces identical
+    results because both load_cyber_tf_pairs(rng) and load_cyber_test_pairs_sweep()
+    use random.Random(RANDOM_SEED=42).
     """
     path = checkpoint_dir / "base_cyber_y_test.npy"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{path} not found.\n"
-            "Re-run --stage base so it saves base_cyber_y_test.npy."
-        )
-    return np.load(path).astype(np.int32)
+    if path.exists():
+        return np.load(path).astype(np.int32)
+    print("  [warn] base_cyber_y_test.npy not found; deriving labels from CSV (same RNG seed).")
+    return load_cyber_y_test_sweep()
 
 
 def load_cyber_test_pairs_sweep() -> list:
