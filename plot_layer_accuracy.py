@@ -677,11 +677,18 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
         raise RuntimeError(f"{probe_label} not found — run --stage base first.")
 
     # --- Base (Instruct) — always own probes ---
+    # For cyber, base_cyber_hs_test.npy was saved by run_base() with its own
+    # rng state, which may differ from the sweep rng used for y_test here.
+    # Load base_cyber_y_test.npy directly so labels align with the .npy file.
     print("  Loading Base (Instruct) ...")
     base_hs = load_hs("base", checkpoint_dir, dataset)
     if base_hs is not None:
+        if dataset == "cyber":
+            base_y_test = load_cyber_y_test_methods(checkpoint_dir)
+        else:
+            base_y_test = y_test
         base_hs_eff = base_hs[mask] if mask is not None else base_hs
-        y_eff       = y_test[mask]  if mask is not None else y_test
+        y_eff       = base_y_test[mask] if mask is not None else base_y_test
         for metric in metrics:
             for clf_name in clfs:
                 pairs = per_layer_metric(base_probe_set, base_hs_eff, y_eff,
