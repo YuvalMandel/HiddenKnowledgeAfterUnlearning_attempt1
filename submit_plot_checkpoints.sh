@@ -11,6 +11,7 @@
 #   bash submit_plot_checkpoints.sh --probe_source base
 #   bash submit_plot_checkpoints.sh --clf LR --metric true_accuracy
 #   bash submit_plot_checkpoints.sh --plot_type heatmap --dataset cyber
+#   bash submit_plot_checkpoints.sh --plot_type heatmap --dataset cyber --cyber_subset both
 #   bash submit_plot_checkpoints.sh --out plots/ck.png --checkpoint_dir /path/to/ckpts
 #
 # Output files (example with default --out layer_accuracy.png):
@@ -27,6 +28,7 @@ export PLOT_CLF=""
 export PLOT_METRIC=""
 export PLOT_PLOT_TYPE=""
 export PLOT_DATASET="bio"
+export PLOT_CYBER_SUBSET=""
 export PLOT_OUT=""
 export PLOT_CHECKPOINT_DIR="checkpoints"
 export CONDA_ENV="htm_keyboard_1"
@@ -39,6 +41,7 @@ while [[ "$#" -gt 0 ]]; do
         --metric)         export PLOT_METRIC="$2";         shift ;;
         --plot_type)      export PLOT_PLOT_TYPE="$2";      shift ;;
         --dataset)        export PLOT_DATASET="$2";        shift ;;
+        --cyber_subset)   export PLOT_CYBER_SUBSET="$2";   shift ;;
         --out)            export PLOT_OUT="$2";            shift ;;
         --checkpoint_dir) export PLOT_CHECKPOINT_DIR="$2"; shift ;;
         --env)            export CONDA_ENV="$2";           shift ;;
@@ -54,6 +57,7 @@ echo "  clf           : ${PLOT_CLF:-all}"
 echo "  metric        : ${PLOT_METRIC:-all}"
 echo "  plot_type     : ${PLOT_PLOT_TYPE:-line}"
 echo "  dataset       : ${PLOT_DATASET}"
+echo "  cyber_subset  : ${PLOT_CYBER_SUBSET:-none}"
 echo "  out template  : ${PLOT_OUT:-auto}"
 echo "  checkpoint_dir: ${PLOT_CHECKPOINT_DIR}"
 echo "  conda env     : ${CONDA_ENV}"

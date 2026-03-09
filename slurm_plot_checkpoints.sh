@@ -52,6 +52,7 @@ EXTRA_ARGS=""
 [[ -n "${PLOT_METRIC}"         ]] && EXTRA_ARGS="$EXTRA_ARGS --metric ${PLOT_METRIC}"
 [[ -n "${PLOT_PLOT_TYPE}"      ]] && EXTRA_ARGS="$EXTRA_ARGS --plot_type ${PLOT_PLOT_TYPE}"
 [[ -n "${PLOT_DATASET}"        ]] && EXTRA_ARGS="$EXTRA_ARGS --dataset ${PLOT_DATASET}"
+[[ -n "${PLOT_CYBER_SUBSET}"   ]] && EXTRA_ARGS="$EXTRA_ARGS --cyber_subset ${PLOT_CYBER_SUBSET}"
 [[ -n "${PLOT_CHECKPOINT_DIR}" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint_dir ${PLOT_CHECKPOINT_DIR}"
 
 if [[ -n "${PLOT_OUT}" ]]; then
