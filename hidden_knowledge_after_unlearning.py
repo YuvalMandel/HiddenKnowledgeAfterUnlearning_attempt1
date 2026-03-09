@@ -2348,6 +2348,10 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
             json.dump(_meta, _mf)
         print(f"  [cache] Saved {_cyber_meta_path.name}", flush=True)
 
+    _cyber_y_test_path = CHECKPOINT_DIR / "base_cyber_y_test.npy"
+    if not _cyber_y_test_path.exists():
+        _save_npy(cyber_y_test, _cyber_y_test_path)
+
     # ── Check for complete checkpoint ─────────────────────────────────────────
     if (CHECKPOINT_DIR / "base_results.json").exists():
         ck = load_base_checkpoint(load_hs=False)
