@@ -2,21 +2,28 @@
 """
 plot_llmgat_correlation.py
 
-Scatter plots correlating LLM-GAT attack robustness scores with a
+Single scatter plot correlating LLM-GAT attack robustness scores with a
 "hidden knowledge" gap score derived from our probe / generation results.
 
-Hidden knowledge  =  best_probe_acc  −  gen_valid_acc
+Hidden knowledge  =  probe_score  −  gen_acc
   (positive ⟹ the model retains more knowledge in hidden states than it
-   reveals through generation; negative ⟹ model appears to know less
-   internally than it shows externally)
+   reveals through generation)
 
-Two y-axes (one subplot each):
-  Left  — "WMDP, Best Input Attack"
-  Right — "WMDP, Best Tamp. Attack"
+Both attack types on one plot:
+  Blue — "WMDP, Best Input Attack"
+  Red  — "WMDP, Best Tamp. Attack"
+
+Special case: "Llama3 8B Instruct" (Base) uses table 2 for probe data
+(base probes) because it has no method-specific row in table 3.
+
+Probe selection (--probe_type, --probe_clf, --probe_metric):
+  type   : pl (per-layer best) | ml (multi-layer) | vote | avg
+  clf    : LR | RF | AdaBoost
+  metric : acc | true | false | f1 | auc | prec | rec
 
 Usage:
     python plot_llmgat_correlation.py
-    python plot_llmgat_correlation.py --data_dir data --checkpoint_dir checkpoints
+    python plot_llmgat_correlation.py --probe_type pl --probe_clf RF --probe_metric f1
     python plot_llmgat_correlation.py --probe_table summary_table2_base_probes.csv
     python plot_llmgat_correlation.py --out my_plot.png
 """
@@ -34,13 +41,10 @@ from scipy import stats
 # Config
 # ---------------------------------------------------------------------------
 
-DATA_DIR       = Path("data")
-LLMGAT_CSV     = DATA_DIR / "LLM-GAT_summary_table.csv"
-GEN_CSV        = DATA_DIR / "summary_table1_gen_logit.csv"
-# Default probe table: method probes (Table 3).  Override with --probe_table.
+DATA_DIR          = Path("data")
 PROBE_CSV_DEFAULT = "summary_table3_method_probes.csv"
+BASE_PROBE_CSV    = "summary_table2_base_probes.csv"   # fallback for Base row
 
-# Mapping: LLM-GAT method name → our summary CSV method name
 METHOD_MAP = {
     "Grad Diff":          "GradDiff",
     "RMU":                "RMU",
@@ -53,21 +57,26 @@ METHOD_MAP = {
     "Llama3 8B Instruct": "Base",
 }
 
-# Probe accuracy columns to consider for "best probe acc"
-# (per-layer best, multi-layer, vote ensemble, avg ensemble — all CLFs)
-PROBE_ACC_COLS = (
-    [f"pl_{c}_acc"   for c in ("lr", "rf", "ada")]
-    + [f"ml_{c}_acc"   for c in ("lr", "rf", "ada")]
-    + [f"vote_{c}_acc" for c in ("lr", "rf", "ada")]
-    + [f"avg_{c}_acc"  for c in ("lr", "rf", "ada")]
-)
+SHORT_NAME = {
+    "Grad Diff":          "GradDiff",
+    "RMU":                "RMU",
+    "RMU + LAT":          "RMU-LAT",
+    "RepNoise":           "RepNoise",
+    "ELM":                "ELM",
+    "RR":                 "RR",
+    "TAR":                "TAR",
+    "PB&J":               "PB&J",
+    "Llama3 8B Instruct": "Base",
+}
+
+# Methods whose probe row lives in table 2 regardless of --probe_table
+BASE_ONLY_METHODS = {"Base"}
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def load_csv_as_dict(path: Path, key_col: str = "method") -> dict:
-    """Return {row[key_col]: {col: value, ...}, ...}."""
     result = {}
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -75,41 +84,55 @@ def load_csv_as_dict(path: Path, key_col: str = "method") -> dict:
     return result
 
 
-def best_probe_acc(row: dict) -> float:
-    """Max numeric value across all probe accuracy columns in a CSV row."""
-    vals = []
-    for col in PROBE_ACC_COLS:
-        v = row.get(col, "")
+def probe_col_name(probe_type: str, probe_clf: str, probe_metric: str) -> str:
+    clf    = probe_clf.lower().replace("adaboost", "ada")
+    metric = probe_metric.lower()
+    if metric == "false":
+        metric = "fals"
+    return f"{probe_type}_{clf}_{metric}"
+
+
+def get_probe_val(row: dict, col: str) -> float:
+    try:
+        return float(row.get(col) or "nan")
+    except (ValueError, TypeError):
+        return float("nan")
+
+
+def get_gen_acc(row: dict, preferred_col: str) -> float:
+    try:
+        v = float(row.get(preferred_col) or "nan")
+    except ValueError:
+        v = float("nan")
+    if np.isnan(v) and preferred_col != "gen_acc":
         try:
-            vals.append(float(v))
-        except (ValueError, TypeError):
-            pass
-    return max(vals) if vals else float("nan")
+            v = float(row.get("gen_acc") or "nan")
+        except ValueError:
+            v = float("nan")
+    return v
 
 
-def annotate_r(ax, x, y):
-    """Add Pearson r and p-value annotation to an axis."""
+def annotate_r(ax, x, y, color, label, y_offset):
     mask = ~(np.isnan(x) | np.isnan(y))
     if mask.sum() < 3:
         return
     r, p = stats.pearsonr(x[mask], y[mask])
     sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
     ax.annotate(
-        f"r = {r:.2f}{sig}  (p = {p:.3f})",
-        xy=(0.05, 0.93), xycoords="axes fraction",
-        fontsize=9, color="#333333",
-        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#cccccc", alpha=0.8),
+        f"{label}: r = {r:.2f}{sig}  (p = {p:.3f})",
+        xy=(0.03, y_offset), xycoords="axes fraction",
+        fontsize=8.5, color=color,
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=color, alpha=0.85),
     )
 
 
 def fit_line(ax, x, y, color):
-    """Draw OLS regression line, ignoring NaNs."""
     mask = ~(np.isnan(x) | np.isnan(y))
     if mask.sum() < 2:
         return
     m, b, *_ = stats.linregress(x[mask], y[mask])
     xr = np.linspace(x[mask].min(), x[mask].max(), 100)
-    ax.plot(xr, m * xr + b, color=color, linewidth=1.2, linestyle="--", alpha=0.6, zorder=1)
+    ax.plot(xr, m * xr + b, color=color, linewidth=1.4, linestyle="--", alpha=0.6, zorder=1)
 
 
 # ---------------------------------------------------------------------------
@@ -121,29 +144,45 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data_dir",     default=str(DATA_DIR))
     parser.add_argument("--probe_table",  default=PROBE_CSV_DEFAULT,
-                        help="Probe summary CSV filename inside data_dir "
-                             "(default: summary_table3_method_probes.csv)")
+                        help="Probe summary CSV for unlearned methods "
+                             "(default: summary_table3_method_probes.csv). "
+                             "Base always uses summary_table2_base_probes.csv.")
+    parser.add_argument("--probe_type",   default="ml",
+                        choices=["pl", "ml", "vote", "avg"],
+                        help="Probe type (default: ml)")
+    parser.add_argument("--probe_clf",    default="LR",
+                        choices=["LR", "RF", "AdaBoost"],
+                        help="Classifier (default: LR)")
+    parser.add_argument("--probe_metric", default="acc",
+                        choices=["acc", "true", "false", "f1", "auc", "prec", "rec"],
+                        help="Probe metric (default: acc)")
     parser.add_argument("--gen_col",      default="gen_valid_acc",
-                        help="Generation accuracy column (default: gen_valid_acc)")
-    parser.add_argument("--out",          default=None,
-                        help="Output PNG path (default: auto-generated)")
+                        help="Generation accuracy column (default: gen_valid_acc, "
+                             "falls back to gen_acc if empty)")
+    parser.add_argument("--out",          default=None)
     args = parser.parse_args()
 
-    data_dir  = Path(args.data_dir)
-    llmgat    = data_dir / "LLM-GAT_summary_table.csv"
-    gen_csv   = data_dir / "summary_table1_gen_logit.csv"
-    probe_csv = data_dir / args.probe_table
+    data_dir       = Path(args.data_dir)
+    llmgat_path    = data_dir / "LLM-GAT_summary_table.csv"
+    gen_path       = data_dir / "summary_table1_gen_logit.csv"
+    probe_path     = data_dir / args.probe_table
+    base_probe_path = data_dir / BASE_PROBE_CSV
 
-    for p in [llmgat, gen_csv, probe_csv]:
+    for p in [llmgat_path, gen_path, probe_path, base_probe_path]:
         if not p.exists():
             raise FileNotFoundError(f"Required file not found: {p}")
 
-    # Load tables
-    llmgat_rows = load_csv_as_dict(llmgat, key_col="Method")
-    gen_rows    = load_csv_as_dict(gen_csv, key_col="method")
-    probe_rows  = load_csv_as_dict(probe_csv, key_col="method")
+    pcol = probe_col_name(args.probe_type, args.probe_clf, args.probe_metric)
+    print(f"  Probe column  : {pcol}")
+    print(f"  Gen column    : {args.gen_col} (fallback: gen_acc)")
+    print(f"  Probe table   : {args.probe_table}")
+    print(f"  Base fallback : {BASE_PROBE_CSV}")
 
-    # Build per-method data
+    llmgat_rows    = load_csv_as_dict(llmgat_path,    key_col="Method")
+    gen_rows       = load_csv_as_dict(gen_path,       key_col="method")
+    probe_rows     = load_csv_as_dict(probe_path,     key_col="method")
+    base_probe_rows = load_csv_as_dict(base_probe_path, key_col="method")
+
     methods, hk_scores, input_att, tamp_att = [], [], [], []
 
     for llmgat_name, our_name in METHOD_MAP.items():
@@ -151,18 +190,25 @@ def main():
             continue
         lg  = llmgat_rows[llmgat_name]
         gen = gen_rows.get(our_name)
-        prb = probe_rows.get(our_name)
 
-        if gen is None or prb is None:
-            print(f"  [skip] {llmgat_name}: missing gen or probe row in summary CSVs")
+        # Base uses table 2; all others use the specified probe table
+        if our_name in BASE_ONLY_METHODS:
+            prb = base_probe_rows.get(our_name)
+            prb_source = BASE_PROBE_CSV
+        else:
+            prb = probe_rows.get(our_name)
+            prb_source = args.probe_table
+
+        if gen is None:
+            print(f"  [skip] {llmgat_name}: missing gen row in table1")
+            continue
+        if prb is None:
+            print(f"  [skip] {llmgat_name}: missing probe row in {prb_source}")
             continue
 
-        try:
-            gen_acc   = float(gen.get(args.gen_col) or "nan")
-        except ValueError:
-            gen_acc   = float("nan")
-        probe_acc = best_probe_acc(prb)
-        hk        = probe_acc - gen_acc       # hidden knowledge gap
+        gen_acc   = get_gen_acc(gen, args.gen_col)
+        probe_val = get_probe_val(prb, pcol)
+        hk        = probe_val - gen_acc
 
         try:
             ia = float(lg.get("WMDP, Best Input Attack") or "nan")
@@ -175,65 +221,76 @@ def main():
         input_att.append(ia)
         tamp_att.append(ta)
 
-        print(f"  {llmgat_name:25s}  gen={gen_acc:.3f}  probe={probe_acc:.3f}"
-              f"  hk={hk:+.3f}  input_att={ia:.2f}  tamp_att={ta:.2f}")
+        print(f"  {llmgat_name:25s}  gen={gen_acc:.3f}  probe={probe_val:.3f}"
+              f"  hk={hk:+.3f}  input={ia:.2f}  tamp={ta:.2f}")
 
     if not methods:
-        raise RuntimeError("No methods matched — check METHOD_MAP and CSV contents.")
+        raise RuntimeError("No methods matched.")
 
-    hk  = np.array(hk_scores, dtype=float)
-    ia  = np.array(input_att,  dtype=float)
-    ta  = np.array(tamp_att,   dtype=float)
+    hk    = np.array(hk_scores, dtype=float)
+    ia    = np.array(input_att,  dtype=float)
+    ta    = np.array(tamp_att,   dtype=float)
+    short = [SHORT_NAME[n] for n in methods]
 
-    # Shorten display names
-    short = [n.replace("Llama3 8B Instruct", "Base").replace("RMU + LAT", "RMU-LAT")
-             for n in methods]
+    # Axis limits — same scale for both series
+    valid_hk = hk[~np.isnan(hk)]
+    valid_y  = np.concatenate([ia[~np.isnan(ia)], ta[~np.isnan(ta)]])
+    pad_x = max((valid_hk.max() - valid_hk.min()) * 0.15, 0.02)
+    pad_y = max((valid_y.max()  - valid_y.min())  * 0.15, 0.02)
+    xlim  = (valid_hk.min() - pad_x, valid_hk.max() + pad_x)
+    ylim  = (valid_y.min()  - pad_y, valid_y.max()  + pad_y)
 
     # ---------------------------------------------------------------------------
-    # Plot
+    # Single plot with both series
     # ---------------------------------------------------------------------------
-    COLOR_IA = "#1f77b4"   # blue  — input attack
-    COLOR_TA = "#d62728"   # red   — tampered attack
+    COLOR_IA = "#1f77b4"   # blue
+    COLOR_TA = "#d62728"   # red
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    probe_lbl = f"{args.probe_type.upper()} / {args.probe_clf} / {args.probe_metric}"
+    fig, ax = plt.subplots(figsize=(8, 6))
     fig.suptitle(
-        "Hidden Knowledge Gap vs. LLM-GAT Attack Robustness\n"
-        "(hidden knowledge = best probe acc. − gen. acc.)",
-        fontsize=12,
+        f"Hidden Knowledge Gap vs. LLM-GAT Attack Robustness\n"
+        f"probe: {probe_lbl}   |   hidden knowledge = probe score − gen. acc.",
+        fontsize=11,
     )
 
-    for ax, y, color, y_label in [
-        (axes[0], ia, COLOR_IA, "WMDP, Best Input Attack"),
-        (axes[1], ta, COLOR_TA, "WMDP, Best Tamp. Attack"),
+    for y, color, label in [
+        (ia, COLOR_IA, "Best Input Attack"),
+        (ta, COLOR_TA, "Best Tamp. Attack"),
     ]:
         fit_line(ax, hk, y, color)
-
         for xi, yi, name in zip(hk, y, short):
             if np.isnan(xi) or np.isnan(yi):
                 continue
-            ax.scatter(xi, yi, color=color, s=80, zorder=3, edgecolors="white", linewidths=0.6)
-            ax.annotate(
-                name,
-                xy=(xi, yi),
-                xytext=(5, 4),
-                textcoords="offset points",
-                fontsize=8,
-                color="#222222",
-            )
+            ax.scatter(xi, yi, color=color, s=80, zorder=3,
+                       edgecolors="white", linewidths=0.6, label=label)
+            ax.annotate(name, xy=(xi, yi), xytext=(5, 4),
+                        textcoords="offset points", fontsize=8, color=color)
 
-        annotate_r(ax, hk, y)
-        ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
-        ax.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
-        ax.set_xlabel("Hidden Knowledge Gap  (probe acc. − gen. acc.)", fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        ax.set_title(y_label, fontsize=10)
-        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4)
+    annotate_r(ax, hk, ia, COLOR_IA, "Input Attack", 0.93)
+    annotate_r(ax, hk, ta, COLOR_TA, "Tamp. Attack", 0.83)
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
+    ax.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_xlabel("Hidden Knowledge Gap  (probe score − gen. acc.)", fontsize=10)
+    ax.set_ylabel("WMDP Attack Score", fontsize=10)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4)
+
+    # Deduplicate legend entries
+    handles, labels = ax.get_legend_handles_labels()
+    seen = {}
+    for h, l in zip(handles, labels):
+        seen.setdefault(l, h)
+    ax.legend(seen.values(), seen.keys(), fontsize=9, loc="lower right")
 
     plt.tight_layout()
 
     probe_stem = Path(args.probe_table).stem.replace("summary_", "")
+    tag = f"{args.probe_type}_{args.probe_clf}_{args.probe_metric}"
     out = Path(args.out) if args.out else (
-        data_dir / f"correlation_hk_vs_attacks_{probe_stem}_{args.gen_col}.png"
+        data_dir / f"correlation_hk_vs_attacks_{probe_stem}_{tag}.png"
     )
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
