@@ -22,3 +22,8 @@ monitor.sh
 # OS
 .DS_Store
 Thumbs.db
+
+*.png
+npy_files.tar.gz
+*.npy
+
