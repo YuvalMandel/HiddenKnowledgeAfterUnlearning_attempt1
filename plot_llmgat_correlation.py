@@ -213,7 +213,7 @@ def main():
         try:
             ia    = float(lg.get("WMDP, Best Input Attack") or "nan")
             ta    = float(lg.get("WMDP, Best Tamp. Attack") or "nan")
-            delta = ta - ia
+            delta = abs(ta - ia)
         except ValueError:
             delta = float("nan")
 
@@ -222,7 +222,7 @@ def main():
         delta_att.append(delta)
 
         print(f"  {llmgat_name:25s}  gen={gen_acc:.3f}  probe={probe_val:.3f}"
-              f"  hk={hk:+.3f}  tamp-input={delta:+.3f}")
+              f"  hk={hk:+.3f}  |tamp-input|={delta:.3f}")
 
     if not methods:
         raise RuntimeError("No methods matched.")
@@ -246,7 +246,7 @@ def main():
     probe_lbl = f"{args.probe_type.upper()} / {args.probe_clf} / {args.probe_metric}"
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.suptitle(
-        f"Hidden Knowledge Gap vs. Attack Vulnerability Gap\n"
+        f"Hidden Knowledge Gap vs. |Attack Vulnerability Gap|\n"
         f"probe: {probe_lbl}   |   hidden knowledge = probe score − gen. acc.",
         fontsize=11,
     )
@@ -260,14 +260,14 @@ def main():
         ax.annotate(name, xy=(xi, yi), xytext=(5, 4),
                     textcoords="offset points", fontsize=8, color="#222222")
 
-    annotate_r(ax, hk, delta, COLOR, "Tamp. − Input", 0.93)
+    annotate_r(ax, hk, delta, COLOR, "|Tamp. − Input|", 0.93)
 
     ax.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
     ax.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_xlabel("Hidden Knowledge Gap  (probe score − gen. acc.)", fontsize=10)
-    ax.set_ylabel("Attack Vulnerability Gap  (Tamp. Attack − Input Attack)", fontsize=10)
+    ax.set_ylabel("|Attack Vulnerability Gap|  |Tamp. Attack − Input Attack|", fontsize=10)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4)
 
     plt.tight_layout()
