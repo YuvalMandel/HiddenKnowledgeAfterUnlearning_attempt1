@@ -183,7 +183,7 @@ def main():
     probe_rows     = load_csv_as_dict(probe_path,     key_col="method")
     base_probe_rows = load_csv_as_dict(base_probe_path, key_col="method")
 
-    methods, hk_scores, input_att, tamp_att = [], [], [], []
+    methods, hk_scores, delta_att = [], [], []
 
     for llmgat_name, our_name in METHOD_MAP.items():
         if llmgat_name not in llmgat_rows:
@@ -211,86 +211,71 @@ def main():
         hk        = probe_val - gen_acc
 
         try:
-            ia = float(lg.get("WMDP, Best Input Attack") or "nan")
-            ta = float(lg.get("WMDP, Best Tamp. Attack") or "nan")
+            ia    = float(lg.get("WMDP, Best Input Attack") or "nan")
+            ta    = float(lg.get("WMDP, Best Tamp. Attack") or "nan")
+            delta = ta - ia
         except ValueError:
-            ia, ta = float("nan"), float("nan")
+            delta = float("nan")
 
         methods.append(llmgat_name)
         hk_scores.append(hk)
-        input_att.append(ia)
-        tamp_att.append(ta)
+        delta_att.append(delta)
 
         print(f"  {llmgat_name:25s}  gen={gen_acc:.3f}  probe={probe_val:.3f}"
-              f"  hk={hk:+.3f}  input={ia:.2f}  tamp={ta:.2f}")
+              f"  hk={hk:+.3f}  tamp-input={delta:+.3f}")
 
     if not methods:
         raise RuntimeError("No methods matched.")
 
     hk    = np.array(hk_scores, dtype=float)
-    ia    = np.array(input_att,  dtype=float)
-    ta    = np.array(tamp_att,   dtype=float)
+    delta = np.array(delta_att,  dtype=float)
     short = [SHORT_NAME[n] for n in methods]
 
-    # Axis limits — same scale for both series
     valid_hk = hk[~np.isnan(hk)]
-    valid_y  = np.concatenate([ia[~np.isnan(ia)], ta[~np.isnan(ta)]])
+    valid_y  = delta[~np.isnan(delta)]
     pad_x = max((valid_hk.max() - valid_hk.min()) * 0.15, 0.02)
     pad_y = max((valid_y.max()  - valid_y.min())  * 0.15, 0.02)
     xlim  = (valid_hk.min() - pad_x, valid_hk.max() + pad_x)
     ylim  = (valid_y.min()  - pad_y, valid_y.max()  + pad_y)
 
     # ---------------------------------------------------------------------------
-    # Single plot with both series
+    # Single plot
     # ---------------------------------------------------------------------------
-    COLOR_IA = "#1f77b4"   # blue
-    COLOR_TA = "#d62728"   # red
+    COLOR = "#2ca02c"   # green
 
     probe_lbl = f"{args.probe_type.upper()} / {args.probe_clf} / {args.probe_metric}"
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.suptitle(
-        f"Hidden Knowledge Gap vs. LLM-GAT Attack Robustness\n"
+        f"Hidden Knowledge Gap vs. Attack Vulnerability Gap\n"
         f"probe: {probe_lbl}   |   hidden knowledge = probe score − gen. acc.",
         fontsize=11,
     )
 
-    for y, color, label in [
-        (ia, COLOR_IA, "Best Input Attack"),
-        (ta, COLOR_TA, "Best Tamp. Attack"),
-    ]:
-        fit_line(ax, hk, y, color)
-        for xi, yi, name in zip(hk, y, short):
-            if np.isnan(xi) or np.isnan(yi):
-                continue
-            ax.scatter(xi, yi, color=color, s=80, zorder=3,
-                       edgecolors="white", linewidths=0.6, label=label)
-            ax.annotate(name, xy=(xi, yi), xytext=(5, 4),
-                        textcoords="offset points", fontsize=8, color=color)
+    fit_line(ax, hk, delta, COLOR)
+    for xi, yi, name in zip(hk, delta, short):
+        if np.isnan(xi) or np.isnan(yi):
+            continue
+        ax.scatter(xi, yi, color=COLOR, s=80, zorder=3,
+                   edgecolors="white", linewidths=0.6)
+        ax.annotate(name, xy=(xi, yi), xytext=(5, 4),
+                    textcoords="offset points", fontsize=8, color="#222222")
 
-    annotate_r(ax, hk, ia, COLOR_IA, "Input Attack", 0.93)
-    annotate_r(ax, hk, ta, COLOR_TA, "Tamp. Attack", 0.83)
+    annotate_r(ax, hk, delta, COLOR, "Tamp. − Input", 0.93)
 
-    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
+    ax.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
     ax.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.5)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_xlabel("Hidden Knowledge Gap  (probe score − gen. acc.)", fontsize=10)
-    ax.set_ylabel("WMDP Attack Score", fontsize=10)
+    ax.set_ylabel("Attack Vulnerability Gap  (Tamp. Attack − Input Attack)", fontsize=10)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4)
-
-    # Deduplicate legend entries
-    handles, labels = ax.get_legend_handles_labels()
-    seen = {}
-    for h, l in zip(handles, labels):
-        seen.setdefault(l, h)
-    ax.legend(seen.values(), seen.keys(), fontsize=9, loc="lower right")
 
     plt.tight_layout()
 
     probe_stem = Path(args.probe_table).stem.replace("summary_", "")
     tag = f"{args.probe_type}_{args.probe_clf}_{args.probe_metric}"
     out = Path(args.out) if args.out else (
-        data_dir / f"correlation_hk_vs_attacks_{probe_stem}_{tag}.png"
+        data_dir / f"correlation_hk_vs_attack_gap_{probe_stem}_{tag}.png"
     )
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
