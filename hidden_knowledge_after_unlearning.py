@@ -1028,8 +1028,8 @@ def _make_per_layer_pipeline(clf_name: str) -> Pipeline:
     Per-layer pipeline for a single hidden-state vector (shape: hidden_dim).
 
     LR:       StandardScaler → LogisticRegression
-    RF:       StandardScaler → PCA(PCA_DIMS_PER_LAYER) → RandomForest
-    AdaBoost: StandardScaler → PCA(PCA_DIMS_PER_LAYER) → AdaBoost
+    RF:       StandardScaler → RandomForest  (all dims, no PCA)
+    AdaBoost: StandardScaler → AdaBoost      (all dims, no PCA)
     """
     if clf_name == "LR":
         return Pipeline([
@@ -1039,13 +1039,11 @@ def _make_per_layer_pipeline(clf_name: str) -> Pipeline:
     elif clf_name == "RF":
         return Pipeline([
             ("sc",  StandardScaler()),
-            ("pca", PCA(n_components=PCA_DIMS_PER_LAYER, random_state=42)),
             ("clf", RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)),
         ])
     elif clf_name == "AdaBoost":
         return Pipeline([
             ("sc",  StandardScaler()),
-            ("pca", PCA(n_components=PCA_DIMS_PER_LAYER, random_state=42)),
             ("clf", AdaBoostClassifier(n_estimators=100, random_state=42)),
         ])
     raise ValueError(f"Unknown clf_name: {clf_name}")
@@ -2557,7 +2555,7 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if probe_set is None:
         print("\n" + "=" * 60)
         print("Training probe set — BASE model (bio)")
-        print("  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print("  Per-layer: LR / RF / AdaBoost  ×  all layers")
         print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
               f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
@@ -2573,7 +2571,7 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if cyber_probe_set is None:
         print("\n" + "=" * 60)
         print("Training probe set — BASE model (cyber)")
-        print("  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print("  Per-layer: LR / RF / AdaBoost  ×  all layers")
         print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
               f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
@@ -2953,7 +2951,7 @@ def run_method(method_name: str,
     if method_probe_set is None:
         print(f"\n" + "=" * 60)
         print(f"Training bio probe set — {method_name}")
-        print(f"  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print(f"  Per-layer: LR / RF / AdaBoost  ×  all layers")
         print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
               f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
@@ -2971,7 +2969,7 @@ def run_method(method_name: str,
     if cyber_method_probe_set is None:
         print(f"\n" + "=" * 60)
         print(f"Training cyber probe set — {method_name}")
-        print(f"  Per-layer: LR / RF(PCA-64) / AdaBoost(PCA-64)  ×  all layers")
+        print(f"  Per-layer: LR / RF / AdaBoost  ×  all layers")
         print(f"  Multi-layer: LR / RF / AdaBoost  on layers "
               f"{multi_layer_start}–{multi_layer_end} (PCA-256)")
         print("=" * 60)
