@@ -2376,8 +2376,14 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                 and ck.get("cyber_subsets") is not None
                 and len(ck.get("cyber_test_answers") or []) > 0
                 and ck.get("cyber_gibberish_qids") is not None):
-            print("[base] Complete checkpoint found. Nothing to recompute.")
-            return
+            _csvs_done = all(
+                (CHECKPOINT_DIR / f"base_bio_logit_{s}.csv").exists() and
+                (CHECKPOINT_DIR / f"base_cyber_logit_{s}.csv").exists()
+                for s in ("train", "val", "test")
+            )
+            if _csvs_done:
+                print("[base] Complete checkpoint found. Nothing to recompute.")
+                return
 
     # ── Load partial state ────────────────────────────────────────────────────
     partial = _load_partial("base")
@@ -2764,8 +2770,14 @@ def run_method(method_name: str,
         _has_cyber_sub    = "cyber_subsets" in _existing
         _has_cyber_mcq    = "cyber_mcq_stats" in _existing
         if _has_cross and _has_mcq and _has_cyber_sub and _has_cyber_mcq:
-            print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
-            return
+            _csvs_done = all(
+                (CHECKPOINT_DIR / f"{sn}_bio_logit_{s}.csv").exists() and
+                (CHECKPOINT_DIR / f"{sn}_cyber_logit_{s}.csv").exists()
+                for s in ("train", "val", "test")
+            )
+            if _csvs_done:
+                print(f"[{method_name}] Complete checkpoint found. Nothing to recompute.")
+                return
         if not _has_cross:
             # Older checkpoint: patch the missing cross-probe quadrant without full rerun.
             print(f"[{method_name}] Checkpoint missing cross-probe stats — patching now.")
