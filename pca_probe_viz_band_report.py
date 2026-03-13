@@ -224,8 +224,8 @@ def fig_text_page(lines, title="Run Summary"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_hs",      default=str(_CHECKPOINT_DIR / "base_hs_train.npy"))
-    ap.add_argument("--post_hs",      default=str(_CHECKPOINT_DIR / "PB_J_hs_train.npy"))
-    ap.add_argument("--tf_pairs_csv", default=str(_DATA_DIR / "wmdp_tf_pairs.csv"))
+    ap.add_argument("--post_hs",      default=str(_CHECKPOINT_DIR / "sweep_PB_J" / "ck1" / "hs_train.npy"))
+    ap.add_argument("--tf_pairs_csv", default=str(_CHECKPOINT_DIR / "wmdp_tf_pairs.csv"))
     ap.add_argument("--split",        default="train")
 
     ap.add_argument("--layers",    default="12-22", help='e.g. "20" or "12-22"')

@@ -5,9 +5,9 @@ REM ==========================================
 
 set PYTHON=python
 
-set BASE_HS=base_hs_train.npy
-set METHOD_HS=PB_J_hs_train.npy
-set LABELS=wmdp_tf_pairs_train.csv
+set BASE_HS=checkpoints/base_hs_train.npy
+set METHOD_HS=checkpoints/sweep_PB_J/ck1/hs_train.npy
+set LABELS=checkpoints/wmdp_tf_pairs.csv
 set SCRIPT=pca_probe_viz_band_report.py
 
 set LAYER1=12
