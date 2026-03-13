@@ -358,15 +358,20 @@ def run_one(cfg: argparse.Namespace) -> dict:
 
     print(f"[done] {tag}  acc={acc:.4f}  ->  {out}")
     return {
-        "tag": tag,
+        "tag":    tag,
         "method": getattr(cfg, "_method", None),
         "ck":     getattr(cfg, "_ck",     None),
         "pcaK_acc": acc, "acc_post": acc_post,
         "ks": ks, "accs": accs,
+        "dr": dr,
+        # raw arrays for combined overlaid plots (shared PCA space — same X_base → same axes)
+        "X2_base":     X2_base,
+        "X2_post":     X2_post if cfg.post_hs else None,
+        "lr2_base":    lr2,
+        "lr2_post":    lr2_post if cfg.post_hs else None,
         "z_base":      z_base,
         "z_post_proj": z_post_proj,
         "y":           y,
-        "dr": dr,
         "p_scatter": str(p_scatter),
         "p_acc":     str(p_acc),
         "p_hist":    str(p_hist),
@@ -380,10 +385,16 @@ def run_one(cfg: argparse.Namespace) -> dict:
 def make_combined_figures(results_ok: list, methods: list, cks: list,
                           base_out: Path, layers: str, band_mode: str, pca_k: int):
     """
-    Create three combined figures from all completed runs:
-      1. combined_scatter  — grid rows=methods, cols=checkpoints (imread)
-      2. combined_acc_vs_pc — overlaid accuracy curves
-      3. combined_truth_axis_hist — grid rows=methods, cols=checkpoints (imread)
+    Create three combined figures — everything overlaid on a single axes each.
+
+    All runs share the same PCA coordinate system (PCA is fit on the same
+    X_base with the same random_state), so post-model clouds can be plotted
+    together with the base cloud in one scatter.
+
+    1. combined_scatter        — base cloud (gray) + each post cloud (colored)
+                                 + base boundary (solid black) + post boundaries (dashed)
+    2. combined_acc_vs_pc      — all acc curves overlaid; color=method, style=ck
+    3. combined_truth_axis_hist — base dist (gray filled) + each post dist (step, colored)
     """
     if not results_ok:
         return
@@ -391,69 +402,93 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     base_out = Path(base_out)
     ctag = make_combined_tag(methods, cks, layers, band_mode, pca_k)
 
-    n_m = len(methods)
-    n_c = len(cks)
+    n = len(results_ok)
+    cmap = plt.get_cmap("tab10" if n <= 10 else "tab20")
+    colors   = [cmap(i / max(n - 1, 1)) for i in range(n)]
+    ls_cycle = ["-", "--", "-.", ":"]          # linestyle cycles over checkpoints
 
-    # lookup (method, ck) -> result
-    lut = {(r["method"], r["ck"]): r for r in results_ok
-           if r.get("method") is not None and r.get("ck") is not None}
-
-    cell_w, cell_h = 4.5, 3.8   # inches per cell
+    def _color_ls(r, idx):
+        c  = r.get("ck")
+        ls = ls_cycle[(c - 1) % len(ls_cycle)] if isinstance(c, int) else "-"
+        return colors[idx], ls
 
     # ------------------------------------------------------------------ #
-    # 1. Scatter grid                                                      #
+    # 1. Combined scatter — shared PCA space                               #
     # ------------------------------------------------------------------ #
-    fig, axes = plt.subplots(n_m, n_c,
-                             figsize=(cell_w * n_c, cell_h * n_m),
-                             squeeze=False)
-    for i, m in enumerate(methods):
-        for j, c in enumerate(cks):
-            ax = axes[i][j]
-            r  = lut.get((m, c))
-            p  = Path(r["p_scatter"]) if r else None
-            if p and p.exists():
-                ax.imshow(plt.imread(p))
-                acc_str = f"acc={r['pcaK_acc']:.3f}"
-                if r.get("acc_post") is not None:
-                    acc_str += f"  post={r['acc_post']:.3f}"
-                ax.set_title(f"{m}  ck{c}\n{acc_str}", fontsize=7)
-            else:
-                ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=10)
-            ax.axis("off")
-        axes[i][0].set_ylabel(m, fontsize=8)
-    for j, c in enumerate(cks):
-        axes[0][j].set_title(f"ck{c}\n" + axes[0][j].get_title(), fontsize=7)
-    fig.suptitle(f"PCA Scatter + Boundary  |  layers={layers}  {band_mode}  pca={pca_k}",
-                 fontsize=11, y=1.01)
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    # base cloud once (from first result — identical across all runs)
+    r0 = results_ok[0]
+    X2b, y0 = r0["X2_base"], r0["y"]
+    ax.scatter(X2b[y0 == 0, 0], X2b[y0 == 0, 1],
+               s=8, alpha=0.25, color="silver", label="Base: False")
+    ax.scatter(X2b[y0 == 1, 0], X2b[y0 == 1, 1],
+               s=8, alpha=0.25, color="gray",   label="Base: True")
+
+    # compute meshgrid from union of all data
+    all_x = np.concatenate([r["X2_base"][:, 0] for r in results_ok] +
+                           [r["X2_post"][:, 0] for r in results_ok if r.get("X2_post") is not None])
+    all_y = np.concatenate([r["X2_base"][:, 1] for r in results_ok] +
+                           [r["X2_post"][:, 1] for r in results_ok if r.get("X2_post") is not None])
+    x0, x1 = np.percentile(all_x, 0.5), np.percentile(all_x, 99.5)
+    y0_, y1 = np.percentile(all_y, 0.5), np.percentile(all_y, 99.5)
+    px = 0.05 * (x1 - x0 + 1e-9);  py = 0.05 * (y1 - y0_ + 1e-9)
+    xx, yy = np.meshgrid(np.linspace(x0 - px, x1 + px, 300),
+                         np.linspace(y0_ - py, y1 + py, 300))
+    grid = np.c_[xx.ravel(), yy.ravel()]
+
+    # base boundary (solid black)
+    zz_base = r0["lr2_base"].predict_proba(grid)[:, 1].reshape(xx.shape)
+    ax.contour(xx, yy, zz_base, levels=[0.5], linewidths=2.5, colors="black")
+
+    # each run: post cloud + post boundary
+    for idx, r in enumerate(results_ok):
+        col, ls = _color_ls(r, idx)
+        label   = r["tag"]
+        x2p     = r.get("X2_post")
+        lr2p    = r.get("lr2_post")
+        if x2p is not None:
+            y_r = r["y"]
+            ax.scatter(x2p[y_r == 0, 0], x2p[y_r == 0, 1],
+                       s=8, alpha=0.4, color=col, marker="x")
+            ax.scatter(x2p[y_r == 1, 0], x2p[y_r == 1, 1],
+                       s=8, alpha=0.4, color=col, marker="+")
+        if lr2p is not None:
+            zz = lr2p.predict_proba(grid)[:, 1].reshape(xx.shape)
+            ax.contour(xx, yy, zz, levels=[0.5], linewidths=1.5,
+                       colors=[col], linestyles=[ls])
+        # legend proxy
+        acc_str = f"acc={r['pcaK_acc']:.3f}"
+        if r.get("acc_post") is not None:
+            acc_str += f" / post={r['acc_post']:.3f}"
+        ax.plot([], [], color=col, linestyle=ls, linewidth=2,
+                label=f"{label}  ({acc_str})")
+
+    ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
+    ax.set_title(f"PCA-2D Scatter + LR Boundaries  |  layers={layers}  {band_mode}  pca={pca_k}")
+    ncol = max(1, math.ceil((n + 2) / 12))
+    ax.legend(fontsize=7, ncol=ncol, loc="best")
     plt.tight_layout()
     out_scatter = base_out / f"combined_scatter__{ctag}.png"
-    fig.savefig(out_scatter, dpi=120, bbox_inches="tight")
+    fig.savefig(out_scatter, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[combined] scatter      -> {out_scatter}")
 
     # ------------------------------------------------------------------ #
-    # 2. Acc-vs-PC overlay                                                 #
+    # 2. Combined acc-vs-PC overlay                                        #
     # ------------------------------------------------------------------ #
-    cmap   = plt.get_cmap("tab20")
-    colors = [cmap(k / max(len(results_ok) - 1, 1)) for k in range(len(results_ok))]
-    # linestyle cycles per checkpoint so methods are distinguished by color
-    ls_cycle = ["-", "--", "-.", ":"]
-
     fig, ax = plt.subplots(figsize=(10, 5))
     for idx, r in enumerate(results_ok):
         ks_r, accs_r = r.get("ks"), r.get("accs")
         if not ks_r:
             continue
-        m, c = r.get("method", "?"), r.get("ck", "?")
-        ls   = ls_cycle[(c - 1) % len(ls_cycle)] if isinstance(c, int) else "-"
-        label = f"{m}  ck{c}  ({r['pcaK_acc']:.3f})"
-        ax.plot(ks_r, accs_r, label=label, color=colors[idx],
-                linewidth=1.5, linestyle=ls)
-
+        col, ls = _color_ls(r, idx)
+        ax.plot(ks_r, accs_r, color=col, linestyle=ls, linewidth=1.8,
+                label=f"{r['tag']}  ({r['pcaK_acc']:.3f})")
     ax.set_xlabel("Number of PCs"); ax.set_ylabel("Train accuracy (LR)")
     ax.set_title(f"Acc vs PC count  |  layers={layers}  {band_mode}  pca={pca_k}")
     ax.set_ylim(0, 1); ax.grid(True, alpha=0.25)
-    ncol = max(1, math.ceil(len(results_ok) / 14))
+    ncol = max(1, math.ceil(n / 14))
     ax.legend(fontsize=7, ncol=ncol, loc="lower right")
     plt.tight_layout()
     out_acc = base_out / f"combined_acc_vs_pc__{ctag}.png"
@@ -462,27 +497,39 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     print(f"[combined] acc_vs_pc    -> {out_acc}")
 
     # ------------------------------------------------------------------ #
-    # 3. Truth-axis histogram grid                                         #
+    # 3. Combined truth-axis histogram overlay                             #
     # ------------------------------------------------------------------ #
-    fig, axes = plt.subplots(n_m, n_c,
-                             figsize=(cell_w * n_c, cell_h * n_m),
-                             squeeze=False)
-    for i, m in enumerate(methods):
-        for j, c in enumerate(cks):
-            ax = axes[i][j]
-            r  = lut.get((m, c))
-            p  = Path(r["p_hist"]) if r else None
-            if p and p.exists():
-                ax.imshow(plt.imread(p))
-                ax.set_title(f"{m}  ck{c}", fontsize=7)
-            else:
-                ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=10)
-            ax.axis("off")
-    fig.suptitle(f"Truth-axis Histogram  |  layers={layers}  {band_mode}  pca={pca_k}",
-                 fontsize=11, y=1.01)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bins = 50
+
+    # base distributions once (gray filled)
+    z0_b = r0["z_base"];  y_b = r0["y"]
+    ax.hist(z0_b[y_b == 0], bins=bins, alpha=0.3, density=True,
+            color="silver", label="Base: False")
+    ax.hist(z0_b[y_b == 1], bins=bins, alpha=0.3, density=True,
+            color="gray",   label="Base: True")
+
+    # each run's post projections (step outlines)
+    for idx, r in enumerate(results_ok):
+        zp = r.get("z_post_proj")
+        if zp is None:
+            continue
+        col, ls = _color_ls(r, idx)
+        y_r = r["y"]
+        ax.hist(zp[y_r == 0], bins=bins, density=True, histtype="step",
+                linewidth=1.5, linestyle=ls, color=col, alpha=0.8,
+                label=f"{r['tag']} F")
+        ax.hist(zp[y_r == 1], bins=bins, density=True, histtype="step",
+                linewidth=1.5, linestyle=ls, color=col, alpha=0.8,
+                label=f"{r['tag']} T")
+
+    ax.set_xlabel("Score z = w·x + b"); ax.set_ylabel("Density")
+    ax.set_title(f"Truth-axis Projection  |  layers={layers}  {band_mode}  pca={pca_k}")
+    ncol = max(1, math.ceil((2 * n + 2) / 18))
+    ax.legend(fontsize=6, ncol=ncol, loc="best")
     plt.tight_layout()
     out_hist = base_out / f"combined_truth_axis_hist__{ctag}.png"
-    fig.savefig(out_hist, dpi=120, bbox_inches="tight")
+    fig.savefig(out_hist, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[combined] truth_hist   -> {out_hist}")
 
