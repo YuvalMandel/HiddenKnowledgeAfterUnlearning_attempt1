@@ -186,6 +186,22 @@ def _save_partial(sn: str, updates: dict):
     print(f"  [cache] Partial state updated for '{sn}'", flush=True)
 
 
+def _save_logit_csv(scores, pairs, split: str, out_path: Path):
+    """Write per-row logit scores to CSV, row-aligned with the corresponding HS .npy file.
+    Columns: row_id, split, true_logit, false_logit, tf_margin (= true_logit - false_logit).
+    """
+    import csv as _csv
+    out_path = Path(out_path)
+    out_path.parent.mkdir(exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        w.writerow(["row_id", "split", "true_logit", "false_logit", "tf_margin"])
+        for i, row in enumerate(scores):
+            t, fa = float(row[0]), float(row[1])
+            w.writerow([i, split, f"{t:.6f}", f"{fa:.6f}", f"{t - fa:.6f}"])
+    print(f"  [cache] Saved logit CSV ({len(scores)} rows) -> {out_path.name}", flush=True)
+
+
 # =============================================================================
 # Base checkpoint
 # =============================================================================
@@ -2404,9 +2420,14 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     need_cyber_mcq      = "cyber_mcq_answers"       not in partial
     need_bio_mcq_logit  = "bio_mcq_logit_scores"   not in partial
     need_cyber_mcq_logit= "cyber_mcq_logit_scores" not in partial
+    need_bio_logit_csvs   = not all((CHECKPOINT_DIR / f"base_bio_logit_{s}.csv").exists()
+                                    for s in ("train", "val", "test"))
+    need_cyber_logit_csvs = not all((CHECKPOINT_DIR / f"base_cyber_logit_{s}.csv").exists()
+                                    for s in ("train", "val", "test"))
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
                       or need_log or need_cyber_log or need_mcq or need_cyber_mcq
-                      or need_bio_mcq_logit or need_cyber_mcq_logit)
+                      or need_bio_mcq_logit or need_cyber_mcq_logit
+                      or need_bio_logit_csvs or need_cyber_logit_csvs)
 
     if need_model:
         print("\nLoading base model...")
@@ -2467,7 +2488,7 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
             cyber_test_answers = partial["cyber_test_answers"]
             print("[base] cyber_test_answers loaded from partial cache.")
 
-        if need_log or need_cyber_log:
+        if need_log or need_cyber_log or need_bio_logit_csvs or need_cyber_logit_csvs:
             true_ids, false_ids = get_tf_token_ids(base_tok)
             if need_log:
                 print("\nComputing logit scores — BASE — bio test set")
@@ -2485,6 +2506,26 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
                 _save_partial("base", {"cyber_logit_scores": cyber_logit_scores})
             else:
                 cyber_logit_scores = partial["cyber_logit_scores"]
+            for _split, _pairs_s in [("train", train_pairs), ("val", val_pairs),
+                                      ("test", test_pairs)]:
+                _csv_p = CHECKPOINT_DIR / f"base_bio_logit_{_split}.csv"
+                if not _csv_p.exists():
+                    if _split != "test":
+                        print(f"\nComputing logit scores — BASE — bio {_split} set (CSV export)")
+                    _sc = logit_scores if _split == "test" else logit_tf_scores(
+                        base_model, base_tok, _pairs_s,
+                        LOGIT_BATCH_SIZE, true_ids, false_ids, f"base/bio-{_split}-logit")
+                    _save_logit_csv(_sc, _pairs_s, _split, _csv_p)
+            for _split, _pairs_s in [("train", cyber_train_pairs), ("val", cyber_val_pairs),
+                                      ("test", cyber_test_pairs)]:
+                _csv_p = CHECKPOINT_DIR / f"base_cyber_logit_{_split}.csv"
+                if not _csv_p.exists():
+                    if _split != "test":
+                        print(f"\nComputing logit scores — BASE — cyber {_split} set (CSV export)")
+                    _sc = cyber_logit_scores if _split == "test" else logit_tf_scores(
+                        base_model, base_tok, _pairs_s,
+                        LOGIT_BATCH_SIZE, true_ids, false_ids, f"base/cyber-{_split}-logit")
+                    _save_logit_csv(_sc, _pairs_s, _split, _csv_p)
         else:
             logit_scores       = partial["logit_scores"]
             cyber_logit_scores = partial["cyber_logit_scores"]
@@ -2786,9 +2827,14 @@ def run_method(method_name: str,
     need_cyber_mcq      = "cyber_mcq_answers"       not in partial
     need_bio_mcq_logit  = "bio_mcq_logit_scores"   not in partial
     need_cyber_mcq_logit= "cyber_mcq_logit_scores" not in partial
+    need_bio_logit_csvs   = not all((CHECKPOINT_DIR / f"{sn}_bio_logit_{s}.csv").exists()
+                                    for s in ("train", "val", "test"))
+    need_cyber_logit_csvs = not all((CHECKPOINT_DIR / f"{sn}_cyber_logit_{s}.csv").exists()
+                                    for s in ("train", "val", "test"))
     need_model     = (need_hs or need_cyber_hs or need_gen or need_cyber_gen
                       or need_log or need_cyber_log or need_mcq or need_cyber_mcq
-                      or need_bio_mcq_logit or need_cyber_mcq_logit)
+                      or need_bio_mcq_logit or need_cyber_mcq_logit
+                      or need_bio_logit_csvs or need_cyber_logit_csvs)
 
     if need_model:
         print(f"\nLoading {method_name} model...")
@@ -2849,7 +2895,7 @@ def run_method(method_name: str,
             cyber_test_answers = partial["cyber_test_answers"]
             print(f"[{method_name}] cyber_test_answers loaded from partial cache.")
 
-        if need_log or need_cyber_log:
+        if need_log or need_cyber_log or need_bio_logit_csvs or need_cyber_logit_csvs:
             true_ids, false_ids = get_tf_token_ids(un_tok)
             if need_log:
                 print(f"\nComputing logit scores — {method_name} — bio test set")
@@ -2867,6 +2913,26 @@ def run_method(method_name: str,
                 _save_partial(sn, {"cyber_logit_scores": cyber_logit_scores})
             else:
                 cyber_logit_scores = partial["cyber_logit_scores"]
+            for _split, _pairs_s in [("train", train_pairs), ("val", val_pairs),
+                                      ("test", test_pairs)]:
+                _csv_p = CHECKPOINT_DIR / f"{sn}_bio_logit_{_split}.csv"
+                if not _csv_p.exists():
+                    if _split != "test":
+                        print(f"\nComputing logit scores — {method_name} — bio {_split} set (CSV export)")
+                    _sc = logit_scores if _split == "test" else logit_tf_scores(
+                        un_model, un_tok, _pairs_s,
+                        LOGIT_BATCH_SIZE, true_ids, false_ids, f"{method_name}/bio-{_split}-logit")
+                    _save_logit_csv(_sc, _pairs_s, _split, _csv_p)
+            for _split, _pairs_s in [("train", cyber_train_pairs), ("val", cyber_val_pairs),
+                                      ("test", cyber_test_pairs)]:
+                _csv_p = CHECKPOINT_DIR / f"{sn}_cyber_logit_{_split}.csv"
+                if not _csv_p.exists():
+                    if _split != "test":
+                        print(f"\nComputing logit scores — {method_name} — cyber {_split} set (CSV export)")
+                    _sc = cyber_logit_scores if _split == "test" else logit_tf_scores(
+                        un_model, un_tok, _pairs_s,
+                        LOGIT_BATCH_SIZE, true_ids, false_ids, f"{method_name}/cyber-{_split}-logit")
+                    _save_logit_csv(_sc, _pairs_s, _split, _csv_p)
         else:
             logit_scores       = partial["logit_scores"]
             cyber_logit_scores = partial["cyber_logit_scores"]
