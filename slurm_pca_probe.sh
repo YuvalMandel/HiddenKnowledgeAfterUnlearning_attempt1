@@ -13,8 +13,8 @@
 # Usage (all args are optional; defaults match run_pca_probe_band_report.cmd):
 #
 #   sbatch slurm_pca_probe.sh
-#   sbatch slurm_pca_probe.sh --post_hs checkpoints/RMU_hs_train.npy
-#   sbatch slurm_pca_probe.sh --layers 20 --pca_components 20 --post_hs checkpoints/GradDiff_hs_train.npy
+#   sbatch slurm_pca_probe.sh --post_hs checkpoints/sweep_RMU/ck1/hs_train.npy
+#   sbatch slurm_pca_probe.sh --layers 20 --pca_components 20 --post_hs checkpoints/sweep_GradDiff/ck1/hs_train.npy
 #
 # All extra arguments are forwarded verbatim to the Python script.
 # ============================================================
