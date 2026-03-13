@@ -402,8 +402,11 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     base_out = Path(base_out)
     ctag = make_combined_tag(methods, cks, layers, band_mode, pca_k)
 
+    # Sort for consistent ordering: method then checkpoint
+    results_ok = sorted(results_ok, key=lambda r: (r.get("method") or "", r.get("ck") or 0))
+
     n = len(results_ok)
-    cmap = plt.get_cmap("tab10" if n <= 10 else "tab20")
+    cmap = plt.get_cmap("rainbow")
     colors   = [cmap(i / max(n - 1, 1)) for i in range(n)]
     ls_cycle = ["-", "--", "-.", ":"]          # linestyle cycles over checkpoints
 
@@ -510,17 +513,18 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
             color="gray",   label="Base: True")
 
     # each run's post projections (step outlines)
+    # same color per checkpoint; True=solid, False=dotted
     for idx, r in enumerate(results_ok):
         zp = r.get("z_post_proj")
         if zp is None:
             continue
-        col, ls = _color_ls(r, idx)
+        col = colors[idx]
         y_r = r["y"]
         ax.hist(zp[y_r == 0], bins=bins, density=True, histtype="step",
-                linewidth=1.5, linestyle=ls, color=col, alpha=0.8,
+                linewidth=1.5, linestyle=":", color=col, alpha=0.8,
                 label=f"{r['tag']} F")
         ax.hist(zp[y_r == 1], bins=bins, density=True, histtype="step",
-                linewidth=1.5, linestyle=ls, color=col, alpha=0.8,
+                linewidth=1.5, linestyle="-", color=col, alpha=0.8,
                 label=f"{r['tag']} T")
 
     ax.set_xlabel("Score z = w·x + b"); ax.set_ylabel("Density")
