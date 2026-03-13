@@ -50,7 +50,6 @@ METHOD_MAP = {
     "RepNoise":   "RepNoise",
     "ELM":        "ELM",
     "RR":         "RR",
-    "TAR":        "TAR",
     "PB&J":       "PB&J",
 }
 
@@ -61,7 +60,6 @@ SHORT_NAME = {
     "RepNoise":   "RepNoise",
     "ELM":        "ELM",
     "RR":         "RR",
-    "TAR":        "TAR",
     "PB&J":       "PB&J",
 }
 
@@ -249,32 +247,26 @@ def main():
     probe_stem = Path(args.probe_table).stem.replace("summary_", "")
 
     # -----------------------------------------------------------------------
-    # scores mode — two side-by-side subplots
+    # scores mode — single plot, Best Tamp. Attack only
     # -----------------------------------------------------------------------
     if args.plot_y == "scores":
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        C_TAMP = "#d62728"   # red
+
+        fig, ax = plt.subplots(figsize=(8, 6))
         fig.suptitle(
-            f"WMDP Attack Score vs. Hidden Knowledge Gap\n"
+            f"WMDP Best Tamp. Attack vs. Hidden Knowledge Gap\n"
             f"probe: {probe_lbl}   |   hidden knowledge = probe score − {args.gen_col}",
             fontsize=11,
         )
 
-        C_INPUT = "#1f77b4"   # blue
-        C_TAMP  = "#d62728"   # red
-
-        for ax, y_arr, color, atk_lbl in [
-            (axes[0], ia, C_INPUT, "Best Input Attack"),
-            (axes[1], ta, C_TAMP,  "Best Tamp. Attack"),
-        ]:
-            fit_line(ax, hk, y_arr, color)
-            scatter_with_labels(ax, hk, y_arr, short, color)
-            annotate_r(ax, hk, y_arr, color, atk_lbl, 0.93)
-            style_ax(ax, hk, y_arr, xlabel, f"WMDP {atk_lbl}")
-            ax.set_title(f"WMDP, {atk_lbl}", fontsize=10)
+        fit_line(ax, hk, ta, C_TAMP)
+        scatter_with_labels(ax, hk, ta, short, C_TAMP)
+        annotate_r(ax, hk, ta, C_TAMP, "Best Tamp. Attack", 0.93)
+        style_ax(ax, hk, ta, xlabel, "WMDP Best Tamp. Attack")
 
         plt.tight_layout()
         out = Path(args.out) if args.out else (
-            data_dir / f"correlation_hk_vs_attack_scores_{probe_stem}_{tag}.png"
+            data_dir / f"correlation_hk_vs_tamp_attack_{probe_stem}_{tag}.png"
         )
 
     # -----------------------------------------------------------------------
