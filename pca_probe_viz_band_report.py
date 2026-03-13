@@ -44,9 +44,16 @@ import json
 import zipfile
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend: always saves files, safe on Newton/SLURM
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+# Project layout (resolved relative to this script, works from any cwd)
+_SCRIPT_DIR    = Path(__file__).resolve().parent
+_CHECKPOINT_DIR = _SCRIPT_DIR / "checkpoints"
+_DATA_DIR       = _SCRIPT_DIR / "data"
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -216,9 +223,9 @@ def fig_text_page(lines, title="Run Summary"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base_hs",      default="base_hs_train.npy")
-    ap.add_argument("--post_hs",      default="PB_J_hs_train.npy")
-    ap.add_argument("--tf_pairs_csv", default="wmdp_tf_pairs_train.csv")
+    ap.add_argument("--base_hs",      default=str(_CHECKPOINT_DIR / "base_hs_train.npy"))
+    ap.add_argument("--post_hs",      default=str(_CHECKPOINT_DIR / "PB_J_hs_train.npy"))
+    ap.add_argument("--tf_pairs_csv", default=str(_DATA_DIR / "wmdp_tf_pairs.csv"))
     ap.add_argument("--split",        default="train")
 
     ap.add_argument("--layers",    default="12-22", help='e.g. "20" or "12-22"')
@@ -227,7 +234,7 @@ def main():
     ap.add_argument("--pca_components", type=int, default=40)
     ap.add_argument("--max_pc_curve",   type=int, default=None, help="Max PCs for acc-vs-PC curve (default=min(50,K))")
 
-    ap.add_argument("--out_dir", default="comp_pca_layers12_to_22_pca40")
+    ap.add_argument("--out_dir", default=str(_SCRIPT_DIR / "pca_output" / "comp_pca_layers12_to_22_pca40"))
     ap.add_argument("--lr_C", type=float, default=1.0)
     ap.add_argument("--lr_balanced", action="store_true")
 
