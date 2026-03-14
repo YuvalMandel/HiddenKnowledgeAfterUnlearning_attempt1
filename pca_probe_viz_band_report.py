@@ -26,9 +26,17 @@ Per-run outputs  (inside out_dir/<tag>/):
   report__<tag>.json / .pdf
 
 Combined outputs (inside out_dir/), created when >1 run:
-  combined_scatter__<combined_tag>.png      — grid: rows=methods, cols=checkpoints
-  combined_acc_vs_pc__<combined_tag>.png    — overlaid accuracy curves
-  combined_truth_axis_hist__<combined_tag>.png — grid of histogram images
+  combined_scatter__<combined_tag>.png
+  combined_acc_vs_pc__<combined_tag>.png
+  combined_truth_axis_hist__<combined_tag>.png
+  combined_centers_of_mass__<combined_tag>.png
+  combined_trajectories__<combined_tag>.png   (only when >=2 checkpoints per method)
+
+Marker convention throughout:
+  × (x)  = False class
+  ● (o)  = True  class
+  Base   = gray markers + gray boundary
+  Methods = rainbow-colored markers + colored boundary
 """
 
 import argparse
@@ -36,14 +44,16 @@ import json
 import math
 import zipfile
 import traceback
+from collections import defaultdict
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import matplotlib
-matplotlib.use("Agg")   # non-interactive; must be before other matplotlib imports
+matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -59,6 +69,9 @@ _DATA_DIR       = _SCRIPT_DIR / "data"
 
 ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
 ALL_CKS     = list(range(1, 9))
+
+# Number of pairs to show in trajectory plot (stratified by class)
+N_TRAJ_PER_CLASS = 20
 
 
 # --------------------------------------------------------------------------- #
@@ -142,30 +155,55 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
     return 0.0 if d == 0 else float(np.dot(a, b) / d)
 
 
+def _build_mesh(all_X2_list):
+    """Build a 300×300 meshgrid covering the union of all point clouds."""
+    all_x = np.concatenate([X[:, 0] for X in all_X2_list])
+    all_y = np.concatenate([X[:, 1] for X in all_X2_list])
+    x0, x1 = np.percentile(all_x, 0.5), np.percentile(all_x, 99.5)
+    y0, y1 = np.percentile(all_y, 0.5), np.percentile(all_y, 99.5)
+    px = 0.05 * (x1 - x0 + 1e-9);  py = 0.05 * (y1 - y0 + 1e-9)
+    xx, yy = np.meshgrid(np.linspace(x0 - px, x1 + px, 300),
+                         np.linspace(y0 - py, y1 + py, 300))
+    return xx, yy, np.c_[xx.ravel(), yy.ravel()]
+
+
+def _spread(pts: np.ndarray) -> float:
+    """Mean distance of points from their centroid (concentration proxy)."""
+    if len(pts) < 2:
+        return 1.0
+    c = pts.mean(axis=0)
+    return float(np.mean(np.linalg.norm(pts - c, axis=1))) or 1e-6
+
+
 # --------------------------------------------------------------------------- #
 #  Individual plot functions                                                    #
 # --------------------------------------------------------------------------- #
 def plot_boundary(X2, y, lr2, outpath, overlay=None, title="PCA-2D + LR boundary"):
+    """Single-run scatter with LR boundary.
+    Base = gray ×/● ; overlay (post) = colored ×/●
+    """
     fig = plt.figure(figsize=(8.5, 6.5))
     m1, m0 = y == 1, y == 0
-    plt.scatter(X2[m0, 0], X2[m0, 1], s=12, alpha=0.6, label="Base: False")
-    plt.scatter(X2[m1, 0], X2[m1, 1], s=12, alpha=0.6, label="Base: True")
-    x_min, x_max = np.percentile(X2[:, 0], [0.5, 99.5])
-    y_min, y_max = np.percentile(X2[:, 1], [0.5, 99.5])
-    pad_x = 0.05 * (x_max - x_min + 1e-9)
-    pad_y = 0.05 * (y_max - y_min + 1e-9)
-    xx, yy = np.meshgrid(np.linspace(x_min - pad_x, x_max + pad_x, 300),
-                         np.linspace(y_min - pad_y, y_max + pad_y, 300))
-    grid = np.c_[xx.ravel(), yy.ravel()]
+    # Base: gray, × for False, ● for True
+    plt.scatter(X2[m0, 0], X2[m0, 1], s=14, alpha=0.5,
+                color="gray", marker="x", label="Base: False")
+    plt.scatter(X2[m1, 0], X2[m1, 1], s=14, alpha=0.5,
+                color="gray", marker="o", label="Base: True")
+
+    xx, yy, grid = _build_mesh([X2])
     zz = lr2.predict_proba(grid)[:, 1].reshape(xx.shape)
-    plt.contour(xx, yy, zz, levels=[0.5], linewidths=2)
+    plt.contour(xx, yy, zz, levels=[0.5], linewidths=2, colors=["gray"])
+
     if overlay is not None:
         X2b, yb, lr2b, tag = overlay
         mb1, mb0 = yb == 1, yb == 0
-        plt.scatter(X2b[mb0, 0], X2b[mb0, 1], s=12, alpha=0.35, marker="x", label=f"{tag}: False")
-        plt.scatter(X2b[mb1, 0], X2b[mb1, 1], s=12, alpha=0.35, marker="x", label=f"{tag}: True")
+        plt.scatter(X2b[mb0, 0], X2b[mb0, 1], s=12, alpha=0.35,
+                    marker="x", label=f"{tag}: False")
+        plt.scatter(X2b[mb1, 0], X2b[mb1, 1], s=12, alpha=0.35,
+                    marker="o", label=f"{tag}: True")
         zz2 = lr2b.predict_proba(grid)[:, 1].reshape(xx.shape)
         plt.contour(xx, yy, zz2, levels=[0.5], linewidths=2, linestyles="--")
+
     plt.title(title); plt.xlabel("PC1"); plt.ylabel("PC2")
     plt.legend(loc="best", fontsize=9); plt.tight_layout()
     fig.savefig(outpath, dpi=200); plt.close(fig)
@@ -262,6 +300,7 @@ def run_one(cfg: argparse.Namespace) -> dict:
     z_base = X_base @ w_pre + b_pre
 
     overlay = None; dr = {}; z_post_proj = None; post_metrics = None; acc_post = None
+    X2_post = None; lr2_post = None
 
     if cfg.post_hs:
         hs_post = load_hidden_states(cfg.post_hs)
@@ -364,11 +403,10 @@ def run_one(cfg: argparse.Namespace) -> dict:
         "pcaK_acc": acc, "acc_post": acc_post,
         "ks": ks, "accs": accs,
         "dr": dr,
-        # raw arrays for combined overlaid plots (shared PCA space — same X_base → same axes)
         "X2_base":     X2_base,
-        "X2_post":     X2_post if cfg.post_hs else None,
+        "X2_post":     X2_post,
         "lr2_base":    lr2,
-        "lr2_post":    lr2_post if cfg.post_hs else None,
+        "lr2_post":    lr2_post,
         "z_base":      z_base,
         "z_post_proj": z_post_proj,
         "y":           y,
@@ -384,18 +422,6 @@ def run_one(cfg: argparse.Namespace) -> dict:
 # --------------------------------------------------------------------------- #
 def make_combined_figures(results_ok: list, methods: list, cks: list,
                           base_out: Path, layers: str, band_mode: str, pca_k: int):
-    """
-    Create three combined figures — everything overlaid on a single axes each.
-
-    All runs share the same PCA coordinate system (PCA is fit on the same
-    X_base with the same random_state), so post-model clouds can be plotted
-    together with the base cloud in one scatter.
-
-    1. combined_scatter        — base cloud (gray) + each post cloud (colored)
-                                 + base boundary (solid black) + post boundaries (dashed)
-    2. combined_acc_vs_pc      — all acc curves overlaid; color=method, style=ck
-    3. combined_truth_axis_hist — base dist (gray filled) + each post dist (step, colored)
-    """
     if not results_ok:
         return
 
@@ -406,66 +432,61 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     results_ok = sorted(results_ok, key=lambda r: (r.get("method") or "", r.get("ck") or 0))
 
     n = len(results_ok)
-    cmap = plt.get_cmap("rainbow")
-    colors   = [cmap(i / max(n - 1, 1)) for i in range(n)]
-    ls_cycle = ["-", "--", "-.", ":"]          # linestyle cycles over checkpoints
+    cmap   = plt.get_cmap("rainbow")
+    colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
+    ls_cycle = ["-", "--", "-.", ":"]
 
     def _color_ls(r, idx):
         c  = r.get("ck")
         ls = ls_cycle[(c - 1) % len(ls_cycle)] if isinstance(c, int) else "-"
         return colors[idx], ls
 
+    # shared reference from first result
+    r0     = results_ok[0]
+    X2b    = r0["X2_base"]
+    y0     = r0["y"]
+
+    # meshgrid covering all data
+    all_clouds = [r["X2_base"] for r in results_ok] + \
+                 [r["X2_post"] for r in results_ok if r.get("X2_post") is not None]
+    xx, yy, grid = _build_mesh(all_clouds)
+
+    # base boundary probabilities (reused in several plots)
+    zz_base = r0["lr2_base"].predict_proba(grid)[:, 1].reshape(xx.shape)
+
     # ------------------------------------------------------------------ #
     # 1. Combined scatter — shared PCA space                               #
     # ------------------------------------------------------------------ #
     fig, ax = plt.subplots(figsize=(9, 7))
 
-    # base cloud once (from first result — identical across all runs)
-    r0 = results_ok[0]
-    X2b, y0 = r0["X2_base"], r0["y"]
+    # Base cloud: gray × for False, gray ● for True
     ax.scatter(X2b[y0 == 0, 0], X2b[y0 == 0, 1],
-               s=8, alpha=0.25, color="silver", label="Base: False")
+               s=10, alpha=0.25, color="gray", marker="x", label="Base: False")
     ax.scatter(X2b[y0 == 1, 0], X2b[y0 == 1, 1],
-               s=8, alpha=0.25, color="gray",   label="Base: True")
+               s=10, alpha=0.25, color="gray", marker="o", label="Base: True")
 
-    # compute meshgrid from union of all data
-    all_x = np.concatenate([r["X2_base"][:, 0] for r in results_ok] +
-                           [r["X2_post"][:, 0] for r in results_ok if r.get("X2_post") is not None])
-    all_y = np.concatenate([r["X2_base"][:, 1] for r in results_ok] +
-                           [r["X2_post"][:, 1] for r in results_ok if r.get("X2_post") is not None])
-    x0, x1 = np.percentile(all_x, 0.5), np.percentile(all_x, 99.5)
-    y0_, y1 = np.percentile(all_y, 0.5), np.percentile(all_y, 99.5)
-    px = 0.05 * (x1 - x0 + 1e-9);  py = 0.05 * (y1 - y0_ + 1e-9)
-    xx, yy = np.meshgrid(np.linspace(x0 - px, x1 + px, 300),
-                         np.linspace(y0_ - py, y1 + py, 300))
-    grid = np.c_[xx.ravel(), yy.ravel()]
+    # Base boundary: gray solid
+    ax.contour(xx, yy, zz_base, levels=[0.5], linewidths=2.5, colors=["gray"])
 
-    # base boundary (solid black)
-    zz_base = r0["lr2_base"].predict_proba(grid)[:, 1].reshape(xx.shape)
-    ax.contour(xx, yy, zz_base, levels=[0.5], linewidths=2.5, colors="black")
-
-    # each run: post cloud + post boundary
     for idx, r in enumerate(results_ok):
         col, ls = _color_ls(r, idx)
-        label   = r["tag"]
-        x2p     = r.get("X2_post")
-        lr2p    = r.get("lr2_post")
+        x2p  = r.get("X2_post")
+        lr2p = r.get("lr2_post")
         if x2p is not None:
             y_r = r["y"]
             ax.scatter(x2p[y_r == 0, 0], x2p[y_r == 0, 1],
                        s=8, alpha=0.4, color=col, marker="x")
             ax.scatter(x2p[y_r == 1, 0], x2p[y_r == 1, 1],
-                       s=8, alpha=0.4, color=col, marker="+")
+                       s=8, alpha=0.4, color=col, marker="o")
         if lr2p is not None:
             zz = lr2p.predict_proba(grid)[:, 1].reshape(xx.shape)
             ax.contour(xx, yy, zz, levels=[0.5], linewidths=1.5,
                        colors=[col], linestyles=[ls])
-        # legend proxy
         acc_str = f"acc={r['pcaK_acc']:.3f}"
         if r.get("acc_post") is not None:
             acc_str += f" / post={r['acc_post']:.3f}"
         ax.plot([], [], color=col, linestyle=ls, linewidth=2,
-                label=f"{label}  ({acc_str})")
+                label=f"{r['tag']}  ({acc_str})")
 
     ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
     ax.set_title(f"PCA-2D Scatter + LR Boundaries  |  layers={layers}  {band_mode}  pca={pca_k}")
@@ -475,7 +496,7 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     out_scatter = base_out / f"combined_scatter__{ctag}.png"
     fig.savefig(out_scatter, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[combined] scatter      -> {out_scatter}")
+    print(f"[combined] scatter           -> {out_scatter}")
 
     # ------------------------------------------------------------------ #
     # 2. Combined acc-vs-PC overlay                                        #
@@ -497,23 +518,18 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     out_acc = base_out / f"combined_acc_vs_pc__{ctag}.png"
     fig.savefig(out_acc, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[combined] acc_vs_pc    -> {out_acc}")
+    print(f"[combined] acc_vs_pc         -> {out_acc}")
 
     # ------------------------------------------------------------------ #
     # 3. Combined truth-axis histogram overlay                             #
     # ------------------------------------------------------------------ #
     fig, ax = plt.subplots(figsize=(10, 5))
     bins = 50
-
-    # base distributions once (gray filled)
-    z0_b = r0["z_base"];  y_b = r0["y"]
-    ax.hist(z0_b[y_b == 0], bins=bins, alpha=0.3, density=True,
+    z0_b = r0["z_base"]
+    ax.hist(z0_b[y0 == 0], bins=bins, alpha=0.3, density=True,
             color="silver", label="Base: False")
-    ax.hist(z0_b[y_b == 1], bins=bins, alpha=0.3, density=True,
+    ax.hist(z0_b[y0 == 1], bins=bins, alpha=0.3, density=True,
             color="gray",   label="Base: True")
-
-    # each run's post projections (step outlines)
-    # same color per checkpoint; True=solid, False=dotted
     for idx, r in enumerate(results_ok):
         zp = r.get("z_post_proj")
         if zp is None:
@@ -526,7 +542,6 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
         ax.hist(zp[y_r == 1], bins=bins, density=True, histtype="step",
                 linewidth=1.5, linestyle="-", color=col, alpha=0.8,
                 label=f"{r['tag']} T")
-
     ax.set_xlabel("Score z = w·x + b"); ax.set_ylabel("Density")
     ax.set_title(f"Truth-axis Projection  |  layers={layers}  {band_mode}  pca={pca_k}")
     ncol = max(1, math.ceil((2 * n + 2) / 18))
@@ -535,7 +550,185 @@ def make_combined_figures(results_ok: list, methods: list, cks: list,
     out_hist = base_out / f"combined_truth_axis_hist__{ctag}.png"
     fig.savefig(out_hist, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[combined] truth_hist   -> {out_hist}")
+    print(f"[combined] truth_hist        -> {out_hist}")
+
+    # ------------------------------------------------------------------ #
+    # 4. Centers of mass                                                   #
+    #    Same boundary lines as scatter, but only centroids shown.        #
+    #    Marker size ∝ concentration (1 / mean-distance-from-centroid).   #
+    # ------------------------------------------------------------------ #
+    # Pre-compute all spreads to build a global size normalization
+    _all_spreads = []
+    for _mask in [y0 == 0, y0 == 1]:
+        _all_spreads.append(_spread(X2b[_mask]))
+    for r in results_ok:
+        x2p = r.get("X2_post")
+        if x2p is None:
+            continue
+        y_r = r["y"]
+        for _mask in [y_r == 0, y_r == 1]:
+            _all_spreads.append(_spread(x2p[_mask]))
+
+    _concs   = [1.0 / max(s, 1e-6) for s in _all_spreads]
+    _c_min, _c_max = min(_concs), max(_concs)
+    _c_rng   = max(_c_max - _c_min, 1e-9)
+
+    def _com_size(pts):
+        s = _spread(pts)
+        conc = 1.0 / max(s, 1e-6)
+        return 80 + 720 * (conc - _c_min) / _c_rng
+
+    fig_com, ax_com = plt.subplots(figsize=(9, 7))
+
+    # Base boundary: gray solid
+    ax_com.contour(xx, yy, zz_base, levels=[0.5], linewidths=2.5, colors=["gray"])
+
+    # Base centroids
+    for _mask, _marker, _lbl in [(y0 == 0, "x", "Base: False"),
+                                  (y0 == 1, "o", "Base: True")]:
+        _pts = X2b[_mask]
+        _c   = _pts.mean(axis=0)
+        ax_com.scatter([_c[0]], [_c[1]], s=_com_size(_pts),
+                       color="gray", marker=_marker, linewidths=2,
+                       zorder=5, label=_lbl)
+
+    for idx, r in enumerate(results_ok):
+        col, ls = _color_ls(r, idx)
+        x2p  = r.get("X2_post")
+        lr2p = r.get("lr2_post")
+        if x2p is None:
+            continue
+        y_r = r["y"]
+        # Boundary
+        if lr2p is not None:
+            zz = lr2p.predict_proba(grid)[:, 1].reshape(xx.shape)
+            ax_com.contour(xx, yy, zz, levels=[0.5], linewidths=1.5,
+                           colors=[col], linestyles=[ls])
+        # Centroids
+        for _mask, _marker in [(y_r == 0, "x"), (y_r == 1, "o")]:
+            _pts = x2p[_mask]
+            _c   = _pts.mean(axis=0)
+            ax_com.scatter([_c[0]], [_c[1]], s=_com_size(_pts),
+                           color=col, marker=_marker, linewidths=2, zorder=5)
+        # Legend proxy line
+        ax_com.plot([], [], color=col, linestyle=ls, linewidth=2, label=r["tag"])
+
+    ax_com.set_xlabel("PC1"); ax_com.set_ylabel("PC2")
+    ax_com.set_title(
+        f"Centers of Mass  |  layers={layers}  {band_mode}  pca={pca_k}\n"
+        f"size ∝ concentration  ·  × = False  ·  ● = True"
+    )
+    ncol = max(1, math.ceil((n + 2) / 12))
+    ax_com.legend(fontsize=7, ncol=ncol, loc="best")
+    plt.tight_layout()
+    out_com = base_out / f"combined_centers_of_mass__{ctag}.png"
+    fig_com.savefig(out_com, dpi=150, bbox_inches="tight")
+    plt.close(fig_com)
+    print(f"[combined] centers_of_mass   -> {out_com}")
+
+    # ------------------------------------------------------------------ #
+    # 5. Trajectory arrows (only when >=2 checkpoints per method)         #
+    #    base → ck1 → ck2 → … for a stratified subsample of pairs.       #
+    # ------------------------------------------------------------------ #
+    method_groups = defaultdict(list)
+    for r in results_ok:
+        m = r.get("method") or "?"
+        if r.get("X2_post") is not None:
+            method_groups[m].append(r)
+
+    traj_methods = {
+        m: sorted(rs, key=lambda r: r.get("ck") or 0)
+        for m, rs in method_groups.items() if len(rs) >= 2
+    }
+
+    if traj_methods:
+        # Stratified subsample — same indices for every method subplot
+        rng_t     = np.random.default_rng(42)
+        true_idx  = np.where(y0 == 1)[0]
+        false_idx = np.where(y0 == 0)[0]
+        n_each    = min(N_TRAJ_PER_CLASS, len(true_idx), len(false_idx))
+        sample_idx = np.concatenate([
+            rng_t.choice(true_idx,  n_each, replace=False),
+            rng_t.choice(false_idx, n_each, replace=False),
+        ])
+
+        n_m   = len(traj_methods)
+        fig_t, axes_t = plt.subplots(1, n_m, figsize=(7 * n_m, 6), squeeze=False)
+
+        C_TRUE  = "steelblue"
+        C_FALSE = "crimson"
+
+        for col_idx, (method_name, method_runs) in enumerate(sorted(traj_methods.items())):
+            ax_t  = axes_t[0][col_idx]
+            y_m   = method_runs[0]["y"]
+
+            # Meshgrid for this method's data
+            traj_clouds = [X2b] + [r["X2_post"] for r in method_runs]
+            xx_t, yy_t, grid_t = _build_mesh(traj_clouds)
+
+            # Base boundary: gray solid
+            zz_b = r0["lr2_base"].predict_proba(grid_t)[:, 1].reshape(xx_t.shape)
+            ax_t.contour(xx_t, yy_t, zz_b, levels=[0.5],
+                         linewidths=2, colors=["gray"])
+
+            # Last checkpoint boundary: colored dashed
+            last_r = method_runs[-1]
+            if last_r.get("lr2_post") is not None:
+                zz_last = last_r["lr2_post"].predict_proba(grid_t)[:, 1].reshape(xx_t.shape)
+                # use the color of this run in the global palette
+                last_idx = results_ok.index(last_r)
+                last_col = colors[last_idx]
+                ax_t.contour(xx_t, yy_t, zz_last, levels=[0.5],
+                             linewidths=1.5, colors=[last_col], linestyles=["--"])
+
+            # Draw trajectories for sampled pairs
+            for j in sample_idx:
+                c = C_TRUE if y_m[j] == 1 else C_FALSE
+                traj = np.array(
+                    [X2b[j]] + [r["X2_post"][j] for r in method_runs]
+                )
+                # Path line
+                ax_t.plot(traj[:, 0], traj[:, 1],
+                          color=c, alpha=0.2, lw=0.8, zorder=1)
+                # Arrows at each step
+                for step in range(len(traj) - 1):
+                    ax_t.annotate(
+                        "", xy=traj[step + 1], xytext=traj[step],
+                        arrowprops=dict(arrowstyle="->", color=c,
+                                        lw=0.7, alpha=0.45),
+                    )
+                # Base point: star; end point: square
+                ax_t.scatter([traj[0, 0]], [traj[0, 1]],
+                             s=35, color=c, marker="*", alpha=0.7, zorder=4)
+                ax_t.scatter([traj[-1, 0]], [traj[-1, 1]],
+                             s=20, color=c, marker="s", alpha=0.7, zorder=4)
+
+            ck_labels = [r.get("ck") for r in method_runs]
+            ax_t.set_title(f"{method_name}  ck {ck_labels[0]}→{ck_labels[-1]}", fontsize=10)
+            ax_t.set_xlabel("PC1"); ax_t.set_ylabel("PC2")
+            ax_t.grid(True, alpha=0.2)
+
+            legend_elements = [
+                Line2D([0], [0], color=C_TRUE,  lw=1.5, label="True"),
+                Line2D([0], [0], color=C_FALSE, lw=1.5, label="False"),
+                Line2D([0], [0], marker="*", color="gray", lw=0,
+                       markersize=8, label="Base (start)"),
+                Line2D([0], [0], marker="s", color="gray", lw=0,
+                       markersize=6, label="Last ck (end)"),
+                Line2D([0], [0], color="gray", lw=2, label="Base boundary"),
+            ]
+            ax_t.legend(handles=legend_elements, fontsize=8, loc="best")
+
+        fig_t.suptitle(
+            f"Trajectories base→ck  |  layers={layers}  {band_mode}  pca={pca_k}\n"
+            f"(★=base, ■=last ck; {n_each} True + {n_each} False sampled)",
+            fontsize=11,
+        )
+        plt.tight_layout()
+        out_traj = base_out / f"combined_trajectories__{ctag}.png"
+        fig_t.savefig(out_traj, dpi=150, bbox_inches="tight")
+        plt.close(fig_t)
+        print(f"[combined] trajectories      -> {out_traj}")
 
 
 # --------------------------------------------------------------------------- #
@@ -587,9 +780,6 @@ def main():
 
     args = ap.parse_args()
 
-    # ------------------------------------------------------------------ #
-    #  Build per-run config list                                           #
-    # ------------------------------------------------------------------ #
     configs = []
     sweep_methods = None
     sweep_cks     = None
@@ -611,7 +801,6 @@ def main():
                 cfg._ck      = ck
                 configs.append(cfg)
     else:
-        # single explicit run
         cfg = argparse.Namespace(**vars(args))
         if args.post_hs:
             p = Path(args.post_hs)
@@ -635,9 +824,6 @@ def main():
     for c in configs:
         print(f"  -> {c._tag}")
 
-    # ------------------------------------------------------------------ #
-    #  Execute                                                             #
-    # ------------------------------------------------------------------ #
     if args.workers > 1 and len(configs) > 1:
         n_w = min(args.workers, len(configs))
         print(f"\n[pca_probe] Parallel: {len(configs)} tasks x {n_w} workers\n")
@@ -652,18 +838,12 @@ def main():
     ok  = [r for r in results if "error" not in r]
     err = [r for r in results if "error" in r]
 
-    # ------------------------------------------------------------------ #
-    #  Combined figures (when running multiple)                            #
-    # ------------------------------------------------------------------ #
     if len(configs) > 1 and ok and sweep_methods and sweep_cks:
         print(f"\n[pca_probe] Building combined figures ({len(ok)} successful runs)...")
         make_combined_figures(ok, sweep_methods, sweep_cks,
                               Path(args.out_dir), args.layers,
                               args.band_mode, args.pca_components)
 
-    # ------------------------------------------------------------------ #
-    #  Summary                                                             #
-    # ------------------------------------------------------------------ #
     print(f"\n[pca_probe] Done.  {len(ok)} OK, {len(err)} failed.")
     for r in ok:
         acc_str = f"acc={r['pcaK_acc']:.4f}"
