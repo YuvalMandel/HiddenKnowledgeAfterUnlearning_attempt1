@@ -1154,11 +1154,47 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         multi_layer[clf_name] = pipe
         print(f"  {prefix}Multi-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
 
+    # ── Full-layer probes (all layers 0 … n_layers-1 inclusive) ─────────────
+    fl_start = 0
+    fl_end   = n_layers - 1
+    print(f"  {prefix}Full-layer probes using all {n_layers} layers "
+          f"({fl_start}–{fl_end})", flush=True)
+    X_fl_tr  = hs_train[:, fl_start:fl_end + 1, :].reshape(n_train, -1)
+    X_fl_val = hs_val[:,   fl_start:fl_end + 1, :].reshape(len(hs_val), -1)
+
+    full_layer = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_multi_layer_pipeline(clf_name)
+        pipe.fit(X_fl_tr, y_train)
+        val_acc = pipe.score(X_fl_val, y_val)
+        full_layer[clf_name] = pipe
+        print(f"  {prefix}Full-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
+
+    # ── Init-band probes (layers 0 … ml_start-1) ────────────────────────────
+    ib_start = 0
+    ib_end   = max(0, ml_start - 1)
+    print(f"  {prefix}Init-band probes using layers {ib_start}–{ib_end} "
+          f"({ib_end - ib_start + 1} layers)", flush=True)
+    X_ib_tr  = hs_train[:, ib_start:ib_end + 1, :].reshape(n_train, -1)
+    X_ib_val = hs_val[:,   ib_start:ib_end + 1, :].reshape(len(hs_val), -1)
+
+    init_band = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_multi_layer_pipeline(clf_name)
+        pipe.fit(X_ib_tr, y_train)
+        val_acc = pipe.score(X_ib_val, y_val)
+        init_band[clf_name] = pipe
+        print(f"  {prefix}Init-band {clf_name} val acc: {val_acc:.3f}", flush=True)
+
     return {
         "per_layer":         per_layer,
         "multi_layer":       multi_layer,
         "best_layers":       best_layers,
         "multi_layer_range": (ml_start, ml_end),
+        "full_layer":        full_layer,
+        "full_layer_range":  (fl_start, fl_end),
+        "init_band":         init_band,
+        "init_band_range":   (ib_start, ib_end),
     }
 
 
@@ -1336,6 +1372,22 @@ def compute_all_probe_stats(probe_set: dict,
     ens = _ensemble_stats(probe_set, hs_test, y_test)
     result["vote_ensemble"] = ens["vote"]
     result["avg_ensemble"]  = ens["avg"]
+
+    fl_start, fl_end = probe_set.get("full_layer_range", (0, hs_test.shape[1] - 1))
+    X_fl = hs_test[:, fl_start:fl_end + 1, :].reshape(n_test, -1)
+    result["full_layer"] = {}
+    for clf_name in CLF_NAMES:
+        if "full_layer" in probe_set and clf_name in probe_set["full_layer"]:
+            result["full_layer"][clf_name] = _pipe_stats(
+                probe_set["full_layer"][clf_name], X_fl, y_test)
+
+    ib_start, ib_end = probe_set.get("init_band_range", (0, 0))
+    X_ib = hs_test[:, ib_start:ib_end + 1, :].reshape(n_test, -1)
+    result["init_band"] = {}
+    for clf_name in CLF_NAMES:
+        if "init_band" in probe_set and clf_name in probe_set["init_band"]:
+            result["init_band"][clf_name] = _pipe_stats(
+                probe_set["init_band"][clf_name], X_ib, y_test)
 
     return result
 
@@ -1773,6 +1825,10 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1")]
         + [f"avg_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
+        + [f"fl_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
+        + [f"ib_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
     )
 
     def _probe_row(name, aps):
@@ -1780,6 +1836,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         ml   = aps.get("multi_layer",   {}) if aps else {}
         vote = aps.get("vote_ensemble", {}) if aps else {}
         avg  = aps.get("avg_ensemble",  {}) if aps else {}
+        fl   = aps.get("full_layer",    {}) if aps else {}
+        ib   = aps.get("init_band",     {}) if aps else {}
         row = [name]
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
@@ -1810,6 +1868,24 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     round(_prow(s, "f1"), 4)]
         for clf in CLF_NAMES:
             s = avg.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = fl.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = ib.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4),
@@ -1868,6 +1944,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     _rbcm(name, quad, "ml",   clf, (pset.get("multi_layer",   {}) or {}).get(clf))
                     _rbcm(name, quad, "vote", clf, (pset.get("vote_ensemble", {}) or {}).get(clf))
                     _rbcm(name, quad, "avg",  clf, (pset.get("avg_ensemble",  {}) or {}).get(clf))
+                    _rbcm(name, quad, "fl",   clf, (pset.get("full_layer",    {}) or {}).get(clf))
+                    _rbcm(name, quad, "ib",   clf, (pset.get("init_band",     {}) or {}).get(clf))
 
         _write_bio_confusion_rows("Base", base_gen, base_logit, base_all_probe_stats)
         for method, r in all_results.items():
@@ -3686,6 +3764,18 @@ def save_sweep_csv(method_name: str, results: list):
                     round(_sw(s, "false_accuracy"), 4),
                     round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
                     round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("full_layer",    {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("init_band",     {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         return row
 
     def _probe_cols(pfx):
@@ -3698,6 +3788,10 @@ def save_sweep_csv(method_name: str, results: list):
                for k in ("vote_acc", "vote_true", "vote_fals", "vote_prec", "vote_rec", "vote_f1")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
                for k in ("avg_acc", "avg_true", "avg_fals", "avg_prec", "avg_rec", "avg_f1", "avg_auc")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("fl_acc", "fl_true", "fl_fals", "fl_prec", "fl_rec", "fl_f1", "fl_auc")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("ib_acc", "ib_true", "ib_fals", "ib_prec", "ib_rec", "ib_f1", "ib_auc")]
         )
 
     has_cyber_mp = any("cyber_all_method_probe_stats" in r for r in results)
