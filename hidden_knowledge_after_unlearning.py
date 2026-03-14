@@ -1689,6 +1689,24 @@ def print_probe_stats_all(label, all_ps):
                   f"true {s.get('true_accuracy',0):.3f}  "
                   f"false {s.get('false_accuracy',0):.3f}"
                   + _extra(s))
+    if all_ps.get("full_layer"):
+        print(f"  [{label}] Full-layer probes (all layers):")
+        for clf_name in CLF_NAMES:
+            s = all_ps["full_layer"].get(clf_name, {})
+            print(f"    {clf_name:<8}"
+                  f"acc {s.get('accuracy',0):.3f}  "
+                  f"true {s.get('true_accuracy',0):.3f}  "
+                  f"false {s.get('false_accuracy',0):.3f}"
+                  + _extra(s))
+    if all_ps.get("init_band"):
+        print(f"  [{label}] Init-band probes (layers 0–{MULTI_LAYER_START-1}):")
+        for clf_name in CLF_NAMES:
+            s = all_ps["init_band"].get(clf_name, {})
+            print(f"    {clf_name:<8}"
+                  f"acc {s.get('accuracy',0):.3f}  "
+                  f"true {s.get('true_accuracy',0):.3f}  "
+                  f"false {s.get('false_accuracy',0):.3f}"
+                  + _extra(s))
 
 
 def print_tf_result(label, pos_answer, neg_answer, pos_proposed="", neg_proposed=""):
@@ -2482,8 +2500,11 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
             probe_set = ps
+        else:
+            print("[checkpoint] base_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     # ── Cyber probes ──────────────────────────────────────────────────────────
     cyber_probe_set  = None
@@ -2491,8 +2512,11 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
             cyber_probe_set = cps
+        else:
+            print("[checkpoint] base_cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     need_hs             = hs_train is None or hs_val is None or hs_test is None
     need_cyber_hs       = cyber_hs_train is None or cyber_hs_val is None or cyber_hs_test is None
@@ -2894,8 +2918,11 @@ def run_method(method_name: str,
     if method_probe_path.exists():
         with open(method_probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
             method_probe_set = ps
+        else:
+            print(f"[checkpoint] {sn}_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     # ── Cyber method probes ───────────────────────────────────────────────────
     cyber_method_probe_set = None
@@ -2903,8 +2930,11 @@ def run_method(method_name: str,
     if cyber_method_probe_path.exists():
         with open(cyber_method_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
             cyber_method_probe_set = cps
+        else:
+            print(f"[checkpoint] {sn}_cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     need_hs             = hs_train_un is None or hs_val_un is None or hs_test_un is None
     need_cyber_hs       = (cyber_hs_train_un is None or cyber_hs_val_un is None
@@ -3930,16 +3960,22 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
             probe_set = ps
+        else:
+            print(f"[checkpoint] {ck_d}/probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     cyber_probe_set  = None
     cyber_probe_path = ck_d / "cyber_probes.pkl"
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
             cyber_probe_set = cps
+        else:
+            print(f"[checkpoint] {ck_d}/cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+                  flush=True)
 
     # ── Decide what still needs the model ──────────────────────────────────────
     need_hs        = hs_test is None or hs_train is None or hs_val is None
