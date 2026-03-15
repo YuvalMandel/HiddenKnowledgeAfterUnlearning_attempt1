@@ -109,8 +109,13 @@ PCA_DIMS_MULTI     = 256   # for all multi-layer pipelines
 # Indices are into the hidden-state tensor (0 = embedding, 1-32 = transformer layers).
 # Default window 12-22 covers the mid-to-late layers where factual knowledge is
 # typically most linearly separable; override with --multi_layer_start / --multi_layer_end.
-MULTI_LAYER_START = 12
-MULTI_LAYER_END   = 22
+MULTI_LAYER_START   = 10   # mid-band start (also used as CLI default)
+MULTI_LAYER_END     = 22   # mid-band end
+
+INIT_BAND_START     = 1    # init-band without embedding layer
+INIT_BAND_EMB_START = 0    # init-band including embedding layer (layer 0)
+INIT_BAND_END       = 9    # both init-band variants end here
+END_BAND_START      = 23   # end-band starts at MULTI_LAYER_END + 1
 
 # Checkpoint sweep — HF repo slug for each method.
 # Maps display name → the segment between "instruct-" and "-checkpoint-N" in the repo ID.
@@ -1103,10 +1108,18 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
 
     Returns a ProbeSet dict:
     {
-      "per_layer":        {"LR": {l: pipe, ...}, "RF": {...}, "AdaBoost": {...}},
-      "multi_layer":      {"LR": pipe, "RF": pipe, "AdaBoost": pipe},
-      "best_layers":      {"LR": int, "RF": int, "AdaBoost": int},
-      "multi_layer_range": (start, end),   # stored so eval uses same slice
+      "per_layer":           {"LR": {l: pipe, ...}, "RF": {...}, "AdaBoost": {...}},
+      "mid_band":            {"LR": pipe, "RF": pipe, "AdaBoost": pipe},
+      "best_layers":         {"LR": int, "RF": int, "AdaBoost": int},
+      "mid_band_range":      (start, end),
+      "full_layer":          {"LR": pipe, ...},
+      "full_layer_range":    (0, n_layers-1),
+      "init_band":           {"LR": pipe, ...},   # layers 1–9, no embedding
+      "init_band_range":     (1, 9),
+      "init_band_emb":       {"LR": pipe, ...},   # layers 0–9, includes embedding
+      "init_band_emb_range": (0, 9),
+      "end_band":            {"LR": pipe, ...},   # layers 23–n_layers-1
+      "end_band_range":      (23, n_layers-1),
     }
     """
     n_train, n_layers, hidden_dim = hs_train.shape
@@ -1140,19 +1153,21 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         print(f"  {prefix}{clf_name} best layer: {best_l:2d}  "
               f"val acc: {val_accs[best_l]:.3f}", flush=True)
 
-    # ── Multi-layer probes (layers ml_start … ml_end inclusive) ────────────
-    print(f"  {prefix}Multi-layer probes using layers {ml_start}–{ml_end} "
-          f"({ml_end - ml_start + 1} layers)", flush=True)
-    X_flat_tr  = hs_train[:, ml_start:ml_end + 1, :].reshape(n_train, -1)
-    X_flat_val = hs_val[:,   ml_start:ml_end + 1, :].reshape(len(hs_val), -1)
+    # ── Mid-band probes (layers mb_start … mb_end inclusive) ────────────────
+    mb_start = max(0, multi_layer_start)
+    mb_end   = min(n_layers - 1, multi_layer_end)
+    print(f"  {prefix}Mid-band probes using layers {mb_start}–{mb_end} "
+          f"({mb_end - mb_start + 1} layers)", flush=True)
+    X_mb_tr  = hs_train[:, mb_start:mb_end + 1, :].reshape(n_train, -1)
+    X_mb_val = hs_val[:,   mb_start:mb_end + 1, :].reshape(len(hs_val), -1)
 
-    multi_layer = {}
+    mid_band = {}
     for clf_name in CLF_NAMES:
         pipe    = _make_multi_layer_pipeline(clf_name)
-        pipe.fit(X_flat_tr, y_train)
-        val_acc = pipe.score(X_flat_val, y_val)
-        multi_layer[clf_name] = pipe
-        print(f"  {prefix}Multi-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
+        pipe.fit(X_mb_tr, y_train)
+        val_acc = pipe.score(X_mb_val, y_val)
+        mid_band[clf_name] = pipe
+        print(f"  {prefix}Mid-band {clf_name} val acc: {val_acc:.3f}", flush=True)
 
     # ── Full-layer probes (all layers 0 … n_layers-1 inclusive) ─────────────
     fl_start = 0
@@ -1170,9 +1185,9 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         full_layer[clf_name] = pipe
         print(f"  {prefix}Full-layer {clf_name} val acc: {val_acc:.3f}", flush=True)
 
-    # ── Init-band probes (layers 0 … ml_start-1) ────────────────────────────
-    ib_start = 0
-    ib_end   = max(0, ml_start - 1)
+    # ── Init-band probes (layers 1–9, no embedding) ──────────────────────────
+    ib_start = min(INIT_BAND_START, n_layers - 1)
+    ib_end   = min(INIT_BAND_END,   n_layers - 1)
     print(f"  {prefix}Init-band probes using layers {ib_start}–{ib_end} "
           f"({ib_end - ib_start + 1} layers)", flush=True)
     X_ib_tr  = hs_train[:, ib_start:ib_end + 1, :].reshape(n_train, -1)
@@ -1186,15 +1201,51 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         init_band[clf_name] = pipe
         print(f"  {prefix}Init-band {clf_name} val acc: {val_acc:.3f}", flush=True)
 
+    # ── Init-band-emb probes (layers 0–9, includes embedding) ───────────────
+    ibe_start = INIT_BAND_EMB_START
+    ibe_end   = min(INIT_BAND_END, n_layers - 1)
+    print(f"  {prefix}Init-band-emb probes using layers {ibe_start}–{ibe_end} "
+          f"({ibe_end - ibe_start + 1} layers)", flush=True)
+    X_ibe_tr  = hs_train[:, ibe_start:ibe_end + 1, :].reshape(n_train, -1)
+    X_ibe_val = hs_val[:,   ibe_start:ibe_end + 1, :].reshape(len(hs_val), -1)
+
+    init_band_emb = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_multi_layer_pipeline(clf_name)
+        pipe.fit(X_ibe_tr, y_train)
+        val_acc = pipe.score(X_ibe_val, y_val)
+        init_band_emb[clf_name] = pipe
+        print(f"  {prefix}Init-band-emb {clf_name} val acc: {val_acc:.3f}", flush=True)
+
+    # ── End-band probes (layers END_BAND_START … n_layers-1) ────────────────
+    eb_start = min(END_BAND_START, n_layers - 1)
+    eb_end   = n_layers - 1
+    print(f"  {prefix}End-band probes using layers {eb_start}–{eb_end} "
+          f"({eb_end - eb_start + 1} layers)", flush=True)
+    X_eb_tr  = hs_train[:, eb_start:eb_end + 1, :].reshape(n_train, -1)
+    X_eb_val = hs_val[:,   eb_start:eb_end + 1, :].reshape(len(hs_val), -1)
+
+    end_band = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_multi_layer_pipeline(clf_name)
+        pipe.fit(X_eb_tr, y_train)
+        val_acc = pipe.score(X_eb_val, y_val)
+        end_band[clf_name] = pipe
+        print(f"  {prefix}End-band {clf_name} val acc: {val_acc:.3f}", flush=True)
+
     return {
-        "per_layer":         per_layer,
-        "multi_layer":       multi_layer,
-        "best_layers":       best_layers,
-        "multi_layer_range": (ml_start, ml_end),
-        "full_layer":        full_layer,
-        "full_layer_range":  (fl_start, fl_end),
-        "init_band":         init_band,
-        "init_band_range":   (ib_start, ib_end),
+        "per_layer":          per_layer,
+        "mid_band":           mid_band,
+        "best_layers":        best_layers,
+        "mid_band_range":     (mb_start, mb_end),
+        "full_layer":         full_layer,
+        "full_layer_range":   (fl_start, fl_end),
+        "init_band":          init_band,
+        "init_band_range":    (ib_start, ib_end),
+        "init_band_emb":      init_band_emb,
+        "init_band_emb_range":(ibe_start, ibe_end),
+        "end_band":           end_band,
+        "end_band_range":     (eb_start, eb_end),
     }
 
 
@@ -1283,7 +1334,7 @@ def _ensemble_stats(probe_set: dict, hs_test: np.ndarray,
       "avg":  {"LR": {...}, ...},
     }
     """
-    ml_start, ml_end = probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1))
+    ml_start, ml_end = probe_set.get("mid_band_range", probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1)))
     layer_range = range(ml_start, ml_end + 1)
     empty = {"accuracy": 0.0, "true_accuracy": 0.0, "false_accuracy": 0.0,
              "precision": 0.0, "recall": 0.0, "f1": 0.0}
@@ -1354,7 +1405,7 @@ def compute_all_probe_stats(probe_set: dict,
     }
     """
     n_test = len(hs_test)
-    result = {"per_layer": {}, "multi_layer": {}}
+    result = {"per_layer": {}, "mid_band": {}}
 
     best_layers = probe_set["best_layers"]
     for clf_name in CLF_NAMES:
@@ -1363,11 +1414,11 @@ def compute_all_probe_stats(probe_set: dict,
         s    = _pipe_stats(pipe, hs_test[:, l, :], y_test)
         result["per_layer"][clf_name] = {**s, "best_layer": l}
 
-    ml_start, ml_end = probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1))
-    X_flat = hs_test[:, ml_start:ml_end + 1, :].reshape(n_test, -1)
+    mb_start, mb_end = probe_set.get("mid_band_range", probe_set.get("multi_layer_range", (0, hs_test.shape[1] - 1)))
+    X_mb = hs_test[:, mb_start:mb_end + 1, :].reshape(n_test, -1)
     for clf_name in CLF_NAMES:
-        pipe = probe_set["multi_layer"][clf_name]
-        result["multi_layer"][clf_name] = _pipe_stats(pipe, X_flat, y_test)
+        pipe = (probe_set.get("mid_band") or probe_set.get("multi_layer", {}))[clf_name]
+        result["mid_band"][clf_name] = _pipe_stats(pipe, X_mb, y_test)
 
     ens = _ensemble_stats(probe_set, hs_test, y_test)
     result["vote_ensemble"] = ens["vote"]
@@ -1381,13 +1432,29 @@ def compute_all_probe_stats(probe_set: dict,
             result["full_layer"][clf_name] = _pipe_stats(
                 probe_set["full_layer"][clf_name], X_fl, y_test)
 
-    ib_start, ib_end = probe_set.get("init_band_range", (0, 0))
+    ib_start, ib_end = probe_set.get("init_band_range", (1, 9))
     X_ib = hs_test[:, ib_start:ib_end + 1, :].reshape(n_test, -1)
     result["init_band"] = {}
     for clf_name in CLF_NAMES:
         if "init_band" in probe_set and clf_name in probe_set["init_band"]:
             result["init_band"][clf_name] = _pipe_stats(
                 probe_set["init_band"][clf_name], X_ib, y_test)
+
+    ibe_start, ibe_end = probe_set.get("init_band_emb_range", (0, 9))
+    X_ibe = hs_test[:, ibe_start:ibe_end + 1, :].reshape(n_test, -1)
+    result["init_band_emb"] = {}
+    for clf_name in CLF_NAMES:
+        if "init_band_emb" in probe_set and clf_name in probe_set["init_band_emb"]:
+            result["init_band_emb"][clf_name] = _pipe_stats(
+                probe_set["init_band_emb"][clf_name], X_ibe, y_test)
+
+    eb_start, eb_end = probe_set.get("end_band_range", (23, hs_test.shape[1] - 1))
+    X_eb = hs_test[:, eb_start:eb_end + 1, :].reshape(n_test, -1)
+    result["end_band"] = {}
+    for clf_name in CLF_NAMES:
+        if "end_band" in probe_set and clf_name in probe_set["end_band"]:
+            result["end_band"][clf_name] = _pipe_stats(
+                probe_set["end_band"][clf_name], X_eb, y_test)
 
     return result
 
@@ -1672,9 +1739,9 @@ def print_probe_stats_all(label, all_ps):
               f"true {s.get('true_accuracy',0):.3f}  "
               f"false {s.get('false_accuracy',0):.3f}"
               + _extra(s))
-    print(f"  [{label}] Multi-layer probes:")
+    print(f"  [{label}] Mid-band probes (layers {MULTI_LAYER_START}–{MULTI_LAYER_END}):")
     for clf_name in CLF_NAMES:
-        s = all_ps["multi_layer"].get(clf_name, {})
+        s = (all_ps.get("mid_band") or all_ps.get("multi_layer", {})).get(clf_name, {})
         print(f"    {clf_name:<8}"
               f"acc {s.get('accuracy',0):.3f}  "
               f"true {s.get('true_accuracy',0):.3f}  "
@@ -1699,9 +1766,27 @@ def print_probe_stats_all(label, all_ps):
                   f"false {s.get('false_accuracy',0):.3f}"
                   + _extra(s))
     if all_ps.get("init_band"):
-        print(f"  [{label}] Init-band probes (layers 0–{MULTI_LAYER_START-1}):")
+        print(f"  [{label}] Init-band probes (layers {INIT_BAND_START}–{INIT_BAND_END}, no emb):")
         for clf_name in CLF_NAMES:
             s = all_ps["init_band"].get(clf_name, {})
+            print(f"    {clf_name:<8}"
+                  f"acc {s.get('accuracy',0):.3f}  "
+                  f"true {s.get('true_accuracy',0):.3f}  "
+                  f"false {s.get('false_accuracy',0):.3f}"
+                  + _extra(s))
+    if all_ps.get("init_band_emb"):
+        print(f"  [{label}] Init-band-emb probes (layers {INIT_BAND_EMB_START}–{INIT_BAND_END}, with emb):")
+        for clf_name in CLF_NAMES:
+            s = all_ps["init_band_emb"].get(clf_name, {})
+            print(f"    {clf_name:<8}"
+                  f"acc {s.get('accuracy',0):.3f}  "
+                  f"true {s.get('true_accuracy',0):.3f}  "
+                  f"false {s.get('false_accuracy',0):.3f}"
+                  + _extra(s))
+    if all_ps.get("end_band"):
+        print(f"  [{label}] End-band probes (layers {END_BAND_START}–end):")
+        for clf_name in CLF_NAMES:
+            s = all_ps["end_band"].get(clf_name, {})
             print(f"    {clf_name:<8}"
                   f"acc {s.get('accuracy',0):.3f}  "
                   f"true {s.get('true_accuracy',0):.3f}  "
@@ -1837,7 +1922,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         ["method"]
         + [f"pl_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "lyr", "prec", "rec", "f1", "auc")]
-        + [f"ml_{clf.lower()}_{k}"
+        + [f"mb_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
         + [f"vote_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1")]
@@ -1847,15 +1932,21 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
         + [f"ib_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
+        + [f"ibe_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
+        + [f"eb_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
     )
 
     def _probe_row(name, aps):
         pl   = aps.get("per_layer",     {}) if aps else {}
-        ml   = aps.get("multi_layer",   {}) if aps else {}
+        mb   = (aps.get("mid_band") or aps.get("multi_layer", {})) if aps else {}
         vote = aps.get("vote_ensemble", {}) if aps else {}
         avg  = aps.get("avg_ensemble",  {}) if aps else {}
         fl   = aps.get("full_layer",    {}) if aps else {}
         ib   = aps.get("init_band",     {}) if aps else {}
+        ibe  = aps.get("init_band_emb", {}) if aps else {}
+        eb   = aps.get("end_band",      {}) if aps else {}
         row = [name]
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
@@ -1868,7 +1959,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     round(_prow(s, "f1"), 4),
                     round(_prow(s, "auc"), 4)]
         for clf in CLF_NAMES:
-            s = ml.get(clf, {})
+            s = mb.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4),
@@ -1904,6 +1995,24 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     round(_prow(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = ib.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = ibe.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = eb.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4),
@@ -1959,11 +2068,13 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     continue
                 for clf in CLF_NAMES:
                     _rbcm(name, quad, "pl",   clf, (pset.get("per_layer",     {}) or {}).get(clf))
-                    _rbcm(name, quad, "ml",   clf, (pset.get("multi_layer",   {}) or {}).get(clf))
+                    _rbcm(name, quad, "mb",   clf, ((pset.get("mid_band") or pset.get("multi_layer", {})) or {}).get(clf))
                     _rbcm(name, quad, "vote", clf, (pset.get("vote_ensemble", {}) or {}).get(clf))
                     _rbcm(name, quad, "avg",  clf, (pset.get("avg_ensemble",  {}) or {}).get(clf))
                     _rbcm(name, quad, "fl",   clf, (pset.get("full_layer",    {}) or {}).get(clf))
                     _rbcm(name, quad, "ib",   clf, (pset.get("init_band",     {}) or {}).get(clf))
+                    _rbcm(name, quad, "ibe",  clf, (pset.get("init_band_emb", {}) or {}).get(clf))
+                    _rbcm(name, quad, "eb",   clf, (pset.get("end_band",      {}) or {}).get(clf))
 
         _write_bio_confusion_rows("Base", base_gen, base_logit, base_all_probe_stats)
         for method, r in all_results.items():
@@ -2103,7 +2214,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                 probes = sv.get("probes") or sv.get("base_probes") or {}
                 for clf in CLF_NAMES:
                     _rcm(name, sname, "probe_pl",   clf, (probes.get("per_layer", {})     or {}).get(clf))
-                    _rcm(name, sname, "probe_ml",   clf, (probes.get("multi_layer", {})   or {}).get(clf))
+                    _rcm(name, sname, "probe_mb",   clf, ((probes.get("mid_band") or probes.get("multi_layer", {})) or {}).get(clf))
                     _rcm(name, sname, "probe_vote", clf, (probes.get("vote_ensemble", {}) or {}).get(clf))
                     _rcm(name, sname, "probe_avg",  clf, (probes.get("avg_ensemble", {})  or {}).get(clf))
 
@@ -2222,7 +2333,7 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
 
     def _row2(name, aps):
         pl   = aps.get("per_layer",     {}) if aps else {}
-        ml   = aps.get("multi_layer",   {}) if aps else {}
+        mb   = (aps.get("mid_band") or aps.get("multi_layer", {})) if aps else {}
         vote = aps.get("vote_ensemble", {}) if aps else {}
         avg  = aps.get("avg_ensemble",  {}) if aps else {}
         row = f"{name:<12}"
@@ -2231,7 +2342,7 @@ def print_summary_table(base_gen, base_all_probe_stats, base_logit, all_results,
             row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
                     f" {_prow(s,'false_accuracy'):5.3f} {s.get('best_layer','?'):>3}")
         for clf in CLF_NAMES:
-            s = ml.get(clf, {})
+            s = mb.get(clf, {})
             row += (f"  {_prow(s,'accuracy'):5.3f} {_prow(s,'true_accuracy'):5.3f}"
                     f" {_prow(s,'false_accuracy'):5.3f}")
         for clf in CLF_NAMES:
@@ -2500,10 +2611,10 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
             probe_set = ps
         else:
-            print("[checkpoint] base_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print("[checkpoint] base_probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     # ── Cyber probes ──────────────────────────────────────────────────────────
@@ -2512,10 +2623,10 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
             cyber_probe_set = cps
         else:
-            print("[checkpoint] base_cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print("[checkpoint] base_cyber_probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     need_hs             = hs_train is None or hs_val is None or hs_test is None
@@ -2918,10 +3029,10 @@ def run_method(method_name: str,
     if method_probe_path.exists():
         with open(method_probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
             method_probe_set = ps
         else:
-            print(f"[checkpoint] {sn}_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print(f"[checkpoint] {sn}_probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     # ── Cyber method probes ───────────────────────────────────────────────────
@@ -2930,10 +3041,10 @@ def run_method(method_name: str,
     if cyber_method_probe_path.exists():
         with open(cyber_method_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
             cyber_method_probe_set = cps
         else:
-            print(f"[checkpoint] {sn}_cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print(f"[checkpoint] {sn}_cyber_probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     need_hs             = hs_train_un is None or hs_val_un is None or hs_test_un is None
@@ -3777,7 +3888,7 @@ def save_sweep_csv(method_name: str, results: list):
                     round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
                     round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         for clf in CLF_NAMES:
-            s = aps.get("multi_layer",   {}).get(clf, {}) if aps else {}
+            s = ((aps.get("mid_band") or aps.get("multi_layer", {})) if aps else {}).get(clf, {})
             row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
                     round(_sw(s, "false_accuracy"), 4),
                     round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
@@ -3806,6 +3917,18 @@ def save_sweep_csv(method_name: str, results: list):
                     round(_sw(s, "false_accuracy"), 4),
                     round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
                     round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("init_band_emb", {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("end_band",      {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         return row
 
     def _probe_cols(pfx):
@@ -3813,7 +3936,7 @@ def save_sweep_csv(method_name: str, results: list):
             [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
              for k in ("pl_acc", "pl_true", "pl_fals", "pl_lyr", "pl_prec", "pl_rec", "pl_f1", "pl_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
-               for k in ("ml_acc", "ml_true", "ml_fals", "ml_prec", "ml_rec", "ml_f1", "ml_auc")]
+               for k in ("mb_acc", "mb_true", "mb_fals", "mb_prec", "mb_rec", "mb_f1", "mb_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
                for k in ("vote_acc", "vote_true", "vote_fals", "vote_prec", "vote_rec", "vote_f1")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
@@ -3822,6 +3945,10 @@ def save_sweep_csv(method_name: str, results: list):
                for k in ("fl_acc", "fl_true", "fl_fals", "fl_prec", "fl_rec", "fl_f1", "fl_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
                for k in ("ib_acc", "ib_true", "ib_fals", "ib_prec", "ib_rec", "ib_f1", "ib_auc")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("ibe_acc", "ibe_true", "ibe_fals", "ibe_prec", "ibe_rec", "ibe_f1", "ibe_auc")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("eb_acc", "eb_true", "eb_fals", "eb_prec", "eb_rec", "eb_f1", "eb_auc")]
         )
 
     has_cyber_mp = any("cyber_all_method_probe_stats" in r for r in results)
@@ -3960,10 +4087,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps:
+        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
             probe_set = ps
         else:
-            print(f"[checkpoint] {ck_d}/probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print(f"[checkpoint] {ck_d}/probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     cyber_probe_set  = None
@@ -3971,10 +4098,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps:
+        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
             cyber_probe_set = cps
         else:
-            print(f"[checkpoint] {ck_d}/cyber_probes.pkl is stale (missing full_layer/init_band) — retraining.",
+            print(f"[checkpoint] {ck_d}/cyber_probes.pkl is stale (missing new bands) — retraining.",
                   flush=True)
 
     # ── Decide what still needs the model ──────────────────────────────────────
