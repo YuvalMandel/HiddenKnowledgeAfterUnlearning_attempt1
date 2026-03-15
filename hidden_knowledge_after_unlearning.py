@@ -208,6 +208,37 @@ def _save_logit_csv(scores, pairs, split: str, out_path: Path):
 
 
 # =============================================================================
+# Probe staleness check (used in load_base_checkpoint, run_base, run_method,
+# sweep functions — must be defined at module level)
+# =============================================================================
+
+def _load_pkl_safe(path):
+    """Load a pickle file; return None if missing or unreadable."""
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
+def _probe_set_stale(ps) -> bool:
+    """Return True if probe_set ps is missing bands or was trained on different layer ranges."""
+    if not isinstance(ps, dict) or "per_layer" not in ps:
+        return True
+    if "end_band" not in ps or "init_band_emb" not in ps:
+        return True
+    if ps.get("mid_band_range") != (MULTI_LAYER_START, MULTI_LAYER_END):
+        return True
+    if ps.get("init_band_range") != (INIT_BAND_START, INIT_BAND_END):
+        return True
+    if ps.get("init_band_emb_range") != (INIT_BAND_EMB_START, INIT_BAND_END):
+        return True
+    if ps.get("end_band_range", (None, None))[0] != END_BAND_START:
+        return True
+    return False
+
+
+# =============================================================================
 # Base checkpoint
 # =============================================================================
 
@@ -272,10 +303,10 @@ def load_base_checkpoint(load_hs: bool = True):
 
     with open(probe_path, "rb") as f:
         probe_set = pickle.load(f)
-    # Detect old single-dict format or missing bands — treat as stale
-    if (not isinstance(probe_set, dict) or "per_layer" not in probe_set
-            or "end_band" not in probe_set or "init_band_emb" not in probe_set):
-        print("[checkpoint] Old probe format detected — probes will be retrained.", flush=True)
+    # Detect old single-dict format, missing bands, or changed layer ranges — treat as stale
+    if _probe_set_stale(probe_set):
+        print("[checkpoint] Probe set stale (missing bands or changed layer ranges) — retraining.",
+              flush=True)
         probe_set = None
 
     with open(result_path) as f:
@@ -293,8 +324,7 @@ def load_base_checkpoint(load_hs: bool = True):
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if (isinstance(cps, dict) and "per_layer" in cps
-                and "end_band" in cps and "init_band_emb" in cps):
+        if not _probe_set_stale(cps):
             cyber_probe_set = cps
 
     hs_train       = _load_npy(CHECKPOINT_DIR / "base_hs_train.npy")       if load_hs else None
@@ -2613,10 +2643,10 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
+        if not _probe_set_stale(ps):
             probe_set = ps
         else:
-            print("[checkpoint] base_probes.pkl is stale (missing new bands) — retraining.",
+            print("[checkpoint] base_probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     # ── Cyber probes ──────────────────────────────────────────────────────────
@@ -2625,10 +2655,10 @@ def run_base(multi_layer_start: int = MULTI_LAYER_START,
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
+        if not _probe_set_stale(cps):
             cyber_probe_set = cps
         else:
-            print("[checkpoint] base_cyber_probes.pkl is stale (missing new bands) — retraining.",
+            print("[checkpoint] base_cyber_probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     need_hs             = hs_train is None or hs_val is None or hs_test is None
@@ -2985,13 +3015,12 @@ def run_method(method_name: str,
         _has_cyber_sub    = "cyber_subsets" in _existing
         _has_cyber_mcq    = "cyber_mcq_stats" in _existing
         def _probe_pkl_is_current(pkl_path):
-            """Return True iff the probe pkl exists and has all current band keys."""
+            """Return True iff the probe pkl exists and is not stale."""
             if not pkl_path.exists():
                 return False
             with open(pkl_path, "rb") as _pf:
                 _ps = pickle.load(_pf)
-            return (isinstance(_ps, dict)
-                    and "end_band" in _ps and "init_band_emb" in _ps)
+            return not _probe_set_stale(_ps)
 
         _probes_current = (
             _probe_pkl_is_current(CHECKPOINT_DIR / f"{sn}_probes.pkl") and
@@ -3044,10 +3073,10 @@ def run_method(method_name: str,
     if method_probe_path.exists():
         with open(method_probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
+        if not _probe_set_stale(ps):
             method_probe_set = ps
         else:
-            print(f"[checkpoint] {sn}_probes.pkl is stale (missing new bands) — retraining.",
+            print(f"[checkpoint] {sn}_probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     # ── Cyber method probes ───────────────────────────────────────────────────
@@ -3056,10 +3085,10 @@ def run_method(method_name: str,
     if cyber_method_probe_path.exists():
         with open(cyber_method_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
+        if not _probe_set_stale(cps):
             cyber_method_probe_set = cps
         else:
-            print(f"[checkpoint] {sn}_cyber_probes.pkl is stale (missing new bands) — retraining.",
+            print(f"[checkpoint] {sn}_cyber_probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     need_hs             = hs_train_un is None or hs_val_un is None or hs_test_un is None
@@ -4059,7 +4088,11 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if results_path.exists():
         with open(results_path) as f:
             r = json.load(f)
-        if _sweep_complete(r):
+        _sweep_probes_current = (
+            not _probe_set_stale(_load_pkl_safe(ck_d / "probes.pkl")) and
+            not _probe_set_stale(_load_pkl_safe(ck_d / "cyber_probes.pkl"))
+        )
+        if _sweep_complete(r) and _sweep_probes_current:
             if "cyber_subsets" in r:
                 print(f"  [sweep] ck{ck_num} complete — loading from cache.")
                 return r
@@ -4074,7 +4107,7 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
             if _c_probe_path.exists():
                 with open(_c_probe_path, "rb") as _f:
                     _ps = pickle.load(_f)
-                if isinstance(_ps, dict) and "per_layer" in _ps:
+                if not _probe_set_stale(_ps):
                     _c_probe = _ps
             if _c_hs is not None and _c_answers and _c_logit and _c_probe:
                 r["cyber_subsets"] = _compute_cyber_subsets_sweep(
@@ -4102,10 +4135,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if probe_path.exists():
         with open(probe_path, "rb") as f:
             ps = pickle.load(f)
-        if isinstance(ps, dict) and "per_layer" in ps and "full_layer" in ps and "end_band" in ps:
+        if not _probe_set_stale(ps):
             probe_set = ps
         else:
-            print(f"[checkpoint] {ck_d}/probes.pkl is stale (missing new bands) — retraining.",
+            print(f"[checkpoint] {ck_d}/probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     cyber_probe_set  = None
@@ -4113,10 +4146,10 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps and "full_layer" in cps and "end_band" in cps:
+        if not _probe_set_stale(cps):
             cyber_probe_set = cps
         else:
-            print(f"[checkpoint] {ck_d}/cyber_probes.pkl is stale (missing new bands) — retraining.",
+            print(f"[checkpoint] {ck_d}/cyber_probes.pkl is stale (missing bands or changed ranges) — retraining.",
                   flush=True)
 
     # ── Decide what still needs the model ──────────────────────────────────────
