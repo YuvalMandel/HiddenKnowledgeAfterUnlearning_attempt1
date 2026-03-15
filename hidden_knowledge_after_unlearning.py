@@ -272,8 +272,9 @@ def load_base_checkpoint(load_hs: bool = True):
 
     with open(probe_path, "rb") as f:
         probe_set = pickle.load(f)
-    # Detect old single-dict format and treat as missing
-    if not isinstance(probe_set, dict) or "per_layer" not in probe_set:
+    # Detect old single-dict format or missing bands — treat as stale
+    if (not isinstance(probe_set, dict) or "per_layer" not in probe_set
+            or "end_band" not in probe_set or "init_band_emb" not in probe_set):
         print("[checkpoint] Old probe format detected — probes will be retrained.", flush=True)
         probe_set = None
 
@@ -292,7 +293,8 @@ def load_base_checkpoint(load_hs: bool = True):
     if cyber_probe_path.exists():
         with open(cyber_probe_path, "rb") as f:
             cps = pickle.load(f)
-        if isinstance(cps, dict) and "per_layer" in cps:
+        if (isinstance(cps, dict) and "per_layer" in cps
+                and "end_band" in cps and "init_band_emb" in cps):
             cyber_probe_set = cps
 
     hs_train       = _load_npy(CHECKPOINT_DIR / "base_hs_train.npy")       if load_hs else None
@@ -2982,7 +2984,20 @@ def run_method(method_name: str,
         _has_mcq          = "mcq" in _existing
         _has_cyber_sub    = "cyber_subsets" in _existing
         _has_cyber_mcq    = "cyber_mcq_stats" in _existing
-        if _has_cross and _has_mcq and _has_cyber_sub and _has_cyber_mcq:
+        def _probe_pkl_is_current(pkl_path):
+            """Return True iff the probe pkl exists and has all current band keys."""
+            if not pkl_path.exists():
+                return False
+            with open(pkl_path, "rb") as _pf:
+                _ps = pickle.load(_pf)
+            return (isinstance(_ps, dict)
+                    and "end_band" in _ps and "init_band_emb" in _ps)
+
+        _probes_current = (
+            _probe_pkl_is_current(CHECKPOINT_DIR / f"{sn}_probes.pkl") and
+            _probe_pkl_is_current(CHECKPOINT_DIR / f"{sn}_cyber_probes.pkl")
+        )
+        if _has_cross and _has_mcq and _has_cyber_sub and _has_cyber_mcq and _probes_current:
             _csvs_done = all(
                 (CHECKPOINT_DIR / f"{sn}_bio_logit_{s}.csv").exists() and
                 (CHECKPOINT_DIR / f"{sn}_cyber_logit_{s}.csv").exists()
