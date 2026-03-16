@@ -117,6 +117,9 @@ INIT_BAND_EMB_START = 0    # init-band including embedding layer (layer 0)
 INIT_BAND_END       = 9    # both init-band variants end here
 END_BAND_START      = 23   # end-band starts at MULTI_LAYER_END + 1
 
+IB_NO_PCA_START     = 1    # init-band no-PCA: layers 1–6, no PCA reduction
+IB_NO_PCA_END       = 6
+
 # Checkpoint sweep — HF repo slug for each method.
 # Maps display name → the segment between "instruct-" and "-checkpoint-N" in the repo ID.
 SWEEP_SLUGS = {
@@ -225,7 +228,7 @@ def _probe_set_stale(ps) -> bool:
     """Return True if probe_set ps is missing bands or was trained on different layer ranges."""
     if not isinstance(ps, dict) or "per_layer" not in ps:
         return True
-    if "end_band" not in ps or "init_band_emb" not in ps:
+    if "end_band" not in ps or "init_band_emb" not in ps or "ib_no_pca" not in ps:
         return True
     if ps.get("mid_band_range") != (MULTI_LAYER_START, MULTI_LAYER_END):
         return True
@@ -234,6 +237,8 @@ def _probe_set_stale(ps) -> bool:
     if ps.get("init_band_emb_range") != (INIT_BAND_EMB_START, INIT_BAND_END):
         return True
     if ps.get("end_band_range", (None, None))[0] != END_BAND_START:
+        return True
+    if ps.get("ib_no_pca_range") != (IB_NO_PCA_START, IB_NO_PCA_END):
         return True
     return False
 
@@ -1124,6 +1129,25 @@ def _make_multi_layer_pipeline(clf_name: str) -> Pipeline:
     ])
 
 
+def _make_no_pca_multi_layer_pipeline(clf_name: str) -> Pipeline:
+    """
+    Multi-layer pipeline WITHOUT PCA.
+    StandardScaler → Classifier only (no dimensionality reduction).
+    """
+    if clf_name == "LR":
+        clf = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
+    elif clf_name == "RF":
+        clf = RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)
+    elif clf_name == "AdaBoost":
+        clf = AdaBoostClassifier(n_estimators=100, random_state=42)
+    else:
+        raise ValueError(f"Unknown clf_name: {clf_name}")
+    return Pipeline([
+        ("sc",  StandardScaler()),
+        ("clf", clf),
+    ])
+
+
 def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
                     hs_val:   np.ndarray, y_val:   np.ndarray,
                     label: str = "",
@@ -1152,6 +1176,8 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
       "init_band_emb_range": (0, 9),
       "end_band":            {"LR": pipe, ...},   # layers 23–n_layers-1
       "end_band_range":      (23, n_layers-1),
+      "ib_no_pca":           {"LR": pipe, ...},   # layers 1–6, no PCA
+      "ib_no_pca_range":     (1, 6),
     }
     """
     n_train, n_layers, hidden_dim = hs_train.shape
@@ -1265,6 +1291,22 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         end_band[clf_name] = pipe
         print(f"  {prefix}End-band {clf_name} val acc: {val_acc:.3f}", flush=True)
 
+    # ── Init-band-no-PCA probes (layers 1–6, no PCA) ─────────────────────────
+    ibnp_start = min(IB_NO_PCA_START, n_layers - 1)
+    ibnp_end   = min(IB_NO_PCA_END,   n_layers - 1)
+    print(f"  {prefix}Init-band-no-PCA probes using layers {ibnp_start}–{ibnp_end} "
+          f"({ibnp_end - ibnp_start + 1} layers)", flush=True)
+    X_ibnp_tr  = hs_train[:, ibnp_start:ibnp_end + 1, :].reshape(n_train, -1)
+    X_ibnp_val = hs_val[:,   ibnp_start:ibnp_end + 1, :].reshape(len(hs_val), -1)
+
+    ib_no_pca = {}
+    for clf_name in CLF_NAMES:
+        pipe    = _make_no_pca_multi_layer_pipeline(clf_name)
+        pipe.fit(X_ibnp_tr, y_train)
+        val_acc = pipe.score(X_ibnp_val, y_val)
+        ib_no_pca[clf_name] = pipe
+        print(f"  {prefix}Init-band-no-PCA {clf_name} val acc: {val_acc:.3f}", flush=True)
+
     return {
         "per_layer":          per_layer,
         "mid_band":           mid_band,
@@ -1278,6 +1320,8 @@ def train_probe_set(hs_train: np.ndarray, y_train: np.ndarray,
         "init_band_emb_range":(ibe_start, ibe_end),
         "end_band":           end_band,
         "end_band_range":     (eb_start, eb_end),
+        "ib_no_pca":          ib_no_pca,
+        "ib_no_pca_range":    (ibnp_start, ibnp_end),
     }
 
 
@@ -1487,6 +1531,14 @@ def compute_all_probe_stats(probe_set: dict,
         if "end_band" in probe_set and clf_name in probe_set["end_band"]:
             result["end_band"][clf_name] = _pipe_stats(
                 probe_set["end_band"][clf_name], X_eb, y_test)
+
+    ibnp_start, ibnp_end = probe_set.get("ib_no_pca_range", (IB_NO_PCA_START, IB_NO_PCA_END))
+    X_ibnp = hs_test[:, ibnp_start:ibnp_end + 1, :].reshape(n_test, -1)
+    result["ib_no_pca"] = {}
+    for clf_name in CLF_NAMES:
+        if "ib_no_pca" in probe_set and clf_name in probe_set["ib_no_pca"]:
+            result["ib_no_pca"][clf_name] = _pipe_stats(
+                probe_set["ib_no_pca"][clf_name], X_ibnp, y_test)
 
     return result
 
@@ -3973,6 +4025,12 @@ def save_sweep_csv(method_name: str, results: list):
                     round(_sw(s, "false_accuracy"), 4),
                     round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
                     round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = aps.get("ib_no_pca",     {}).get(clf, {}) if aps else {}
+            row += [round(_sw(s, "accuracy"), 4), round(_sw(s, "true_accuracy"), 4),
+                    round(_sw(s, "false_accuracy"), 4),
+                    round(_sw(s, "precision"), 4), round(_sw(s, "recall"), 4),
+                    round(_sw(s, "f1"), 4), round(_sw(s, "auc"), 4)]
         return row
 
     def _probe_cols(pfx):
@@ -3993,6 +4051,8 @@ def save_sweep_csv(method_name: str, results: list):
                for k in ("ibe_acc", "ibe_true", "ibe_fals", "ibe_prec", "ibe_rec", "ibe_f1", "ibe_auc")]
             + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
                for k in ("eb_acc", "eb_true", "eb_fals", "eb_prec", "eb_rec", "eb_f1", "eb_auc")]
+            + [f"{pfx}_{c.lower()}_{k}" for c in CLF_NAMES
+               for k in ("ibnp_acc", "ibnp_true", "ibnp_fals", "ibnp_prec", "ibnp_rec", "ibnp_f1", "ibnp_auc")]
         )
 
     has_cyber_mp = any("cyber_all_method_probe_stats" in r for r in results)

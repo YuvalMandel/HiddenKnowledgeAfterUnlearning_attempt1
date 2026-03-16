@@ -64,14 +64,14 @@ ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB
 
 PROBE_SRCS  = {"bp", "mp"}
 PROBE_CLFS  = {"lr", "rf", "adaboost"}
-PROBE_BANDS = {"pl", "ml", "mb", "vote", "avg", "fl", "ib", "ibe", "eb"}
+PROBE_BANDS = {"pl", "ml", "mb", "vote", "avg", "fl", "ib", "ibe", "eb", "ibnp"}
 NON_PROBE   = {"gen", "logit", "mcq"}
 SKIP_COLS   = {"lyr"}          # best-layer integer, not a plottable metric
 
 BAND_LABELS = {
-    "pl":    "Per-Layer",   "ml":    "Mid-Band",   "mb":   "Mid-Band",
+    "pl":    "Per-Layer",   "ml":    "Mid-Band",   "mb":    "Mid-Band",
     "fl":    "Full-Layer",  "ib":    "Init-Band",
-    "ibe":   "Init+Emb",    "eb":    "End-Band",
+    "ibe":   "Init+Emb",    "eb":    "End-Band",   "ibnp":  "IB-NoPCA",
     "vote":  "Vote-Ens",    "avg":   "Avg-Ens",
     "gen":   "Generation",  "logit": "Logit",     "mcq": "MCQ",
 }
@@ -213,6 +213,7 @@ _BAND_KEY_MAP = {
     "init_band":      "ib",
     "init_band_emb":  "ibe",
     "end_band":       "eb",
+    "ib_no_pca":      "ibnp",
 }
 # Maps JSON CLF key → internal lowercase
 _CLF_KEY_MAP = {"LR": "lr", "RF": "rf", "AdaBoost": "adaboost"}
