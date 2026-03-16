@@ -64,12 +64,12 @@ ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB
 
 PROBE_SRCS  = {"bp", "mp"}
 PROBE_CLFS  = {"lr", "rf", "adaboost"}
-PROBE_BANDS = {"pl", "ml", "vote", "avg", "fl", "ib", "ibe", "eb"}
+PROBE_BANDS = {"pl", "ml", "mb", "vote", "avg", "fl", "ib", "ibe", "eb"}
 NON_PROBE   = {"gen", "logit", "mcq"}
 SKIP_COLS   = {"lyr"}          # best-layer integer, not a plottable metric
 
 BAND_LABELS = {
-    "pl":    "Per-Layer",   "ml":    "Mid-Band",
+    "pl":    "Per-Layer",   "ml":    "Mid-Band",   "mb":   "Mid-Band",
     "fl":    "Full-Layer",  "ib":    "Init-Band",
     "ibe":   "Init+Emb",    "eb":    "End-Band",
     "vote":  "Vote-Ens",    "avg":   "Avg-Ens",
@@ -195,6 +195,7 @@ def _parse_col(rest: str):
     src, clf, band = parts[0], parts[1], parts[2]
     if src not in PROBE_SRCS or clf not in PROBE_CLFS or band not in PROBE_BANDS:
         return None
+    band = "ml" if band == "mb" else band   # normalise CSV abbrev → canonical
     metric = "_".join(parts[3:])
     return (src, clf, band, metric)
 
