@@ -351,6 +351,18 @@ def _load_base_json(ck_dir: Path) -> list:
     return records
 
 
+def load_base_as_ck0(ck_dir: Path, methods: list) -> pd.DataFrame:
+    """Load base model results as checkpoint-0 rows, cloned for each method."""
+    records = _load_base_json(ck_dir)
+    # Keep only mp rows to avoid duplicate bp/mp entries
+    records = [r for r in records if r.get("probe_source") == "mp"]
+    out = []
+    for method in methods:
+        for r in records:
+            out.append({**r, "method": method, "checkpoint": 0})
+    return pd.DataFrame(out) if out else pd.DataFrame()
+
+
 def load_from_pipeline(ck_dir: Path, methods_filter: str) -> pd.DataFrame:
     """
     Load pipeline results (checkpoint-8 models) from checkpoints/*.json.
@@ -613,6 +625,8 @@ def main():
                     help="Print numeric values above each bar")
     ap.add_argument("--no_chance",    action="store_true",
                     help="Suppress the 0.5 chance-level dashed line")
+    ap.add_argument("--no_base",      action="store_true",
+                    help="Do not prepend base model as checkpoint 0 (sweep mode only)")
     ap.add_argument("--data_dir",     default=None,
                     help="Path to data/ directory (default: auto-detect from script location)")
     ap.add_argument("--ck_dir",       default=None,
@@ -665,7 +679,16 @@ def main():
     if use_pipeline:
         checkpoints = [8]
     else:
+        # Prepend base model as checkpoint 0
+        if not args.no_base and ck_dir.exists():
+            base_ck0 = load_base_as_ck0(ck_dir, methods)
+            if not base_ck0.empty:
+                long_df = pd.concat([base_ck0, long_df], ignore_index=True)
+                print(f"  Added base model as checkpoint 0 ({len(base_ck0)} rows).")
         checkpoints = [int(c) for c in _parse_list(args.checkpoints, avail["checkpoints"])]
+        # Always include ck0 if base was added
+        if 0 not in checkpoints:
+            checkpoints = [0] + checkpoints
     clfs_raw      = _parse_list(args.clf,          avail["clfs"])
     clfs          = _normalise_clf(clfs_raw)
     probe_types   = _parse_list(args.probe_type,   avail["probe_types"])
