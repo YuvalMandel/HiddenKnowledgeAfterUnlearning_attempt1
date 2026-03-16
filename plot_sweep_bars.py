@@ -58,7 +58,9 @@ import matplotlib.pyplot as plt
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J",
+               "Llama3-8B"]
+# "Base" loads from base_results.json (instruct base, before unlearning)
 
 PROBE_SRCS  = {"bp", "mp"}
 PROBE_CLFS  = {"lr", "rf", "adaboost"}
@@ -278,62 +280,93 @@ def _gen_stats_to_records(gs: dict, base: dict,
     return records
 
 
+def _load_method_json(ck_dir: Path, method: str) -> list:
+    """Load one method results.json and return long-format records."""
+    import json
+    sn   = safe_name(method)
+    path = ck_dir / f"{sn}_results.json"
+    if not path.exists():
+        print(f"  WARNING: {path} not found — skipping '{method}'", file=sys.stderr)
+        return []
+    with open(path) as f:
+        r = json.load(f)
+
+    base = {"method": method, "checkpoint": 8}
+    records = []
+
+    # Bio
+    for key, src in (("gen", "gen"), ("logit", "logit"), ("mcq", "mcq")):
+        if key in r:
+            records += _gen_stats_to_records(r[key], base, "bio", src)
+    if "all_base_probe_stats" in r:
+        records += _probe_stats_to_records(r["all_base_probe_stats"],  base, "bio", "bp")
+    if "all_method_probe_stats" in r:
+        records += _probe_stats_to_records(r["all_method_probe_stats"], base, "bio", "mp")
+
+    # Cyber — use "og" subset as representative
+    og = (r.get("cyber_subsets") or {}).get("og") or {}
+    for key, src in (("gen", "gen"), ("logit", "logit")):
+        if og.get(key):
+            records += _gen_stats_to_records(og[key], base, "cyber", src)
+    if og.get("base_probes"):
+        records += _probe_stats_to_records(og["base_probes"],   base, "cyber", "bp")
+    if og.get("method_probes"):
+        records += _probe_stats_to_records(og["method_probes"], base, "cyber", "mp")
+
+    return records
+
+
+def _load_base_json(ck_dir: Path) -> list:
+    """Load base_results.json (instruct base model before unlearning)."""
+    import json
+    path = ck_dir / "base_results.json"
+    if not path.exists():
+        print(f"  WARNING: {path} not found — skipping 'Base'", file=sys.stderr)
+        return []
+    with open(path) as f:
+        r = json.load(f)
+
+    base = {"method": "Base", "checkpoint": 8}
+    records = []
+
+    # Bio — different key names than method JSONs
+    for key, src in (("gen_stats", "gen"), ("logit_stats", "logit"), ("mcq_stats", "mcq")):
+        if key in r:
+            records += _gen_stats_to_records(r[key], base, "bio", src)
+    if "all_probe_stats" in r:
+        # Base model has one probe set; expose as both bp and mp for compatibility
+        records += _probe_stats_to_records(r["all_probe_stats"], base, "bio", "bp")
+        records += _probe_stats_to_records(r["all_probe_stats"], base, "bio", "mp")
+
+    # Cyber — base uses "probes" key (not "base_probes"/"method_probes")
+    og = (r.get("cyber_subsets") or {}).get("og") or {}
+    for key, src in (("gen", "gen"), ("logit", "logit")):
+        if og.get(key):
+            records += _gen_stats_to_records(og[key], base, "cyber", src)
+    if og.get("probes"):
+        records += _probe_stats_to_records(og["probes"], base, "cyber", "bp")
+        records += _probe_stats_to_records(og["probes"], base, "cyber", "mp")
+
+    return records
+
+
 def load_from_pipeline(ck_dir: Path, methods_filter: str) -> pd.DataFrame:
     """
-    Load pipeline results (checkpoint-8 models) from checkpoints/{sn}_results.json.
+    Load pipeline results (checkpoint-8 models) from checkpoints/*.json.
+    Supports special names "Base" and "Llama3-8B" in addition to ALL_METHODS.
     Returns the same long-format DataFrame as melt_sweep_df().
-    Cyber probes come from cyber_subsets["og"] (the original-question subset).
     """
-    import json
-
     if methods_filter == "all":
-        method_list = ALL_METHODS
+        method_list = ["Base"] + ALL_METHODS
     else:
         method_list = [m.strip() for m in methods_filter.split(",")]
 
     records = []
     for method in method_list:
-        sn   = safe_name(method)
-        path = ck_dir / f"{sn}_results.json"
-        if not path.exists():
-            print(f"  WARNING: {path} not found — skipping '{method}'", file=sys.stderr)
-            continue
-
-        with open(path) as f:
-            r = json.load(f)
-
-        base = {"method": method, "checkpoint": 8}
-
-        # Bio gen
-        if "gen" in r:
-            records += _gen_stats_to_records(r["gen"], base, "bio", "gen")
-        # Bio logit
-        if "logit" in r:
-            records += _gen_stats_to_records(r["logit"], base, "bio", "logit")
-        # Bio MCQ
-        if "mcq" in r:
-            records += _gen_stats_to_records(r["mcq"], base, "bio", "mcq")
-        # Bio probes
-        if "all_base_probe_stats" in r:
-            records += _probe_stats_to_records(r["all_base_probe_stats"],
-                                               base, "bio", "bp")
-        if "all_method_probe_stats" in r:
-            records += _probe_stats_to_records(r["all_method_probe_stats"],
-                                               base, "bio", "mp")
-
-        # Cyber probes — use "og" (original-question) subset as representative
-        cyber_subs = r.get("cyber_subsets") or {}
-        og = cyber_subs.get("og") or {}
-        if og.get("gen"):
-            records += _gen_stats_to_records(og["gen"], base, "cyber", "gen")
-        if og.get("logit"):
-            records += _gen_stats_to_records(og["logit"], base, "cyber", "logit")
-        if og.get("base_probes"):
-            records += _probe_stats_to_records(og["base_probes"],
-                                               base, "cyber", "bp")
-        if og.get("method_probes"):
-            records += _probe_stats_to_records(og["method_probes"],
-                                               base, "cyber", "mp")
+        if method == "Base":
+            records += _load_base_json(ck_dir)
+        else:
+            records += _load_method_json(ck_dir, method)
 
     if not records:
         print("ERROR: No pipeline results found.", file=sys.stderr)
