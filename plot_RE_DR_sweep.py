@@ -42,6 +42,12 @@ import matplotlib.pyplot as plt
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+ALL_BANDS   = ["pl", "mb", "fl", "ib", "ibe", "eb", "ibnp"]
+
+BAND_LABELS = {
+    "pl": "Per-Layer", "mb": "Mid-Band", "fl": "Full-Layer",
+    "ib": "Init-Band", "ibe": "Init+Emb", "eb": "End-Band", "ibnp": "IB-NoPCA",
+}
 
 _COLORS = [
     "#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
@@ -125,6 +131,37 @@ def prepend_base_ck0(df: pd.DataFrame, APP_base: float) -> pd.DataFrame:
     return pd.concat([pd.DataFrame(rows), df], ignore_index=True)
 
 
+def load_all_bands(data_dir: Path, methods: list, bands: list,
+                   clf: str, metric: str, checkpoint: int) -> pd.DataFrame:
+    """
+    Load RE and DR_fwd at a single checkpoint for multiple bands.
+    Returns DataFrame: method, band, RE, DR_fwd
+    """
+    t2_path = data_dir / "summary_table2_base_probes.csv"
+    t2 = pd.read_csv(t2_path, index_col=0)
+
+    frames = []
+    for band in bands:
+        base_col = f"{band}_{clf}_{metric}"
+        if base_col not in t2.columns:
+            print(f"  WARNING: column '{base_col}' not in summary_table2 — skipping band '{band}'",
+                  file=sys.stderr)
+            continue
+        APP_base = float(t2.loc["Base", base_col])
+        raw = load_sweep(data_dir, methods, band, clf, metric)
+        raw = raw[raw["checkpoint"] == checkpoint]
+        if raw.empty:
+            continue
+        df = compute_metrics(raw, APP_base)
+        df["band"] = band
+        frames.append(df)
+
+    if not frames:
+        print("ERROR: No data loaded for any band.", file=sys.stderr)
+        sys.exit(1)
+    return pd.concat(frames, ignore_index=True)
+
+
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot_line(df: pd.DataFrame, methods: list, checkpoints: list,
@@ -203,6 +240,54 @@ def plot_scatter(df: pd.DataFrame, methods: list, checkpoints: list,
     plt.close(fig)
 
 
+def plot_bar(df: pd.DataFrame, methods: list, bands: list,
+             metrics_plot: list, title: str | None,
+             out_path: Path, figsize: tuple):
+    """
+    Bar chart: x-axis = probe band, grouped bars per method, one subplot per metric.
+    df must have columns: method, band, RE, DR_fwd
+    """
+    n   = len(metrics_plot)
+    fig, axes = plt.subplots(1, n, figsize=(figsize[0] * n, figsize[1]), squeeze=False)
+
+    for ax, met in zip(axes[0], metrics_plot):
+        avail_bands = [b for b in bands if b in df["band"].unique()]
+        n_b = len(avail_bands)
+        n_m = len(methods)
+        bar_w = min(0.8 / n_m, 0.3)
+        x     = np.arange(n_b)
+
+        for i, method in enumerate(methods):
+            sub  = df[df["method"] == method]
+            vals = []
+            for band in avail_bands:
+                row = sub[sub["band"] == band][met]
+                vals.append(float(row.iloc[0]) if len(row) > 0 else float("nan"))
+            offset = (i - n_m / 2 + 0.5) * bar_w
+            ax.bar(x + offset, vals, bar_w * 0.9,
+                   label=method, color=_COLORS[i % len(_COLORS)],
+                   alpha=0.85, edgecolor="white", linewidth=0.5)
+
+        ax.axhline(0, color="grey",      lw=0.8, ls="--", alpha=0.5)
+        ax.axhline(1, color="steelblue", lw=0.7, ls=":",  alpha=0.4, label="= 1")
+        ax.set_xticks(x)
+        ax.set_xticklabels([BAND_LABELS.get(b, b) for b in avail_bands],
+                           rotation=20, ha="right", fontsize=9)
+        ax.set_xlabel("Probe Band", fontsize=10)
+        ax.set_ylabel(met, fontsize=10)
+        ax.set_title(met, fontsize=11)
+        ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left")
+        ax.grid(axis="y", alpha=0.25, linewidth=0.6)
+
+    if title:
+        fig.suptitle(title, fontsize=12, y=1.02)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out_path}")
+    plt.close(fig)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -220,9 +305,13 @@ def main():
                     help="Metric: acc,auc,f1 (default: acc)")
     ap.add_argument("--metrics_plot", default="RE,DR_fwd",
                     help="Computed metrics to plot: RE,DR_fwd or either (default: RE,DR_fwd)")
-    ap.add_argument("--plot_type",    default="line", choices=["line", "scatter"],
+    ap.add_argument("--plot_type",    default="line", choices=["line", "scatter", "bar"],
                     help="line: checkpoints on x, one line per method  |  "
-                         "scatter: RE vs DR_fwd, one subplot per checkpoint (default: line)")
+                         "scatter: RE vs DR_fwd, one subplot per checkpoint  |  "
+                         "bar: probe bands on x, grouped by method (default: line)")
+    ap.add_argument("--bands",        default=None,
+                    help="Probe bands for bar mode: comma-separated or 'all' "
+                         "(default: all). Overrides --band when plot_type=bar")
     ap.add_argument("--no_base",      action="store_true",
                     help="Do not prepend base model as checkpoint 0")
     ap.add_argument("--title",        default=None)
@@ -240,7 +329,21 @@ def main():
                 else [m.strip() for m in args.methods.split(",")])
     metrics_plot = [m.strip() for m in args.metrics_plot.split(",")]
 
-    # ── Load data ────────────────────────────────────────────────────────────
+    # ── Bar mode (multi-band) ────────────────────────────────────────────────
+    if args.plot_type == "bar":
+        bands = (ALL_BANDS if (args.bands or "all") == "all"
+                 else [b.strip() for b in args.bands.split(",")])
+        ck    = (8 if args.checkpoints == "all"
+                 else int(args.checkpoints.split(",")[-1]))
+        df    = load_all_bands(data_dir, methods, bands, args.clf, args.metric, ck)
+        auto  = f"RE_DR_bar_ck{ck}_{args.clf}_{args.metric}.png"
+        out_path = Path(args.out) if args.out else Path(auto)
+        title = (args.title or
+                 f"RE / DR_fwd by Probe Band  |  ck{ck}  clf={args.clf}  metric={args.metric}")
+        plot_bar(df, methods, bands, metrics_plot, title, out_path, figsize)
+        return
+
+    # ── Line / scatter mode (single band) ────────────────────────────────────
     APP_base = load_app_base(data_dir, args.band, args.clf, args.metric)
     raw      = load_sweep(data_dir, methods, args.band, args.clf, args.metric)
     df       = compute_metrics(raw, APP_base)
