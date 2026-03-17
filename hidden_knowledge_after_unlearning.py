@@ -2020,6 +2020,8 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
         + [f"eb_{clf.lower()}_{k}"
            for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
+        + [f"ibnp_{clf.lower()}_{k}"
+           for clf in CLF_NAMES for k in ("acc", "true", "fals", "prec", "rec", "f1", "auc")]
     )
 
     def _probe_row(name, aps):
@@ -2031,6 +2033,7 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
         ib   = aps.get("init_band",     {}) if aps else {}
         ibe  = aps.get("init_band_emb", {}) if aps else {}
         eb   = aps.get("end_band",      {}) if aps else {}
+        ibnp = aps.get("ib_no_pca",     {}) if aps else {}
         row = [name]
         for clf in CLF_NAMES:
             s = pl.get(clf, {})
@@ -2097,6 +2100,15 @@ def save_summary_csvs(base_gen, base_all_probe_stats, base_logit, all_results,
                     round(_prow(s, "auc"), 4)]
         for clf in CLF_NAMES:
             s = eb.get(clf, {})
+            row += [round(_prow(s, "accuracy"), 4),
+                    round(_prow(s, "true_accuracy"), 4),
+                    round(_prow(s, "false_accuracy"), 4),
+                    round(_prow(s, "precision"), 4),
+                    round(_prow(s, "recall"), 4),
+                    round(_prow(s, "f1"), 4),
+                    round(_prow(s, "auc"), 4)]
+        for clf in CLF_NAMES:
+            s = ibnp.get(clf, {})
             row += [round(_prow(s, "accuracy"), 4),
                     round(_prow(s, "true_accuracy"), 4),
                     round(_prow(s, "false_accuracy"), 4),

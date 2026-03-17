@@ -28,12 +28,29 @@ Attack score (color) = "WMDP, Best Tamp. Attack" from LLM-GAT summary table
    (best tampering attack WMDP accuracy; higher = more knowledge retained after unlearning)
 """
 
+import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 from pathlib import Path
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+ap = argparse.ArgumentParser(description=__doc__,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--re_band",  default="mb",   help="Probe band for RE  (default: mb)")
+ap.add_argument("--re_clf",   default="lr",   help="Classifier for RE  (default: lr)")
+ap.add_argument("--dr_band",  default="mb",   help="Probe band for DR  (default: mb)")
+ap.add_argument("--dr_clf",   default="lr",   help="Classifier for DR  (default: lr)")
+ap.add_argument("--metric",   default="acc",  help="Metric column suffix (default: acc)")
+ap.add_argument("--out",      default=None,   help="Output file (default: auto)")
+args = ap.parse_args()
+
+RE_COL  = f"{args.re_band}_{args.re_clf}_{args.metric}"
+DR_COL  = f"{args.dr_band}_{args.dr_clf}_{args.metric}"
+# APp (cross-probe t5) uses same band/clf as DR
+APp_COL = DR_COL
 
 DATA_DIR = Path("data")
 
@@ -62,8 +79,8 @@ gat_attack = {
     for gat, our in GAT_NAME_MAP.items()
 }
 
-APP_base = float(t2.loc["Base", "ml_lr_acc"])   # ~0.6806
-print(f"APP_base (Base->Base, ML-LR): {APP_base:.4f}")
+APP_base = float(t2.loc["Base", RE_COL])
+print(f"APP_base (Base->Base, {RE_COL}): {APP_base:.4f}")
 
 METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
 
@@ -72,9 +89,9 @@ METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
 # --------------------------------------------------------------------------- #
 rows = []
 for m in METHODS:
-    APP_post = float(t3.loc[m, "ml_lr_acc"])   # Post probe -> Post model
-    ApP      = float(t2.loc[m, "ml_lr_acc"])   # Base probe -> Post model
-    APp      = float(t5.loc[m, "avg_lr_acc"])  # Post probe -> Base model
+    APP_post = float(t3.loc[m, RE_COL])    # Post probe -> Post model
+    ApP      = float(t2.loc[m, DR_COL])    # Base probe -> Post model
+    APp      = float(t5.loc[m, APp_COL])   # Post probe -> Base model
     attack   = gat_attack[m]                   # LLM-GAT best tampering attack score
 
     # Representational Erasure
@@ -186,7 +203,8 @@ draw_panel(axes[1], df, "attack_input",
 axes[1].set_title("Color = Best Input Attack", fontsize=11)
 
 plt.tight_layout()
-out = DATA_DIR / "RE_DR_plot.png"
+_auto_out = f"RE_DR_{args.re_band}_{args.re_clf}_RE_{args.dr_band}_{args.dr_clf}_DR.png"
+out = Path(args.out) if args.out else DATA_DIR / _auto_out
 plt.savefig(out, dpi=150, bbox_inches="tight")
 print(f"\nSaved -> {out}")
 plt.show()
