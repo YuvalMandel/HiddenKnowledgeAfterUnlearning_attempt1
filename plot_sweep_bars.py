@@ -443,6 +443,17 @@ def _dim_label(dim: str, val) -> str:
     return str(val)
 
 
+def _make_combo_col(df, dims: list, col_name: str):
+    """Add a combined label column from multiple dimension columns (e.g. 'LR + Mid-Band')."""
+    parts = [df[d].apply(lambda v, d=d: _dim_label(d, v)) for d in dims]
+    result = parts[0]
+    for p in parts[1:]:
+        result = result + " + " + p
+    df = df.copy()
+    df[col_name] = result
+    return df
+
+
 def _natural_sort_key(x):
     """Sort key that handles numeric strings naturally."""
     try:
@@ -452,8 +463,8 @@ def _natural_sort_key(x):
 
 
 def plot_bars(long_df: pd.DataFrame, *,
-              group_by: str,
-              color_by: str | None,
+              group_by: list,
+              color_by: list,
               metrics: list[str],
               title: str | None,
               out_path: Path,
@@ -463,8 +474,13 @@ def plot_bars(long_df: pd.DataFrame, *,
               chance_line: float | None = 0.5):
     """
     Aggregate (mean over all non-grouped dims) and draw a grouped bar chart.
+    group_by / color_by are lists of dimension names; multi-dim combos are
+    joined with ' + ' to form composite group/hue labels.
     One subplot per metric if multiple metrics are requested.
     """
+    GRP = "__group__"
+    HUE = "__hue__"
+
     n_metrics = len(metrics)
     fig, axes = plt.subplots(1, n_metrics,
                              figsize=(figsize[0] * n_metrics, figsize[1]),
@@ -476,40 +492,37 @@ def plot_bars(long_df: pd.DataFrame, *,
             ax.set_title(f"No data for metric={metric}")
             continue
 
-        group_dims = [group_by] + ([color_by] if color_by else [])
-        agg = sub.groupby(group_dims, as_index=False)["value"].mean()
+        sub = _make_combo_col(sub, group_by, GRP)
+        if color_by:
+            sub = _make_combo_col(sub, color_by, HUE)
+
+        agg_dims = [GRP] + ([HUE] if color_by else [])
+        agg = sub.groupby(agg_dims, as_index=False)["value"].mean()
 
         # Determine groups and hues
-        groups = sorted(agg[group_by].unique(), key=_natural_sort_key)
+        groups = sorted(agg[GRP].unique(), key=_natural_sort_key)
         if sort_by == "value":
-            means  = agg.groupby(group_by)["value"].mean()
+            means  = agg.groupby(GRP)["value"].mean()
             groups = sorted(groups, key=lambda g: means.get(g, 0), reverse=True)
 
-        if color_by:
-            hues   = sorted(agg[color_by].unique(), key=_natural_sort_key)
-        else:
-            hues   = [None]
+        hues = sorted(agg[HUE].unique(), key=_natural_sort_key) if color_by else [None]
 
-        n_g    = len(groups)
-        n_h    = len(hues)
-        bar_w  = min(0.8 / n_h, 0.35)
-        x      = np.arange(n_g)
+        n_g   = len(groups)
+        n_h   = len(hues)
+        bar_w = min(0.8 / n_h, 0.35)
+        x     = np.arange(n_g)
 
         for i, hue in enumerate(hues):
-            if color_by and hue is not None:
-                sub_h = agg[agg[color_by] == hue]
-            else:
-                sub_h = agg
+            sub_h = agg[agg[HUE] == hue] if color_by and hue is not None else agg
 
             vals = []
             for g in groups:
-                row = sub_h[sub_h[group_by] == g]["value"]
+                row = sub_h[sub_h[GRP] == g]["value"]
                 vals.append(float(row.iloc[0]) if len(row) > 0 else float("nan"))
 
             offset = (i - n_h / 2 + 0.5) * bar_w
-            lbl    = _dim_label(color_by, hue) if color_by and hue is not None else None
             bars   = ax.bar(x + offset, vals, bar_w * 0.9,
-                            label=lbl,
+                            label=hue,
                             color=_COLORS[i % len(_COLORS)],
                             alpha=0.85, edgecolor="white", linewidth=0.5)
 
@@ -523,11 +536,11 @@ def plot_bars(long_df: pd.DataFrame, *,
 
         # Axes formatting
         ax.set_xticks(x)
-        ax.set_xticklabels([_dim_label(group_by, g) for g in groups],
-                           rotation=30, ha="right", fontsize=9)
+        ax.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
         metric_lbl = METRIC_LABELS.get(metric, metric)
         ax.set_ylabel(metric_lbl, fontsize=10)
-        ax.set_xlabel(DIM_LABELS.get(group_by, group_by), fontsize=10)
+        grp_label = " + ".join(DIM_LABELS.get(d, d) for d in group_by)
+        ax.set_xlabel(grp_label, fontsize=10)
 
         # Y-axis floor near data minimum (never below 0)
         vmin = sub["value"].min()
@@ -547,7 +560,8 @@ def plot_bars(long_df: pd.DataFrame, *,
             ax.set_title(metric_lbl, fontsize=10)
 
         if color_by or (chance_line is not None):
-            ax.legend(title=DIM_LABELS.get(color_by, color_by) if color_by else None,
+            legend_title = " + ".join(DIM_LABELS.get(d, d) for d in color_by) if color_by else None
+            ax.legend(title=legend_title,
                       bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8,
                       title_fontsize=8)
         ax.grid(axis="y", alpha=0.25, linewidth=0.7)
@@ -562,21 +576,20 @@ def plot_bars(long_df: pd.DataFrame, *,
     plt.close(fig)
 
 
-def _auto_title(df, group_by, color_by, metric):
-    parts = [f"{METRIC_LABELS.get(metric, metric)} by "
-             f"{DIM_LABELS.get(group_by, group_by)}"]
+def _auto_title(df, group_by: list, color_by: list, metric):
+    grp_lbl = " + ".join(DIM_LABELS.get(d, d) for d in group_by)
+    parts = [f"{METRIC_LABELS.get(metric, metric)} by {grp_lbl}"]
     if color_by:
-        parts.append(f"× {DIM_LABELS.get(color_by, color_by)}")
+        hue_lbl = " + ".join(DIM_LABELS.get(d, d) for d in color_by)
+        parts.append(f"× {hue_lbl}")
     # Append fixed-context labels for dimensions with a single value
+    active = set(group_by) | set(color_by)
     for dim in ("dataset", "probe_type", "clf", "probe_source", "method", "checkpoint"):
-        if dim in (group_by, color_by):
-            continue
-        if dim not in df.columns:
+        if dim in active or dim not in df.columns:
             continue
         vals = [v for v in df[dim].unique() if v != "N/A"]
         if len(vals) == 1:
-            lv = _dim_label(dim, vals[0])
-            parts.append(f"[{lv}]")
+            parts.append(f"[{_dim_label(dim, vals[0])}]")
     return " ".join(parts)
 
 
@@ -604,14 +617,11 @@ def main():
                     help="Dataset(s): bio,cyber or 'all'")
 
     # Layout arguments
+    _DIMS = "method,checkpoint,clf,probe_type,probe_source,dataset,metric"
     ap.add_argument("--group_by",     default="method",
-                    choices=["method","checkpoint","clf","probe_type",
-                             "probe_source","dataset","metric"],
-                    help="Dimension for x-axis groups")
+                    help=f"Dimension(s) for x-axis groups, comma-separated. Options: {_DIMS}")
     ap.add_argument("--color_by",     default=None,
-                    choices=["method","checkpoint","clf","probe_type",
-                             "probe_source","dataset","metric",None],
-                    help="Dimension for bar colors (optional)")
+                    help=f"Dimension(s) for bar colors, comma-separated (optional). Options: {_DIMS}")
     ap.add_argument("--sort_by",      default="name",
                     choices=["name","value"],
                     help="Sort x-axis groups by name or by mean value (descending)")
@@ -717,15 +727,18 @@ def main():
         print(f"  Available clfs        : {avail['clfs']}", file=sys.stderr)
         sys.exit(1)
 
+    group_by = [d.strip() for d in args.group_by.split(",")]
+    color_by = [d.strip() for d in args.color_by.split(",")] if args.color_by else []
+
     print(f"  Rows after filter: {len(fdf)}")
-    print(f"  group_by={args.group_by}  color_by={args.color_by}")
+    print(f"  group_by={group_by}  color_by={color_by}")
     print(f"  metrics={metrics}  probe_types={probe_types}")
 
     # ── Plot ──────────────────────────────────────────────────────────────
     plot_bars(
         fdf,
-        group_by=args.group_by,
-        color_by=args.color_by,
+        group_by=group_by,
+        color_by=color_by,
         metrics=metrics,
         title=args.title,
         out_path=Path(args.out),
