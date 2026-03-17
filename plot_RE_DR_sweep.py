@@ -131,10 +131,53 @@ def prepend_base_ck0(df: pd.DataFrame, APP_base: float) -> pd.DataFrame:
     return pd.concat([pd.DataFrame(rows), df], ignore_index=True)
 
 
-def load_all_bands(data_dir: Path, methods: list, bands: list,
-                   clf: str, metric: str, checkpoint: int) -> pd.DataFrame:
+def load_all_bands_pipeline(data_dir: Path, methods: list, bands: list,
+                            clf: str, metric: str) -> pd.DataFrame:
     """
-    Load RE and DR_fwd at a single checkpoint for multiple bands.
+    Load RE and DR_fwd from pipeline summary tables (t2, t3) for multiple bands.
+    Uses ck8 (latest) data only.
+    t2 = summary_table2_base_probes.csv  (base probe on base/method models)
+    t3 = summary_table3_method_probes.csv (method probe on method models)
+    Returns DataFrame: method, band, checkpoint=8, APP_post, ApP, RE, DR_fwd
+    """
+    t2 = pd.read_csv(data_dir / "summary_table2_base_probes.csv", index_col=0)
+    t3 = pd.read_csv(data_dir / "summary_table3_method_probes.csv", index_col=0)
+
+    frames = []
+    for band in bands:
+        col = f"{band}_{clf}_{metric}"
+        if col not in t2.columns:
+            print(f"  WARNING: '{col}' not in summary_table2 — skipping band '{band}'",
+                  file=sys.stderr)
+            continue
+        if col not in t3.columns:
+            print(f"  WARNING: '{col}' not in summary_table3 — skipping band '{band}'",
+                  file=sys.stderr)
+            continue
+        APP_base = float(t2.loc["Base", col])
+        rows = []
+        for method in methods:
+            if method not in t3.index:
+                continue
+            APP_post = float(t3.loc[method, col])
+            ApP      = float(t2.loc[method, col]) if method in t2.index else float("nan")
+            denom    = APP_post - 0.5
+            DR_fwd   = (APP_post - ApP) / denom if abs(denom) > 1e-6 else float("nan")
+            RE       = (APP_base - APP_post) / (APP_base - 0.5)
+            rows.append({"method": method, "band": band, "checkpoint": 8,
+                         "APP_post": APP_post, "ApP": ApP, "RE": RE, "DR_fwd": DR_fwd})
+        frames.append(pd.DataFrame(rows))
+
+    if not frames:
+        print("ERROR: No pipeline data loaded for any band.", file=sys.stderr)
+        sys.exit(1)
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_all_bands_sweep(data_dir: Path, methods: list, bands: list,
+                         clf: str, metric: str, checkpoint: int) -> pd.DataFrame:
+    """
+    Load RE and DR_fwd at a single checkpoint for multiple bands from sweep CSVs.
     Returns DataFrame: method, band, RE, DR_fwd
     """
     t2_path = data_dir / "summary_table2_base_probes.csv"
@@ -157,7 +200,7 @@ def load_all_bands(data_dir: Path, methods: list, bands: list,
         frames.append(df)
 
     if not frames:
-        print("ERROR: No data loaded for any band.", file=sys.stderr)
+        print("ERROR: No sweep data loaded for any band.", file=sys.stderr)
         sys.exit(1)
     return pd.concat(frames, ignore_index=True)
 
@@ -312,6 +355,8 @@ def main():
     ap.add_argument("--bands",        default=None,
                     help="Probe bands for bar mode: comma-separated or 'all' "
                          "(default: all). Overrides --band when plot_type=bar")
+    ap.add_argument("--sweep",        action="store_true",
+                    help="Bar mode: load from sweep CSVs instead of pipeline tables")
     ap.add_argument("--no_base",      action="store_true",
                     help="Do not prepend base model as checkpoint 0")
     ap.add_argument("--title",        default=None)
@@ -333,13 +378,19 @@ def main():
     if args.plot_type == "bar":
         bands = (ALL_BANDS if (args.bands or "all") == "all"
                  else [b.strip() for b in args.bands.split(",")])
-        ck    = (8 if args.checkpoints == "all"
-                 else int(args.checkpoints.split(",")[-1]))
-        df    = load_all_bands(data_dir, methods, bands, args.clf, args.metric, ck)
-        auto  = f"RE_DR_bar_ck{ck}_{args.clf}_{args.metric}.png"
+        if args.sweep:
+            ck   = (8 if args.checkpoints == "all"
+                    else int(args.checkpoints.split(",")[-1]))
+            df   = load_all_bands_sweep(data_dir, methods, bands, args.clf, args.metric, ck)
+            src  = f"sweep-ck{ck}"
+        else:
+            df   = load_all_bands_pipeline(data_dir, methods, bands, args.clf, args.metric)
+            ck   = 8
+            src  = "pipeline-ck8"
+        auto  = f"RE_DR_bar_{src}_{args.clf}_{args.metric}.png"
         out_path = Path(args.out) if args.out else Path(auto)
         title = (args.title or
-                 f"RE / DR_fwd by Probe Band  |  ck{ck}  clf={args.clf}  metric={args.metric}")
+                 f"RE / DR_fwd by Probe Band  |  {src}  clf={args.clf}  metric={args.metric}")
         plot_bar(df, methods, bands, metrics_plot, title, out_path, figsize)
         return
 
