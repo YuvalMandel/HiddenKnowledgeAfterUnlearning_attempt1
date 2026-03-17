@@ -114,11 +114,15 @@ def load_sweep(data_dir: Path, methods: list,
 
 
 def compute_metrics(df: pd.DataFrame, APP_base: float) -> pd.DataFrame:
+    """Compute RE, DR_fwd (and DR_bwd/DR if APp column present)."""
     df = df.copy()
     df["RE"] = (APP_base - df["APP_post"]) / (APP_base - 0.5)
     denom    = df["APP_post"] - 0.5
     df["DR_fwd"] = np.where(denom.abs() < 1e-6, np.nan,
                             (df["APP_post"] - df["ApP"]) / denom)
+    if "APp" in df.columns:
+        df["DR_bwd"] = (APP_base - df["APp"]) / (APP_base - 0.5)
+        df["DR"]     = (df["DR_fwd"] + df["DR_bwd"]) / 2.0
     return df
 
 
@@ -134,24 +138,23 @@ def prepend_base_ck0(df: pd.DataFrame, APP_base: float) -> pd.DataFrame:
 def load_all_bands_pipeline(data_dir: Path, methods: list, bands: list,
                             clf: str, metric: str) -> pd.DataFrame:
     """
-    Load RE and DR_fwd from pipeline summary tables (t2, t3) for multiple bands.
-    Uses ck8 (latest) data only.
-    t2 = summary_table2_base_probes.csv  (base probe on base/method models)
-    t3 = summary_table3_method_probes.csv (method probe on method models)
-    Returns DataFrame: method, band, checkpoint=8, APP_post, ApP, RE, DR_fwd
+    Load RE, DR_fwd, DR_bwd, and full DR from pipeline summary tables for multiple bands.
+    t2 = summary_table2_base_probes.csv   (base probe  → base/method models)
+    t3 = summary_table3_method_probes.csv (method probe → method models)
+    t5 = summary_table5_cross_probes.csv  (method probe → base model)
+    Returns DataFrame: method, band, checkpoint=8, RE, DR_fwd, DR_bwd, DR
     """
-    t2 = pd.read_csv(data_dir / "summary_table2_base_probes.csv", index_col=0)
+    t2 = pd.read_csv(data_dir / "summary_table2_base_probes.csv",   index_col=0)
     t3 = pd.read_csv(data_dir / "summary_table3_method_probes.csv", index_col=0)
+    t5 = pd.read_csv(data_dir / "summary_table5_cross_probes.csv",  index_col=0)
 
     frames = []
     for band in bands:
         col = f"{band}_{clf}_{metric}"
-        if col not in t2.columns:
-            print(f"  WARNING: '{col}' not in summary_table2 — skipping band '{band}'",
-                  file=sys.stderr)
-            continue
-        if col not in t3.columns:
-            print(f"  WARNING: '{col}' not in summary_table3 — skipping band '{band}'",
+        missing = [name for name, tbl in [("t2", t2), ("t3", t3), ("t5", t5)]
+                   if col not in tbl.columns]
+        if missing:
+            print(f"  WARNING: '{col}' missing in {missing} — skipping band '{band}'",
                   file=sys.stderr)
             continue
         APP_base = float(t2.loc["Base", col])
@@ -161,11 +164,18 @@ def load_all_bands_pipeline(data_dir: Path, methods: list, bands: list,
                 continue
             APP_post = float(t3.loc[method, col])
             ApP      = float(t2.loc[method, col]) if method in t2.index else float("nan")
-            denom    = APP_post - 0.5
-            DR_fwd   = (APP_post - ApP) / denom if abs(denom) > 1e-6 else float("nan")
-            RE       = (APP_base - APP_post) / (APP_base - 0.5)
+            APp      = float(t5.loc[method, col]) if method in t5.index else float("nan")
+
+            RE     = (APP_base - APP_post) / (APP_base - 0.5)
+            denom_fwd = APP_post - 0.5
+            DR_fwd = ((APP_post - ApP) / denom_fwd
+                      if abs(denom_fwd) > 1e-6 else float("nan"))
+            DR_bwd = (APP_base - APp) / (APP_base - 0.5)
+            DR     = (DR_fwd + DR_bwd) / 2.0
+
             rows.append({"method": method, "band": band, "checkpoint": 8,
-                         "APP_post": APP_post, "ApP": ApP, "RE": RE, "DR_fwd": DR_fwd})
+                         "APP_post": APP_post, "ApP": ApP, "APp": APp,
+                         "RE": RE, "DR_fwd": DR_fwd, "DR_bwd": DR_bwd, "DR": DR})
         frames.append(pd.DataFrame(rows))
 
     if not frames:
@@ -346,8 +356,10 @@ def main():
                     help="Classifier: lr,rf,adaboost (default: lr)")
     ap.add_argument("--metric",       default="acc",
                     help="Metric: acc,auc,f1 (default: acc)")
-    ap.add_argument("--metrics_plot", default="RE,DR_fwd",
-                    help="Computed metrics to plot: RE,DR_fwd or either (default: RE,DR_fwd)")
+    ap.add_argument("--metrics_plot", default="RE,DR",
+                    help="Computed metrics to plot: any of RE,DR,DR_fwd,DR_bwd "
+                         "(default: RE,DR). DR requires pipeline tables; "
+                         "sweep/line mode only has DR_fwd)")
     ap.add_argument("--plot_type",    default="line", choices=["line", "scatter", "bar"],
                     help="line: checkpoints on x, one line per method  |  "
                          "scatter: RE vs DR_fwd, one subplot per checkpoint  |  "
