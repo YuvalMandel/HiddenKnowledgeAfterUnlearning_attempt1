@@ -219,21 +219,42 @@ def load_all_bands_sweep(data_dir: Path, methods: list, bands: list,
 
 def plot_line(df: pd.DataFrame, methods: list, checkpoints: list,
               metrics_plot: list, title: str | None,
-              out_path: Path, figsize: tuple):
-    """One subplot per metric, one line per method, x-axis = checkpoint."""
+              out_path: Path, figsize: tuple, hue_col: str = "method"):
+    """
+    One subplot per metric, x-axis = checkpoint.
+    hue_col="method" : one line per method (default)
+    hue_col="band"   : one line per probe band (averaged across methods)
+    """
     n   = len(metrics_plot)
     fig, axes = plt.subplots(1, n, figsize=(figsize[0] * n, figsize[1]), squeeze=False)
 
+    if hue_col == "band" and "band" in df.columns:
+        # preserve canonical band ordering
+        hue_vals  = [b for b in ALL_BANDS if b in df["band"].unique()]
+        label_fn  = lambda v: BAND_LABELS.get(v, v)
+    else:
+        hue_vals  = methods
+        label_fn  = lambda v: v
+
     for ax, met in zip(axes[0], metrics_plot):
-        for i, method in enumerate(methods):
-            sub = (df[(df["method"] == method) & df["checkpoint"].isin(checkpoints)]
-                   .sort_values("checkpoint"))
+        if met not in df.columns:
+            ax.set_title(f"{met}  (not available)", fontsize=11)
+            continue
+        for i, hval in enumerate(hue_vals):
+            if hue_col == "band" and "band" in df.columns:
+                sub = df[(df["band"] == hval) & df["checkpoint"].isin(checkpoints)]
+                # average across methods per checkpoint
+                sub = (sub.groupby("checkpoint", as_index=False)[met]
+                          .mean().sort_values("checkpoint"))
+            else:
+                sub = (df[(df["method"] == hval) & df["checkpoint"].isin(checkpoints)]
+                       .sort_values("checkpoint"))
             if sub.empty:
                 continue
             ax.plot(sub["checkpoint"], sub[met],
                     marker=_MARKERS[i % len(_MARKERS)],
                     color=_COLORS[i % len(_COLORS)],
-                    label=method, linewidth=1.8, markersize=5)
+                    label=label_fn(hval), linewidth=1.8, markersize=5)
 
         ax.axhline(0, color="grey",       lw=0.8, ls="--", alpha=0.5)
         ax.axhline(1, color="steelblue",  lw=0.7, ls=":",  alpha=0.4, label="= 1")
@@ -365,8 +386,9 @@ def main():
                          "scatter: RE vs DR_fwd, one subplot per checkpoint  |  "
                          "bar: probe bands on x, grouped by method (default: line)")
     ap.add_argument("--bands",        default=None,
-                    help="Probe bands for bar mode: comma-separated or 'all' "
-                         "(default: all). Overrides --band when plot_type=bar")
+                    help="Probe bands: comma-separated or 'all'. "
+                         "In bar mode: x-axis bands (default: all). "
+                         "In line mode: one colored line per band, averaged across methods.")
     ap.add_argument("--sweep",        action="store_true",
                     help="Bar mode: load from sweep CSVs instead of pipeline tables")
     ap.add_argument("--no_base",      action="store_true",
@@ -404,6 +426,61 @@ def main():
         title = (args.title or
                  f"RE / DR_fwd by Probe Band  |  {src}  clf={args.clf}  metric={args.metric}")
         plot_bar(df, methods, bands, metrics_plot, title, out_path, figsize)
+        return
+
+    # ── Multi-band line mode (--bands given for line/scatter) ─────────────────
+    if args.bands and args.plot_type in ("line", "scatter"):
+        bands = (ALL_BANDS if args.bands == "all"
+                 else [b.strip() for b in args.bands.split(",")])
+        frames = []
+        for band in bands:
+            try:
+                APP_base_b = load_app_base(data_dir, band, args.clf, args.metric)
+            except SystemExit:
+                continue
+            try:
+                raw_b = load_sweep(data_dir, methods, band, args.clf, args.metric)
+            except SystemExit:
+                continue
+            df_b = compute_metrics(raw_b, APP_base_b)
+            df_b["band"] = band
+            if not args.no_base:
+                base_rows = [{"method": m, "checkpoint": 0, "band": band,
+                              "APP_post": APP_base_b, "ApP": APP_base_b,
+                              "RE": 0.0, "DR_fwd": 0.0}
+                             for m in df_b["method"].unique()]
+                df_b = pd.concat([pd.DataFrame(base_rows), df_b], ignore_index=True)
+            frames.append(df_b)
+        if not frames:
+            print("ERROR: no data loaded for any band.", file=sys.stderr)
+            sys.exit(1)
+        df = pd.concat(frames, ignore_index=True)
+
+        # warn if any requested metric is unavailable
+        for met in metrics_plot:
+            if met not in df.columns:
+                print(f"  WARNING: metric '{met}' not available in sweep CSVs "
+                      f"(DR/DR_bwd require pipeline tables; use --plot_type bar instead).",
+                      file=sys.stderr)
+
+        avail_ck = sorted(df["checkpoint"].unique())
+        checkpoints = (avail_ck if args.checkpoints == "all"
+                       else [int(c) for c in args.checkpoints.split(",")])
+        if not args.no_base and 0 not in checkpoints:
+            checkpoints = [0] + checkpoints
+
+        bands_str = "_".join(bands)
+        auto = (f"RE_DR_sweep_bands_{bands_str}_{args.clf}_{args.metric}"
+                f"_{args.plot_type}.png")
+        out_path = Path(args.out) if args.out else Path(auto)
+        title = (args.title or
+                 f"RE / DR_fwd by Band  |  methods={','.join(methods)}"
+                 f"  clf={args.clf}  metric={args.metric}")
+        if args.plot_type == "line":
+            plot_line(df, methods, checkpoints, metrics_plot, title, out_path, figsize,
+                      hue_col="band")
+        else:
+            plot_scatter(df, methods, checkpoints, title, out_path, figsize)
         return
 
     # ── Line / scatter mode (single band) ────────────────────────────────────
