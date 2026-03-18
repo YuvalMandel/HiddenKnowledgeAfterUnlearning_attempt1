@@ -3880,8 +3880,10 @@ def _save_sweep_partial(ck_d: Path, updates: dict):
 def _sweep_complete(r: dict) -> bool:
     return {
         "gen", "logit", "all_base_probe_stats", "all_method_probe_stats", "mcq",
+        "all_method_probe_on_base_stats",
         "cyber_gen", "cyber_logit",
         "cyber_all_base_probe_stats", "cyber_all_method_probe_stats",
+        "cyber_all_method_probe_on_base_stats",
     }.issubset(r.keys())
 
 
@@ -4067,7 +4069,9 @@ def save_sweep_csv(method_name: str, results: list):
                for k in ("ibnp_acc", "ibnp_true", "ibnp_fals", "ibnp_prec", "ibnp_rec", "ibnp_f1", "ibnp_auc")]
         )
 
-    has_cyber_mp = any("cyber_all_method_probe_stats" in r for r in results)
+    has_cyber_mp = any("cyber_all_method_probe_stats"         in r for r in results)
+    has_xp       = any("all_method_probe_on_base_stats"       in r for r in results)
+    has_cyber_xp = any("cyber_all_method_probe_on_base_stats" in r for r in results)
 
     cols = (
         ["checkpoint", "model_id",
@@ -4078,12 +4082,14 @@ def save_sweep_csv(method_name: str, results: list):
          "mcq_acc", "mcq_gib"]
         + _probe_cols("bp")
         + (_probe_cols("mp") if has_mp else [])
+        + (_probe_cols("xp") if has_xp else [])
         + ["cyber_gen_acc", "cyber_gen_true", "cyber_gen_false", "cyber_gen_gib",
            "cyber_gen_precision", "cyber_gen_recall", "cyber_gen_f1",
            "cyber_logit_acc", "cyber_logit_true", "cyber_logit_false",
            "cyber_logit_precision", "cyber_logit_recall", "cyber_logit_f1", "cyber_logit_auc"]
         + _probe_cols("cyber_bp")
         + (_probe_cols("cyber_mp") if has_cyber_mp else [])
+        + (_probe_cols("cyber_xp") if has_cyber_xp else [])
     )
 
     with open(path, "w", newline="") as f:
@@ -4110,6 +4116,7 @@ def save_sweep_csv(method_name: str, results: list):
                  round(_sw(mcq,"accuracy"), 4), round(_sw(mcq,"gibberish_rate"), 4)]
                 + _probe_block(r.get("all_base_probe_stats", {}))
                 + (_probe_block(r.get("all_method_probe_stats", {})) if has_mp else [])
+                + (_probe_block(r.get("all_method_probe_on_base_stats", {})) if has_xp else [])
                 + [round(_sw(cg,  "accuracy"), 4), round(_sw(cg,  "true_accuracy"), 4),
                    round(_sw(cg,  "false_accuracy"), 4), round(_sw(cg, "gibberish_rate"), 4),
                    round(_sw(cg,  "precision"), 4), round(_sw(cg,  "recall"), 4),
@@ -4120,6 +4127,7 @@ def save_sweep_csv(method_name: str, results: list):
                    round(_sw(clo, "f1"), 4), round(_sw(clo, "auc"), 4)]
                 + _probe_block(r.get("cyber_all_base_probe_stats", {}))
                 + (_probe_block(r.get("cyber_all_method_probe_stats", {})) if has_cyber_mp else [])
+                + (_probe_block(r.get("cyber_all_method_probe_on_base_stats", {})) if has_cyber_xp else [])
             )
             w.writerow(row)
     print(f"  [sweep CSV] {path}", flush=True)
@@ -4128,6 +4136,8 @@ def save_sweep_csv(method_name: str, results: list):
 def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
                                base_probe_set: dict,
                                base_cyber_probe_set: dict,
+                               base_hs_test: np.ndarray,
+                               base_cyber_hs_test: np.ndarray,
                                train_pairs: list, val_pairs: list,
                                test_pairs: list,
                                cyber_train_pairs: list, cyber_val_pairs: list,
@@ -4377,13 +4387,15 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
         "mcq":                              mcq_gen_stats(mcq_answers,           mcq_pairs_v),
         "all_base_probe_stats":             compute_all_probe_stats(base_probe_set,       hs_test,       y_test),
         "all_method_probe_stats":           compute_all_probe_stats(probe_set,            hs_test,       y_test),
+        "all_method_probe_on_base_stats":   compute_all_probe_stats(probe_set,            base_hs_test,  y_test),
         # Per-layer stats for ALL layers (allows plotting without npy files).
         "all_layers_base_probe_stats":      compute_all_layers_probe_stats(base_probe_set,       hs_test,       y_test),
         "all_layers_method_probe_stats":    compute_all_layers_probe_stats(probe_set,            hs_test,       y_test),
         "cyber_gen":                        generation_stats(cyber_test_answers, cyber_test_pairs),
         "cyber_logit":                      logit_stats(cyber_logit_scores,      cyber_test_pairs),
-        "cyber_all_base_probe_stats":       compute_all_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
-        "cyber_all_method_probe_stats":     compute_all_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
+        "cyber_all_base_probe_stats":       compute_all_probe_stats(base_cyber_probe_set, cyber_hs_test,      cyber_y_test),
+        "cyber_all_method_probe_stats":     compute_all_probe_stats(cyber_probe_set,      cyber_hs_test,      cyber_y_test),
+        "cyber_all_method_probe_on_base_stats": compute_all_probe_stats(cyber_probe_set,  base_cyber_hs_test, cyber_y_test),
         "cyber_all_layers_base_probe_stats":  compute_all_layers_probe_stats(base_cyber_probe_set, cyber_hs_test, cyber_y_test),
         "cyber_all_layers_method_probe_stats":compute_all_layers_probe_stats(cyber_probe_set,      cyber_hs_test, cyber_y_test),
         "cyber_subsets":                      _compute_cyber_subsets_sweep(
@@ -4399,7 +4411,7 @@ def _run_one_sweep_checkpoint(method_name: str, ck_num: int,
 
 def _sweep_load_shared(method_name: str):
     """Load the shared inputs needed by every sweep checkpoint for one method."""
-    base = load_base_checkpoint(load_hs=False)
+    base = load_base_checkpoint(load_hs=True)
     if base is None:
         raise RuntimeError("Base checkpoint not found — run --stage base first.")
     if base.get("cyber_probe_set") is None:
@@ -4428,6 +4440,8 @@ def _sweep_load_shared(method_name: str):
     return (
         base["probe_set"],
         base["cyber_probe_set"],
+        base["hs_test"],
+        base["cyber_hs_test"],
         train_pairs, val_pairs, test_pairs,
         cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
         make_mcq_pairs(test_questions),
@@ -4458,6 +4472,7 @@ def run_sweep_checkpoint(method_name: str, ck_num: int,
     print(f"{'='*60}\n")
 
     (base_probe_set, base_cyber_probe_set,
+     base_hs_test, base_cyber_hs_test,
      train_pairs, val_pairs, test_pairs,
      cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
      mcq_pairs_v,
@@ -4468,6 +4483,7 @@ def run_sweep_checkpoint(method_name: str, ck_num: int,
     _run_one_sweep_checkpoint(
         method_name, ck_num,
         base_probe_set, base_cyber_probe_set,
+        base_hs_test, base_cyber_hs_test,
         train_pairs, val_pairs, test_pairs,
         cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
         mcq_pairs_v,
@@ -4497,6 +4513,7 @@ def run_sweep(method_name: str,
     print(f"{'='*60}\n")
 
     (base_probe_set, base_cyber_probe_set,
+     base_hs_test, base_cyber_hs_test,
      train_pairs, val_pairs, test_pairs,
      cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
      mcq_pairs_v,
@@ -4528,6 +4545,7 @@ def run_sweep(method_name: str,
         r = _run_one_sweep_checkpoint(
             method_name, ck_num,
             base_probe_set, base_cyber_probe_set,
+            base_hs_test, base_cyber_hs_test,
             train_pairs, val_pairs, test_pairs,
             cyber_train_pairs, cyber_val_pairs, cyber_test_pairs,
             mcq_pairs_v,

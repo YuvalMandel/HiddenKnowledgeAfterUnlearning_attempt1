@@ -82,11 +82,13 @@ def load_app_base(data_dir: Path, band: str, clf: str, metric: str) -> float:
 def load_sweep(data_dir: Path, methods: list,
                band: str, clf: str, metric: str) -> pd.DataFrame:
     """
-    Load per-checkpoint APP_post and ApP from sweep CSVs.
-    Returns DataFrame: method, checkpoint, APP_post, ApP
+    Load per-checkpoint APP_post, ApP, and APp (if xp_ columns present) from sweep CSVs.
+    Returns DataFrame: method, checkpoint, APP_post, ApP [, APp]
+    APp = method probe → base model (xp_ columns); enables full DR = (DR_fwd + DR_bwd)/2.
     """
     mp_col = f"mp_{clf}_{band}_{metric}"
     bp_col = f"bp_{clf}_{band}_{metric}"
+    xp_col = f"xp_{clf}_{band}_{metric}"
     frames = []
     for method in methods:
         sn   = safe_name(method)
@@ -101,12 +103,15 @@ def load_sweep(data_dir: Path, methods: list,
                       file=sys.stderr)
                 break
         else:
-            frames.append(pd.DataFrame({
+            row = {
                 "method":     method,
                 "checkpoint": df["checkpoint"].astype(int),
                 "APP_post":   df[mp_col].astype(float),
                 "ApP":        df[bp_col].astype(float),
-            }))
+            }
+            if xp_col in df.columns:
+                row["APp"] = df[xp_col].astype(float)
+            frames.append(pd.DataFrame(row))
     if not frames:
         print("ERROR: No sweep data loaded.", file=sys.stderr)
         sys.exit(1)
@@ -456,11 +461,11 @@ def main():
             sys.exit(1)
         df = pd.concat(frames, ignore_index=True)
 
-        # warn if any requested metric is unavailable
+        # warn if DR/DR_bwd requested but xp_ columns absent (old sweep CSVs)
         for met in metrics_plot:
             if met not in df.columns:
-                print(f"  WARNING: metric '{met}' not available in sweep CSVs "
-                      f"(DR/DR_bwd require pipeline tables; use --plot_type bar instead).",
+                print(f"  WARNING: metric '{met}' not in sweep data. "
+                      f"DR/DR_bwd require xp_ columns — re-run sweep to populate them.",
                       file=sys.stderr)
 
         avail_ck = sorted(df["checkpoint"].unique())
