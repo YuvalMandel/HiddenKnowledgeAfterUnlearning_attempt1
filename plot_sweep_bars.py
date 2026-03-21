@@ -58,8 +58,7 @@ import matplotlib.pyplot as plt
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J",
-               "Llama3-8B"]
+ALL_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
 # "Base" loads from base_results.json (instruct base, before unlearning)
 
 PROBE_SRCS  = {"bp", "mp"}
