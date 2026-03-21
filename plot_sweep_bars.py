@@ -599,6 +599,100 @@ def plot_bars(long_df: pd.DataFrame, *,
     plt.close(fig)
 
 
+def plot_lines(long_df: pd.DataFrame, *,
+               group_by: list,
+               color_by: list,
+               metrics: list,
+               title: str | None,
+               out_path: Path,
+               figsize: tuple,
+               chance_line: float | None = 0.5):
+    """
+    Line plot variant of plot_bars.
+    X-axis = group_by dimension (typically checkpoint),
+    one line per color_by value (typically probe_type).
+    """
+    GRP = "__group__"
+    HUE = "__hue__"
+
+    n_metrics = len(metrics)
+    fig, axes = plt.subplots(1, n_metrics,
+                             figsize=(figsize[0] * n_metrics, figsize[1]),
+                             squeeze=False)
+
+    for ax, metric in zip(axes[0], metrics):
+        sub = long_df[long_df["metric"] == metric].copy()
+        if sub.empty:
+            ax.set_title(f"No data for metric={metric}")
+            continue
+
+        sub = _make_combo_col(sub, group_by, GRP)
+        if color_by:
+            sub = _make_combo_col(sub, color_by, HUE)
+
+        agg_dims = [GRP] + ([HUE] if color_by else [])
+        agg = sub.groupby(agg_dims, as_index=False)["value"].mean()
+
+        groups = sorted(agg[GRP].unique(), key=_natural_sort_key)
+        if color_by:
+            if "probe_type" in color_by:
+                hues = sorted(agg[HUE].unique(),
+                              key=lambda h: _BAND_SORT_KEY.get(h, 99))
+            else:
+                hues = sorted(agg[HUE].unique(), key=_natural_sort_key)
+        else:
+            hues = [None]
+
+        x = np.arange(len(groups))
+
+        for i, hue in enumerate(hues):
+            sub_h = agg[agg[HUE] == hue] if color_by and hue is not None else agg
+            vals = []
+            for g in groups:
+                row = sub_h[sub_h[GRP] == g]["value"]
+                vals.append(float(row.iloc[0]) if len(row) > 0 else float("nan"))
+
+            ax.plot(x, vals, marker="o", markersize=5, linewidth=2.0,
+                    color=_COLORS[i % len(_COLORS)], label=hue)
+
+        # Axes formatting
+        ax.set_xticks(x)
+        ax.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
+        metric_lbl = METRIC_LABELS.get(metric, metric)
+        ax.set_ylabel(metric_lbl, fontsize=10)
+        grp_label = " + ".join(DIM_LABELS.get(d, d) for d in group_by)
+        ax.set_xlabel(grp_label, fontsize=10)
+
+        vmin = 0.48
+        vmax = sub["value"].max()
+        pad  = max(0.02, (vmax - vmin) * 0.15)
+        ax.set_ylim(bottom=vmin, top=min(1.0, vmax + pad))
+
+        if chance_line is not None and 0 < chance_line < 1:
+            ax.axhline(chance_line, color="gray", linestyle="--",
+                       linewidth=1.2, alpha=0.8, label=f"Chance ({chance_line})")
+
+        ax_title = title if title else _auto_title(sub, group_by, color_by, metric)
+        ax.set_title(ax_title if n_metrics == 1 else metric_lbl, fontsize=11)
+
+        ax.grid(axis="y", alpha=0.25, linewidth=0.7)
+        ax.grid(axis="x", alpha=0.15, linewidth=0.7)
+
+        if color_by or chance_line is not None:
+            legend_title = " + ".join(DIM_LABELS.get(d, d) for d in color_by) if color_by else None
+            ax.legend(title=legend_title, loc="upper right",
+                      fontsize=8, title_fontsize=8, framealpha=0.9)
+
+    if n_metrics > 1 and title:
+        fig.suptitle(title, fontsize=12, y=1.01)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out_path}")
+    plt.close(fig)
+
+
 def _auto_title(df, group_by: list, color_by: list, metric):
     grp_lbl = " + ".join(DIM_LABELS.get(d, d) for d in group_by)
     parts = [f"{METRIC_LABELS.get(metric, metric)} by {grp_lbl}"]
@@ -648,6 +742,9 @@ def main():
     ap.add_argument("--sort_by",      default="name",
                     choices=["name","value"],
                     help="Sort x-axis groups by name or by mean value (descending)")
+    ap.add_argument("--plot_type",    default="bar",
+                    choices=["bar", "line"],
+                    help="Plot type: bar (default) or line")
 
     # Output arguments
     ap.add_argument("--title",        default=None,   help="Custom plot title")
@@ -768,18 +865,31 @@ def main():
     print(f"  metrics={metrics}  probe_types={probe_types}")
 
     # ── Plot ──────────────────────────────────────────────────────────────
-    plot_bars(
-        fdf,
-        group_by=group_by,
-        color_by=color_by,
-        metrics=metrics,
-        title=args.title,
-        out_path=Path(args.out),
-        figsize=figsize,
-        show_values=args.show_values,
-        sort_by=args.sort_by,
-        chance_line=None if args.no_chance else 0.5,
-    )
+    chance = None if args.no_chance else 0.5
+    if args.plot_type == "line":
+        plot_lines(
+            fdf,
+            group_by=group_by,
+            color_by=color_by,
+            metrics=metrics,
+            title=args.title,
+            out_path=Path(args.out),
+            figsize=figsize,
+            chance_line=chance,
+        )
+    else:
+        plot_bars(
+            fdf,
+            group_by=group_by,
+            color_by=color_by,
+            metrics=metrics,
+            title=args.title,
+            out_path=Path(args.out),
+            figsize=figsize,
+            show_values=args.show_values,
+            sort_by=args.sort_by,
+            chance_line=chance,
+        )
 
 
 if __name__ == "__main__":
