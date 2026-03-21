@@ -108,7 +108,6 @@ ALL_MODELS = {
     "RR":              "RR",
     "TAR":             "TAR",
     "PB&J":            "PB_J",
-    "Llama3-8B":       "Llama3-8B",
 }
 
 # Unlearning methods that have checkpoint sweeps (in the same order as SLURM layout)
@@ -170,7 +169,7 @@ _COMP_PATTERNS = [_re.compile(p) for p in [
 def _is_computational(question: str) -> bool:
     return any(p.search(question) for p in _COMP_PATTERNS)
 
-Y_MIN    = 0.4    # fixed lower bound of y-axis
+Y_MIN    = 0.45   # fixed lower bound of y-axis
 Y_PAD    = 0.05   # padding fraction above the highest point
 N_LAYERS = 32     # transformer layers (indices 1-32; layer 0 = embedding, skipped)
 
@@ -1032,7 +1031,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
 
     fig, axes = plt.subplots(
         n_rows, n_clfs,
-        figsize=(7 * n_clfs, 4.5 * n_rows),
+        figsize=(max(13, 7 * n_clfs), max(5.5, 4.5 * n_rows)),
         sharey="row",
         squeeze=False,
     )
@@ -1061,12 +1060,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
                         color=color, linewidth=lw, linestyle=ls, zorder=zorder)
                 any_plotted = True
 
-            # External logit dotted reference lines (drawn in logit-legend order)
-            for name in LEGEND_LOGIT_ORDER:
-                val = ext_logit[m].get(name)
-                if val is not None:
-                    ax.axhline(val, color=_logit_color(name),
-                               linestyle=":", linewidth=1.5, zorder=3, alpha=0.85)
+            # External logit dotted reference lines — disabled
 
             if not any_plotted:
                 ax.text(0.5, 0.5, "No data",
@@ -1094,16 +1088,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
         )
         legend_labels.append(model_name)
 
-    # ── Legend: section 2 — dotted external-logit lines ──────────────────────
-    for name in LEGEND_LOGIT_ORDER:
-        if any(name in ext_logit[m] for m in metrics_to_plot):
-            color = _logit_color(name)
-            label = f"{name} — logit"
-            legend_handles.append(
-                mlines.Line2D([], [], color=color, linewidth=1.5,
-                              linestyle=":", label=label)
-            )
-            legend_labels.append(label)
+    # Legend: section 2 — dotted external-logit lines — disabled
 
     _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
     plt.close(fig)
