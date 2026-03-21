@@ -566,16 +566,15 @@ def plot_bars(long_df: pd.DataFrame, *,
         grp_label = " + ".join(DIM_LABELS.get(d, d) for d in group_by)
         ax.set_xlabel(grp_label, fontsize=10)
 
-        # Y-axis floor near data minimum (never below 0)
-        vmin = sub["value"].min()
+        # Y-axis: start at 0.48 (keeps chance line visible), auto-fit top
         vmax = sub["value"].max()
-        pad  = max(0.02, (vmax - vmin) * 0.15)
-        ax.set_ylim(bottom=max(0.0, vmin - pad),
+        pad  = max(0.02, (vmax - 0.48) * 0.15)
+        ax.set_ylim(bottom=0.48,
                     top=min(1.0, vmax + pad + (0.07 if show_values else 0.02)))
 
         if chance_line is not None and 0 < chance_line < 1:
             ax.axhline(chance_line, color="gray", linestyle="--",
-                       linewidth=0.8, alpha=0.5, label=f"Chance ({chance_line})")
+                       linewidth=1.2, alpha=0.8, label=f"Chance ({chance_line})")
 
         ax_title = title if title else _auto_title(sub, group_by, color_by, metric)
         if n_metrics == 1:
@@ -586,8 +585,8 @@ def plot_bars(long_df: pd.DataFrame, *,
         if color_by or (chance_line is not None):
             legend_title = " + ".join(DIM_LABELS.get(d, d) for d in color_by) if color_by else None
             ax.legend(title=legend_title,
-                      bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8,
-                      title_fontsize=8)
+                      loc="upper right", fontsize=8, title_fontsize=8,
+                      framealpha=0.9)
         ax.grid(axis="y", alpha=0.25, linewidth=0.7)
 
     if n_metrics > 1 and title:
