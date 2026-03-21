@@ -370,6 +370,17 @@ def load_base_as_ck0(ck_dir: Path, methods: list) -> pd.DataFrame:
     return pd.DataFrame(out) if out else pd.DataFrame()
 
 
+def load_base_as_method(ck_dir: Path) -> pd.DataFrame:
+    """Load base model as a standalone 'Base' method entry at checkpoint 8.
+    Used when group_by=method so Base appears as its own bar group."""
+    records = _load_base_json(ck_dir)
+    records = [r for r in records if r.get("probe_source") == "mp"]
+    for r in records:
+        r["method"] = "Base"
+        r["checkpoint"] = 8
+    return pd.DataFrame(records) if records else pd.DataFrame()
+
+
 def load_from_pipeline(ck_dir: Path, methods_filter: str) -> pd.DataFrame:
     """
     Load pipeline results (checkpoint-8 models) from checkpoints/*.json.
@@ -703,16 +714,26 @@ def main():
     if use_pipeline:
         checkpoints = [8]
     else:
-        # Prepend base model as checkpoint 0
+        group_by_dims = [d.strip() for d in args.group_by.split(",")]
         if not args.no_base and ck_dir.exists():
-            base_ck0 = load_base_as_ck0(ck_dir, methods)
-            if not base_ck0.empty:
-                long_df = pd.concat([base_ck0, long_df], ignore_index=True)
-                print(f"  Added base model as checkpoint 0 ({len(base_ck0)} rows).")
+            if "method" in group_by_dims and "checkpoint" not in group_by_dims:
+                # Group-by-method view: add Base as its own method at ck8
+                base_df = load_base_as_method(ck_dir)
+                if not base_df.empty:
+                    long_df = pd.concat([base_df, long_df], ignore_index=True)
+                    methods = ["Base"] + [m for m in methods if m != "Base"]
+                    print(f"  Added base model as 'Base' method ({len(base_df)} rows).")
+            else:
+                # Checkpoint-sweep view: keep Base as ck0 reference
+                base_ck0 = load_base_as_ck0(ck_dir, methods)
+                if not base_ck0.empty:
+                    long_df = pd.concat([base_ck0, long_df], ignore_index=True)
+                    print(f"  Added base model as checkpoint 0 ({len(base_ck0)} rows).")
         checkpoints = [int(c) for c in _parse_list(args.checkpoints, avail["checkpoints"])]
-        # Always include ck0 if base was added
-        if 0 not in checkpoints:
-            checkpoints = [0] + checkpoints
+        # Always include ck0 if base was added as ck0
+        if "method" not in group_by_dims or "checkpoint" in group_by_dims:
+            if 0 not in checkpoints:
+                checkpoints = [0] + checkpoints
     clfs_raw      = _parse_list(args.clf,          avail["clfs"])
     clfs          = _normalise_clf(clfs_raw)
     probe_types   = _parse_list(args.probe_type,   avail["probe_types"])
