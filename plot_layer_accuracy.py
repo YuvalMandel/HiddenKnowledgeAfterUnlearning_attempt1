@@ -183,10 +183,14 @@ METRIC_LABELS = {
     "auc":            "AUC-ROC",
 }
 
-PROBE_SOURCE_TITLES = {
-    "method": "Per-Layer Probe Accuracy — each model's own probes",
-    "base":   "Per-Layer Probe Accuracy — base probes applied to all models",
+PROBE_SOURCE_TITLE_TEMPLATE = {
+    "method": "Per-Layer Probe {metric} — each model's own probes",
+    "base":   "Per-Layer Probe {metric} — base probes applied to all models",
 }
+
+def probe_source_title(probe_source: str, metrics: list) -> str:
+    metric_label = METRIC_LABELS[metrics[0]] if len(metrics) == 1 else "Metrics"
+    return PROBE_SOURCE_TITLE_TEMPLATE[probe_source].format(metric=metric_label)
 
 # ---------------------------------------------------------------------------
 # External-logit reference line config
@@ -1035,7 +1039,7 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
         sharey="row",
         squeeze=False,
     )
-    base_title = PROBE_SOURCE_TITLES[probe_source]
+    base_title = probe_source_title(probe_source, metrics_to_plot)
     if n_clfs == 1:
         fig.suptitle(f"{base_title} ({clfs[0]})", fontsize=12, x=0.5, ha="center")
     else:
@@ -1253,7 +1257,7 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
     row_labels  = list(ALL_MODELS.keys())   # model display names in palette order
     title = (
         f"Probe Heatmap — all models  "
-        f"[{PROBE_SOURCE_TITLES[probe_source].split(' —')[0]}]{subset_lbl}"
+        f"[{probe_source_title(probe_source, [metric]).split(' —')[0]}]{subset_lbl}"
     )
     if normalize:
         vmin, vmax = _relative_data_range(data, metrics_to_plot, clfs)
