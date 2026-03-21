@@ -793,16 +793,17 @@ def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
     )
     legend_labels.append("Chance (0.5)")
 
-    right_margin = 0.78 if n_clfs == 3 else (0.72 if n_clfs == 2 else 0.65)
     fig.subplots_adjust(
-        left=0.07, right=right_margin,
+        left=0.07, right=0.97,
         bottom=0.07, top=0.94,
         hspace=0.35,
     )
-    fig.legend(
+    # Place legend inside the bottom-left of the last axes
+    last_ax = axes[-1][0]
+    last_ax.legend(
         legend_handles, legend_labels,
-        loc="center left",
-        bbox_to_anchor=(right_margin + 0.01, 0.5),
+        loc="lower left",
+        ncol=2,
         fontsize=9,
         framealpha=0.9,
         title="Model",
