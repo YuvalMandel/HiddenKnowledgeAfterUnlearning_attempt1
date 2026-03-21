@@ -69,12 +69,19 @@ NON_PROBE   = {"gen", "logit", "mcq"}
 SKIP_COLS   = {"lyr"}          # best-layer integer, not a plottable metric
 
 BAND_LABELS = {
-    "pl":    "Per-Layer",   "ml":    "Mid-Band",   "mb":    "Mid-Band",
-    "fl":    "Full-Layer",  "ib":    "Init-Band",
-    "ibe":   "Init+Emb",    "eb":    "End-Band",   "ibnp":  "IB-NoPCA",
-    "vote":  "Vote-Ens",    "avg":   "Avg-Ens",
-    "gen":   "Generation",  "logit": "Logit",     "mcq": "MCQ",
+    "pl":    "Best Single Layer", "ml":   "Mid-Band",    "mb":   "Mid-Band",
+    "fl":    "All Layers",        "ib":   "Init-Band",
+    "ibe":   "Init+Emb",          "eb":   "End-Band",    "ibnp": "IB-NoPCA",
+    "vote":  "Vote-Ens",          "avg":  "Avg-Ens",
+    "gen":   "Generation",        "logit":"Logit",        "mcq":  "MCQ",
 }
+
+# Preferred display order for probe-type hues (used when color_by includes probe_type)
+BAND_DISPLAY_ORDER = [
+    "All Layers", "Best Single Layer", "Init-Band", "Mid-Band", "End-Band",
+    "IB-NoPCA", "Vote-Ens", "Avg-Ens", "Init+Emb",
+]
+_BAND_SORT_KEY = {label: i for i, label in enumerate(BAND_DISPLAY_ORDER)}
 CLF_LABELS  = {"lr": "LR", "rf": "RF", "adaboost": "AdaBoost", "N/A": "—"}
 SRC_LABELS  = {"bp": "Base-Probe", "mp": "Method-Probe",
                "gen": "Gen", "logit": "Logit", "mcq": "MCQ"}
@@ -505,7 +512,14 @@ def plot_bars(long_df: pd.DataFrame, *,
             means  = agg.groupby(GRP)["value"].mean()
             groups = sorted(groups, key=lambda g: means.get(g, 0), reverse=True)
 
-        hues = sorted(agg[HUE].unique(), key=_natural_sort_key) if color_by else [None]
+        if color_by:
+            if "probe_type" in color_by:
+                hues = sorted(agg[HUE].unique(),
+                              key=lambda h: _BAND_SORT_KEY.get(h, 99))
+            else:
+                hues = sorted(agg[HUE].unique(), key=_natural_sort_key)
+        else:
+            hues = [None]
 
         n_g   = len(groups)
         n_h   = len(hues)
