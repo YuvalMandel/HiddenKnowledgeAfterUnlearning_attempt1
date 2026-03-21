@@ -184,9 +184,8 @@ METRIC_LABELS = {
 }
 
 PROBE_SOURCE_TITLES = {
-    "method": "Method Probes (Table 3) — each model's own probes",
-    "base":   "Base Probes (Table 2) — base probes on all models\n"
-              "(Llama3-8B uses its own probes)",
+    "method": "Per-Layer Probe Accuracy — each model's own probes",
+    "base":   "Per-Layer Probe Accuracy — base probes applied to all models",
 }
 
 # ---------------------------------------------------------------------------
@@ -773,7 +772,7 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
 # ---------------------------------------------------------------------------
 
 def _setup_ax(ax, row_idx, ax_idx, n_rows, clf_name, metric):
-    if row_idx == 0:
+    if row_idx == 0 and clf_name is not None:
         ax.set_title(clf_name, fontsize=12)
     if ax_idx == 0:
         ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
@@ -1035,14 +1034,18 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
         sharey="row",
         squeeze=False,
     )
-    fig.suptitle(PROBE_SOURCE_TITLES[probe_source], fontsize=11, y=1.01)
+    base_title = PROBE_SOURCE_TITLES[probe_source]
+    if n_clfs == 1:
+        fig.suptitle(f"{base_title} ({clfs[0]})", fontsize=12, x=0.5, ha="center")
+    else:
+        fig.suptitle(base_title, fontsize=11, x=0.5, ha="center")
 
     for row_idx, m in enumerate(metrics_to_plot):
         y_max = row_ymax[m]
 
         for ax_idx, clf_name in enumerate(clfs):
             ax = axes[row_idx][ax_idx]
-            _setup_ax(ax, row_idx, ax_idx, n_rows, clf_name, m)
+            _setup_ax(ax, row_idx, ax_idx, n_rows, clf_name if n_clfs > 1 else None, m)
             ax.set_ylim(Y_MIN, y_max)
 
             clf_data    = data[m].get(clf_name, {})
