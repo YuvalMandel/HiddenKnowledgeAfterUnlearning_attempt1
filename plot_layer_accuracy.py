@@ -916,10 +916,10 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 
     fig, axes = plt.subplots(
         n_rows_fig, n_clfs,
-        figsize=(6 * n_clfs, 3.5 * n_rows_fig),
+        figsize=(max(13, 6 * n_clfs), max(5.5, 3.5 * n_rows_fig)),
         squeeze=False,
     )
-    fig.suptitle(title, fontsize=11, y=1.01)
+    fig.suptitle(title, fontsize=11, x=0.5, ha="center")
 
     for row_idx, metric in enumerate(metrics_to_plot):
         for ax_idx, clf_name in enumerate(clfs):
@@ -971,9 +971,10 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
             ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=5, rotation=90)
 
             ax.set_yticks(range(len(present)))
-            ax.set_yticklabels(present, fontsize=8)
+            display_labels = [lb.replace("Base (Instruct)", "Base") for lb in present]
+            ax.set_yticklabels(display_labels, fontsize=8)
 
-    fig.subplots_adjust(hspace=0.4, wspace=0.35)
+    fig.subplots_adjust(left=0.07, right=0.97, bottom=0.10, top=0.92, hspace=0.3, wspace=0.25)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\nSaved -> {out_path}")
     plt.close(fig)
