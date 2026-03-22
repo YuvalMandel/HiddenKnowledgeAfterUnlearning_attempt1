@@ -113,6 +113,8 @@ def compute_probe_scores(hs: np.ndarray, probe_set: dict) -> tuple[np.ndarray, n
     ib_start, ib_end = probe_set["init_band_range"]
     X_ib = hs[:, ib_start: ib_end + 1, :].reshape(len(hs), -1)
     rf_pipe = probe_set["init_band"]["RF"]
+    # Force single-threaded RF to avoid /dev/shm exhaustion on shared nodes
+    rf_pipe[-1].set_params(n_jobs=1)
     early_rf_proba = rf_pipe.predict_proba(X_ib)[:, 1]
 
     # ── Mid linear: mid_band (layers 10–22) ─────────────────────────────────
