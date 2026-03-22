@@ -263,6 +263,13 @@ GAT_NAME_MAP = {
     "PB&J":       "PB&J",
 }
 DEFAULT_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+
+# Map safe filenames → display names used as index in summary tables
+SAFE_TO_DISPLAY = {"PB_J": "PB&J", "RMU_LAT": "RMU-LAT"}
+
+def _display_name(m: str) -> str:
+    """Resolve safe filename variant to the name used in summary table index."""
+    return SAFE_TO_DISPLAY.get(m, m)
 OFFSETS = {
     "GradDiff": ( 8,  5),
     "RMU":      ( 8,  5),
@@ -315,9 +322,10 @@ def compute_summary_re_dr(
 
     rows = []
     for m in methods:
-        APP_post = float(t3.loc[m, RE_COL])
-        ApP = float(t2.loc[m, DR_COL])
-        APp = float(t5.loc[m, APp_COL])
+        dm = _display_name(m)
+        APP_post = float(t3.loc[dm, RE_COL])
+        ApP = float(t2.loc[dm, DR_COL])
+        APp = float(t5.loc[dm, APp_COL])
 
         denom_re = APP_base - 0.5
         RE = np.nan if abs(denom_re) < 1e-12 else (APP_base - APP_post) / denom_re
@@ -329,7 +337,7 @@ def compute_summary_re_dr(
         DR = np.nanmean([DR_fwd, DR_bwd])
 
         rows.append({
-            "method": m,
+            "method": dm,
             "metric": metric,
             "RE": RE,
             "DR": DR,
