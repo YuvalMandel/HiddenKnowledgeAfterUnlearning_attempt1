@@ -44,7 +44,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -118,25 +117,12 @@ def project(X: np.ndarray, scaler, pca) -> np.ndarray:
     return pca.transform(scaler.transform(X))
 
 
-def fit_lr(Z: np.ndarray, y: np.ndarray) -> LogisticRegression:
-    clf = LogisticRegression(max_iter=1000, random_state=0)
-    clf.fit(Z, y)
-    acc = (clf.predict(Z) == y).mean()
-    print(f"  LR train acc = {acc:.3f}")
-    return clf
-
-
 def global_limits(all_Z: list, margin: float = MARGIN):
     x_min = min(Z[:, 0].min() for Z in all_Z) - margin
     x_max = max(Z[:, 0].max() for Z in all_Z) + margin
     y_min = min(Z[:, 1].min() for Z in all_Z) - margin
     y_max = max(Z[:, 1].max() for Z in all_Z) + margin
     return (x_min, x_max), (y_min, y_max)
-
-
-def grid_proba(clf, xx, yy) -> np.ndarray:
-    """Evaluate clf.predict_proba on a meshgrid, returns reshaped array."""
-    return clf.predict_proba(np.c_[xx.ravel(), yy.ravel()])[:, 1].reshape(xx.shape)
 
 
 def grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca) -> np.ndarray:
@@ -155,29 +141,23 @@ def grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca) -> np.ndarray:
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-def _draw_panel(ax, Z: np.ndarray, y: np.ndarray, clf_viz: LogisticRegression,
+def _draw_panel(ax, Z: np.ndarray, y: np.ndarray,
                 title: str, xlim: tuple, ylim: tuple,
-                probe_pipe=None, viz_scaler=None, viz_pca=None):
-    """Draw scatter + visualization LR boundary, optionally + original probe boundary."""
+                probe_pipe=None, X_orig=None, viz_scaler=None, viz_pca=None):
+    """Draw scatter + original probe boundary (if provided)."""
     xx, yy = np.meshgrid(
         np.linspace(xlim[0], xlim[1], GRID_N),
         np.linspace(ylim[0], ylim[1], GRID_N),
     )
 
-    # ── Background shading: visualization LR ──────────────────────────────────
-    proba_viz = grid_proba(clf_viz, xx, yy)
-    ax.contourf(xx, yy, proba_viz, levels=[0, 0.5, 1],
-                colors=["#c8d9f7", "#f7c8c8"], alpha=0.30)
-    ax.contour(xx, yy, proba_viz, levels=[0.5],
-               colors=["#333333"], linewidths=1.2, linestyles="--",
-               zorder=3)
-
-    # ── Original probe boundary (solid colored line) ───────────────────────────
+    # ── Original probe boundary ────────────────────────────────────────────────
     if probe_pipe is not None:
         proba_probe = grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca)
+        ax.contourf(xx, yy, proba_probe, levels=[0, 0.5, 1],
+                    colors=["#c8d9f7", "#f7c8c8"], alpha=0.30)
         ax.contour(xx, yy, proba_probe, levels=[0.5],
                    colors=["#228B22"], linewidths=1.8, linestyles="-",
-                   zorder=4)
+                   zorder=3)
 
     # ── Scatter ────────────────────────────────────────────────────────────────
     for val in [1, 0]:
@@ -185,8 +165,13 @@ def _draw_panel(ax, Z: np.ndarray, y: np.ndarray, clf_viz: LogisticRegression,
         ax.scatter(Z[idx, 0], Z[idx, 1], color=COLORS[val],
                    alpha=ALPHA, s=S, linewidths=0, zorder=5)
 
-    train_acc = (clf_viz.predict(Z) == y).mean()
-    ax.set_title(f"{title}\nLR acc = {train_acc:.3f}", fontsize=10)
+    # ── Title with probe accuracy ──────────────────────────────────────────────
+    if probe_pipe is not None and X_orig is not None:
+        probe_acc = (probe_pipe.predict(X_orig) == y).mean()
+        ax.set_title(f"{title}\nProbe acc = {probe_acc:.3f}", fontsize=10)
+    else:
+        ax.set_title(title, fontsize=10)
+
     ax.set_xlabel("PC1", fontsize=8)
     ax.set_ylabel("PC2", fontsize=8)
     ax.set_xlim(xlim)
@@ -194,8 +179,8 @@ def _draw_panel(ax, Z: np.ndarray, y: np.ndarray, clf_viz: LogisticRegression,
     ax.tick_params(labelsize=7)
 
 
-def save_frame(Z_base, y_base, clf_base_viz,
-               Z_ck, y_ck, clf_ck_viz,
+def save_frame(Z_base, y_base, X_base,
+               Z_ck, y_ck, X_ck,
                ck_num: int, out_path: Path,
                method: str, pca_basis: str,
                xlim: tuple, ylim: tuple,
@@ -204,31 +189,29 @@ def save_frame(Z_base, y_base, clf_base_viz,
                show_probe: bool = False):
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-    basis_label = f"PCA basis: {pca_basis}"
     fig.suptitle(
-        f"{method} — hidden-state PCA  |  checkpoint {ck_num}  ({basis_label})",
+        f"{method} — hidden-state PCA  |  checkpoint {ck_num}  (PCA basis: {pca_basis})",
         fontsize=12,
     )
 
-    _draw_panel(axes[0], Z_base, y_base, clf_base_viz,
+    _draw_panel(axes[0], Z_base, y_base,
                 "Pre-unlearning (base)", xlim, ylim,
                 probe_pipe=probe_base if show_probe else None,
-                viz_scaler=viz_scaler, viz_pca=viz_pca)
+                X_orig=X_base, viz_scaler=viz_scaler, viz_pca=viz_pca)
 
-    _draw_panel(axes[1], Z_ck, y_ck, clf_ck_viz,
+    _draw_panel(axes[1], Z_ck, y_ck,
                 f"Post-unlearning (ck {ck_num})", xlim, ylim,
                 probe_pipe=probe_ck if show_probe else None,
-                viz_scaler=viz_scaler, viz_pca=viz_pca)
+                X_orig=X_ck, viz_scaler=viz_scaler, viz_pca=viz_pca)
 
     # ── Legend ────────────────────────────────────────────────────────────────
     patches = [
         mpatches.Patch(color=COLORS[1], label="True (correct answer)"),
         mpatches.Patch(color=COLORS[0], label="False (wrong answer)"),
-        mpatches.Patch(color="#333333", label="Viz LR boundary (dashed)"),
     ]
     if show_probe:
         patches.append(
-            mpatches.Patch(color="#228B22", label="Original pipeline probe boundary")
+            mpatches.Patch(color="#228B22", label="Pipeline probe boundary")
         )
     fig.legend(
         handles=patches, loc="lower center", ncol=len(patches),
@@ -337,14 +320,11 @@ def main():
     if args.pca_basis != "pre":
         Z_base = project(X_base, viz_scaler, viz_pca)
 
-    clf_base_viz = fit_lr(Z_base, y_base)
-
     # Project all checkpoints
-    projected = []   # (ck_num, Z_ck, y_ck, clf_ck_viz, probe_ck)
+    projected = []   # (ck_num, Z_ck, X_ck, y_ck, probe_ck)
     for ck_num, X_ck, y_ck, ck_probe in ck_data:
         Z_ck = project(X_ck, viz_scaler, viz_pca)
-        clf_ck_viz = fit_lr(Z_ck, y_ck)
-        projected.append((ck_num, Z_ck, y_ck, clf_ck_viz, ck_probe))
+        projected.append((ck_num, Z_ck, X_ck, y_ck, ck_probe))
 
     # ── Global axis limits ────────────────────────────────────────────────────
     all_Z = [Z_base] + [Z_ck for _, Z_ck, _, _, _ in projected]
@@ -362,12 +342,12 @@ def main():
     print(f"\n[4/4] Generating frames")
     frame_paths = []
 
-    for ck_num, Z_ck, y_ck, clf_ck_viz, ck_probe in projected:
+    for ck_num, Z_ck, X_ck, y_ck, ck_probe in projected:
         N_common = min(N_base, len(Z_ck))
         frame_path = out / f"frame_ck{ck_num:02d}.png"
         save_frame(
-            Z_base[:N_common], y_base[:N_common], clf_base_viz,
-            Z_ck[:N_common],   y_ck[:N_common],   clf_ck_viz,
+            Z_base[:N_common], y_base[:N_common], X_base[:N_common],
+            Z_ck[:N_common],   y_ck[:N_common],   X_ck[:N_common],
             ck_num, frame_path,
             method=args.method, pca_basis=args.pca_basis,
             xlim=xlim, ylim=ylim,
