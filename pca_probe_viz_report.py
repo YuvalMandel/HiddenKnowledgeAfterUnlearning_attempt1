@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-pca_probe_viz_report.py — PCA visualization: base (pre) vs ELM checkpoints (post).
+pca_probe_viz_report.py — PCA visualization: base (pre) vs unlearning checkpoints (post).
 
-For each ELM training checkpoint 1-8 produces a 2-panel PNG:
+For each training checkpoint 1-8 of a given method produces a 2-panel PNG:
   Left:  base model hidden states (fixed) in PCA 2D + LR decision boundary
   Right: checkpoint N hidden states in the same PCA space + its own LR boundary
 
@@ -10,12 +10,15 @@ Also saves an animated GIF of all frames.
 
 Paths read (from main pipeline):
   checkpoints/base_hs_test.npy
-  checkpoints/sweep_ELM/ck{1..8}/hs_test.npy
+  checkpoints/sweep_<METHOD>/ck{1..8}/hs_test.npy
   data/wmdp_tf_pairs.csv        (for labels — test split)
 
+Valid method names: GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, PB_J
+
 Usage:
-  python pca_probe_viz_report.py [--out_dir pca_viz] [--layer_start 10] [--layer_end 22]
-  python pca_probe_viz_report.py --out_dir pca_viz --layer_start 10 --layer_end 22
+  python pca_probe_viz_report.py --method ELM
+  python pca_probe_viz_report.py --method RMU --out_dir pca_viz_rmu
+  python pca_probe_viz_report.py --method ELM --layer_start 10 --layer_end 22
 """
 
 import argparse
@@ -37,6 +40,7 @@ CHECKPOINT_DIR = Path("checkpoints")
 DATA_DIR       = Path("data")
 WMDP_CSV_PATH  = DATA_DIR / "wmdp_tf_pairs.csv"
 
+VALID_METHODS  = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
 N_CHECKPOINTS  = 8
 BAND_DEFAULT_START = 10
 BAND_DEFAULT_END   = 22   # inclusive
@@ -139,10 +143,10 @@ def _draw_panel(ax, Z: np.ndarray, y: np.ndarray, clf: LogisticRegression,
 
 def save_frame(Z_base, y_base, clf_base,
                Z_ck, y_ck, clf_ck,
-               ck_num: int, out_path: Path):
+               ck_num: int, out_path: Path, method: str = ""):
     """Two-panel figure: left=base (pre), right=checkpoint (post)."""
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-    fig.suptitle(f"ELM — hidden-state PCA  |  checkpoint {ck_num}", fontsize=12)
+    fig.suptitle(f"{method} — hidden-state PCA  |  checkpoint {ck_num}", fontsize=12)
 
     _draw_panel(axes[0], Z_base, y_base, clf_base, "Pre-unlearning (base)")
     _draw_panel(axes[1], Z_ck,   y_ck,   clf_ck,
@@ -164,13 +168,20 @@ def save_frame(Z_base, y_base, clf_base,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out_dir",      default="pca_viz")
+    ap.add_argument("--method",       default="ELM",
+                    choices=VALID_METHODS,
+                    help="Unlearning method to visualize (default: ELM)")
+    ap.add_argument("--out_dir",      default=None,
+                    help="Output directory (default: pca_viz_<METHOD>)")
     ap.add_argument("--layer_start",  type=int, default=BAND_DEFAULT_START)
     ap.add_argument("--layer_end",    type=int, default=BAND_DEFAULT_END)
     ap.add_argument("--split",        default="test")
     ap.add_argument("--gif",          action="store_true", default=True,
                     help="Also save animated GIF (requires Pillow)")
     args = ap.parse_args()
+
+    if args.out_dir is None:
+        args.out_dir = f"pca_viz_{args.method}"
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -200,11 +211,11 @@ def main():
     clf_base = fit_lr(Z_base, y)
 
     # ── Checkpoints ───────────────────────────────────────────────────────────
-    print("\n[4/4] Generating frames")
+    print(f"\n[4/4] Generating frames for method={args.method}")
     frame_paths = []
 
     for ck in range(1, N_CHECKPOINTS + 1):
-        ck_hs = load_hs(CHECKPOINT_DIR / f"sweep_ELM" / f"ck{ck}" / "hs_test.npy")
+        ck_hs = load_hs(CHECKPOINT_DIR / f"sweep_{args.method}" / f"ck{ck}" / "hs_test.npy")
         if ck_hs is None:
             print(f"  [skip] ck{ck} — hs_test.npy missing")
             continue
@@ -223,7 +234,7 @@ def main():
         frame_path = out / f"frame_ck{ck:02d}.png"
         save_frame(Z_base_aligned, y_base_ck, clf_base,
                    Z_ck[:len(y_base_ck)], y_ck[:len(y_base_ck)], clf_ck,
-                   ck, frame_path)
+                   ck, frame_path, method=args.method)
         frame_paths.append(frame_path)
 
     # ── GIF ───────────────────────────────────────────────────────────────────
@@ -231,7 +242,7 @@ def main():
         try:
             from PIL import Image
             imgs = [Image.open(p) for p in frame_paths]
-            gif_path = out / "elm_sweep.gif"
+            gif_path = out / f"{args.method}_sweep.gif"
             imgs[0].save(
                 gif_path, save_all=True, append_images=imgs[1:],
                 loop=0, duration=800,
