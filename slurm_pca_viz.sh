@@ -16,6 +16,6 @@ conda activate unlearning
 
 mkdir -p logs
 
-python pca_probe_viz_report.py --out_dir pca_viz "$@"
+python pca_probe_viz_report.py "$@"
 
 echo "Job finished at $(date)"
