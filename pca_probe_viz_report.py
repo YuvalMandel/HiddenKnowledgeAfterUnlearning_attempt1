@@ -3,34 +3,33 @@
 pca_probe_viz_report.py — PCA visualization: base (pre) vs unlearning checkpoints (post).
 
 For each training checkpoint 1-8 of a given method produces a 2-panel PNG:
-  Left:  base model hidden states (fixed) in PCA 2D + LR decision boundary
-  Right: checkpoint N hidden states in the same PCA space + its own LR boundary
+  Left:  base model hidden states in PCA 2D + selected probe boundaries
+  Right: checkpoint N hidden states in the same PCA space + probe boundaries
 
-Axes are fixed across all frames (global limits computed before plotting).
-Also saves an animated GIF of all frames.
+Axes are fixed across all frames.  Saves an animated GIF of all frames.
 
---show_probe:
-  Also overlays the original pipeline probe (per-layer LR from the main
-  training run) on each panel.  The probe boundary is computed by inverting
-  the visualization transform (PCA-2 → original feature space) and running
-  probe.predict_proba on each grid point, so the probe "experiences" the
-  same projection as the dots.  The visualization automatically switches to
-  single-layer features (the probe's best layer) so both are consistent.
+Probe boundaries are shown by inverting the PCA transform back to original
+feature space and running each probe's predict_proba on the grid.
+  - Per-layer probe: exact (probe and viz share the same H-dim space).
+  - Multi-layer probes (mid_band, full_layer, etc.): approximate — the
+    inverted band-mean vector is tiled to reconstruct the concatenated
+    feature space expected by the probe.
 
-Paths read (from main pipeline):
+Accuracy printed in the subtitle is always computed on the actual (non-
+approximated) test hidden states.
+
+Paths read:
   checkpoints/base_hs_test.npy
-  checkpoints/base_probes.pkl               (when --show_probe)
+  checkpoints/base_probes.pkl
   checkpoints/sweep_<METHOD>/ck{N}/hs_test.npy
-  checkpoints/sweep_<METHOD>/ck{N}/probes.pkl  (when --show_probe)
+  checkpoints/sweep_<METHOD>/ck{N}/probes.pkl
   data/wmdp_tf_pairs.csv
-
-Valid method names: GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, PB_J
 
 Usage:
   python pca_probe_viz_report.py --method ELM
-  python pca_probe_viz_report.py --method ELM --show_probe
-  python pca_probe_viz_report.py --method ELM --show_probe --probe_layer 18
-  python pca_probe_viz_report.py --method RMU --pca_basis post
+  python pca_probe_viz_report.py --method ELM --pca_basis post
+  python pca_probe_viz_report.py --method ELM --probes per_layer mid_band full_layer
+  python pca_probe_viz_report.py --method ELM --probes all
 """
 
 import argparse
@@ -54,16 +53,48 @@ WMDP_CSV_PATH      = DATA_DIR / "wmdp_tf_pairs.csv"
 VALID_METHODS      = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
 N_CHECKPOINTS      = 8
 BAND_DEFAULT_START = 10
-BAND_DEFAULT_END   = 22   # inclusive
+BAND_DEFAULT_END   = 22
 
-COLORS = {1: "#e05b4b", 0: "#4b7be0"}   # red=True, blue=False
+# ── Probe config ──────────────────────────────────────────────────────────────
+# Order determines draw order (last = on top).
+# "range_key": key in probe_set for the (start, end) layer tuple.
+# "dict_key":  key in probe_set for the {clf_name: pipe} dict.
+# "per_layer": if True, probe operates on hs[:, layer, :] (single layer, exact inversion).
+#              if False, probe operates on hs[:, s:e+1, :].reshape(N,-1) (tiled approx).
+PROBE_CONFIGS = {
+    "init_band":     {"color": "#CC6600", "label": "Init-band LR (1–9)",
+                      "dict_key": "init_band",     "range_key": "init_band_range",
+                      "per_layer": False},
+    "init_band_emb": {"color": "#888888", "label": "Init-band+emb LR (0–9)",
+                      "dict_key": "init_band_emb", "range_key": "init_band_emb_range",
+                      "per_layer": False},
+    "ib_no_pca":     {"color": "#FF66AA", "label": "Init-band LR no-PCA (1–6)",
+                      "dict_key": "ib_no_pca",     "range_key": "ib_no_pca_range",
+                      "per_layer": False},
+    "end_band":      {"color": "#009999", "label": "End-band LR (23+)",
+                      "dict_key": "end_band",       "range_key": "end_band_range",
+                      "per_layer": False},
+    "full_layer":    {"color": "#9933CC", "label": "Full-layer LR (all)",
+                      "dict_key": "full_layer",     "range_key": "full_layer_range",
+                      "per_layer": False},
+    "mid_band":      {"color": "#FF6600", "label": "Mid-band LR (10–22)",
+                      "dict_key": "mid_band",       "range_key": "mid_band_range",
+                      "per_layer": False},
+    "per_layer":     {"color": "#228B22", "label": "Per-layer LR (best layer)",
+                      "dict_key": "per_layer",      "range_key": None,
+                      "per_layer": True},
+}
+ALL_PROBE_KEYS   = list(PROBE_CONFIGS.keys())
+DEFAULT_PROBES   = ["per_layer"]
+
+COLORS = {1: "#e05b4b", 0: "#4b7be0"}
 ALPHA  = 0.55
 S      = 14
 GRID_N = 300
 MARGIN = 0.6
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
+# ── Data helpers ──────────────────────────────────────────────────────────────
 
 def load_labels_from_csv(csv_path: Path, split: str = "test") -> np.ndarray:
     labels = []
@@ -89,19 +120,45 @@ def load_probe_set(path: Path) -> dict | None:
         print(f"  [warn] Missing probe: {path}")
         return None
     with open(path, "rb") as f:
-        ps = pickle.load(f)
-    return ps
+        return pickle.load(f)
 
 
-def extract_features(hs: np.ndarray, layer: int | None,
-                     band_start: int, band_end: int) -> np.ndarray:
-    """Single layer if layer is set, otherwise band mean."""
-    if layer is not None:
-        return hs[:, layer, :]
-    return hs[:, band_start: band_end + 1, :].mean(axis=1)
+def band_mean(hs: np.ndarray, start: int, end: int) -> np.ndarray:
+    return hs[:, start: end + 1, :].mean(axis=1)
 
 
-# ── PCA + LR helpers ──────────────────────────────────────────────────────────
+# ── Probe feature extraction ──────────────────────────────────────────────────
+
+def get_probe_pipe(probe_set: dict, probe_key: str, best_layer: int):
+    """Return the LR pipeline for a given probe type, or None if missing."""
+    cfg = PROBE_CONFIGS[probe_key]
+    dk  = cfg["dict_key"]
+    if dk not in probe_set:
+        return None
+    d = probe_set[dk]
+    if cfg["per_layer"]:
+        return d.get("LR", {}).get(best_layer)
+    return d.get("LR")
+
+
+def get_probe_features(hs: np.ndarray, probe_set: dict,
+                       probe_key: str, best_layer: int):
+    """
+    Return (X_feat, n_tile) where:
+      X_feat  — features as the probe was trained on  (N, D)
+      n_tile  — how many copies of the band-mean vec were concatenated
+                (1 for per-layer, >1 for multi-layer)
+    """
+    cfg = PROBE_CONFIGS[probe_key]
+    if cfg["per_layer"]:
+        return hs[:, best_layer, :], 1
+    rk = cfg["range_key"]
+    s, e = probe_set[rk]
+    n = e - s + 1
+    return hs[:, s: e + 1, :].reshape(len(hs), -1), n
+
+
+# ── PCA helpers ───────────────────────────────────────────────────────────────
 
 def fit_pca_scaler(X: np.ndarray, n_components: int = 2):
     scaler = StandardScaler()
@@ -113,65 +170,76 @@ def fit_pca_scaler(X: np.ndarray, n_components: int = 2):
     return Z, scaler, pca
 
 
-def project(X: np.ndarray, scaler, pca) -> np.ndarray:
+def project(X, scaler, pca):
     return pca.transform(scaler.transform(X))
 
 
 def global_limits(all_Z: list, margin: float = MARGIN):
-    x_min = min(Z[:, 0].min() for Z in all_Z) - margin
-    x_max = max(Z[:, 0].max() for Z in all_Z) + margin
-    y_min = min(Z[:, 1].min() for Z in all_Z) - margin
-    y_max = max(Z[:, 1].max() for Z in all_Z) + margin
-    return (x_min, x_max), (y_min, y_max)
+    return (
+        (min(Z[:, 0].min() for Z in all_Z) - margin,
+         max(Z[:, 0].max() for Z in all_Z) + margin),
+        (min(Z[:, 1].min() for Z in all_Z) - margin,
+         max(Z[:, 1].max() for Z in all_Z) + margin),
+    )
 
 
-def grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca) -> np.ndarray:
+def grid_proba_via_probe(probe_pipe, xx, yy,
+                          viz_scaler, viz_pca, n_tile: int = 1) -> np.ndarray:
     """
-    Evaluate the pipeline probe on grid points by inverting the visualization
-    transform.  Each (z1, z2) is mapped back to original feature space via
-    PCA inverse → StandardScaler inverse, then probe.predict_proba is called.
-    The probe has its own internal scaler so it handles the raw features.
+    Evaluate probe on a 2D grid by inverting the visualization transform.
+    Per-layer probes (n_tile=1): exact.
+    Multi-layer probes (n_tile>1): approximate — band-mean vector is tiled
+    to reconstruct the concatenated feature space.
     """
     grid_2d = np.c_[xx.ravel(), yy.ravel()]
-    x_scaled_approx = viz_pca.inverse_transform(grid_2d)        # → scaled feature space
-    x_orig_approx   = viz_scaler.inverse_transform(x_scaled_approx)  # → original feature space
-    proba = probe_pipe.predict_proba(x_orig_approx)[:, 1]
-    return proba.reshape(xx.shape)
+    x_scaled = viz_pca.inverse_transform(grid_2d)
+    x_orig   = viz_scaler.inverse_transform(x_scaled)
+    if n_tile > 1:
+        x_orig = np.tile(x_orig, n_tile)
+    return probe_pipe.predict_proba(x_orig)[:, 1].reshape(xx.shape)
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-def _draw_panel(ax, Z: np.ndarray, y: np.ndarray,
-                title: str, xlim: tuple, ylim: tuple,
-                probe_pipe=None, X_orig=None, viz_scaler=None, viz_pca=None):
-    """Draw scatter + original probe boundary (if provided)."""
+def _draw_panel(ax, Z: np.ndarray, y: np.ndarray, title: str,
+                xlim: tuple, ylim: tuple,
+                probe_entries: list,   # list of (probe_pipe, X_orig, n_tile, color, label)
+                viz_scaler, viz_pca):
+    """
+    Draw scatter + one boundary + shading per probe entry.
+    probe_entries is drawn in order; last entry's shading wins.
+    """
     xx, yy = np.meshgrid(
         np.linspace(xlim[0], xlim[1], GRID_N),
         np.linspace(ylim[0], ylim[1], GRID_N),
     )
 
-    # ── Original probe boundary ────────────────────────────────────────────────
-    if probe_pipe is not None:
-        proba_probe = grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca)
-        ax.contourf(xx, yy, proba_probe, levels=[0, 0.5, 1],
-                    colors=["#c8d9f7", "#f7c8c8"], alpha=0.30)
-        ax.contour(xx, yy, proba_probe, levels=[0.5],
-                   colors=["#228B22"], linewidths=1.8, linestyles="-",
-                   zorder=3)
+    # Draw probes back-to-front (per_layer on top)
+    for probe_pipe, X_orig, n_tile, color, _ in probe_entries:
+        if probe_pipe is None:
+            continue
+        proba = grid_proba_via_probe(probe_pipe, xx, yy, viz_scaler, viz_pca, n_tile)
+        ax.contourf(xx, yy, proba, levels=[0, 0.5, 1],
+                    colors=["#c8d9f7", "#f7c8c8"], alpha=0.20)
+        ax.contour(xx, yy, proba, levels=[0.5],
+                   colors=[color], linewidths=1.6, linestyles="-", zorder=3)
 
-    # ── Scatter ────────────────────────────────────────────────────────────────
+    # Scatter
     for val in [1, 0]:
         idx = y == val
         ax.scatter(Z[idx, 0], Z[idx, 1], color=COLORS[val],
                    alpha=ALPHA, s=S, linewidths=0, zorder=5)
 
-    # ── Title with probe accuracy ──────────────────────────────────────────────
-    if probe_pipe is not None and X_orig is not None:
-        probe_acc = (probe_pipe.predict(X_orig) == y).mean()
-        ax.set_title(f"{title}\nProbe acc = {probe_acc:.3f}", fontsize=10)
-    else:
-        ax.set_title(title, fontsize=10)
+    # Accuracy subtitle (one line per probe)
+    acc_lines = []
+    for probe_pipe, X_orig, _, _, label in probe_entries:
+        if probe_pipe is None or X_orig is None:
+            continue
+        acc = (probe_pipe.predict(X_orig) == y[:len(X_orig)]).mean()
+        acc_lines.append(f"{label}: {acc:.3f}")
 
+    subtitle = "  |  ".join(acc_lines) if acc_lines else ""
+    ax.set_title(f"{title}\n{subtitle}", fontsize=9)
     ax.set_xlabel("PC1", fontsize=8)
     ax.set_ylabel("PC2", fontsize=8)
     ax.set_xlim(xlim)
@@ -179,42 +247,42 @@ def _draw_panel(ax, Z: np.ndarray, y: np.ndarray,
     ax.tick_params(labelsize=7)
 
 
-def save_frame(Z_base, y_base, X_base,
-               Z_ck, y_ck, X_ck,
+def save_frame(Z_base, y_base, Z_ck, y_ck,
                ck_num: int, out_path: Path,
                method: str, pca_basis: str,
                xlim: tuple, ylim: tuple,
-               probe_base=None, probe_ck=None,
-               viz_scaler=None, viz_pca=None,
-               show_probe: bool = False):
+               probe_entries_base: list,
+               probe_entries_ck: list,
+               viz_scaler, viz_pca):
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     fig.suptitle(
         f"{method} — hidden-state PCA  |  checkpoint {ck_num}  (PCA basis: {pca_basis})",
         fontsize=12,
     )
 
     _draw_panel(axes[0], Z_base, y_base,
-                "Pre-unlearning (base)", xlim, ylim,
-                probe_pipe=probe_base if show_probe else None,
-                X_orig=X_base, viz_scaler=viz_scaler, viz_pca=viz_pca)
+                "Pre-unlearning (base)",
+                xlim, ylim, probe_entries_base, viz_scaler, viz_pca)
 
     _draw_panel(axes[1], Z_ck, y_ck,
-                f"Post-unlearning (ck {ck_num})", xlim, ylim,
-                probe_pipe=probe_ck if show_probe else None,
-                X_orig=X_ck, viz_scaler=viz_scaler, viz_pca=viz_pca)
+                f"Post-unlearning (ck {ck_num})",
+                xlim, ylim, probe_entries_ck, viz_scaler, viz_pca)
 
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # Legend
     patches = [
         mpatches.Patch(color=COLORS[1], label="True (correct answer)"),
         mpatches.Patch(color=COLORS[0], label="False (wrong answer)"),
     ]
-    if show_probe:
-        patches.append(
-            mpatches.Patch(color="#228B22", label="Pipeline probe boundary")
-        )
+    shown_labels = set()
+    for entries in [probe_entries_base, probe_entries_ck]:
+        for pipe, _, _, color, label in entries:
+            if pipe is not None and label not in shown_labels:
+                patches.append(mpatches.Patch(color=color, label=label))
+                shown_labels.add(label)
+
     fig.legend(
-        handles=patches, loc="lower center", ncol=len(patches),
+        handles=patches, loc="lower center", ncol=min(len(patches), 4),
         fontsize=8, frameon=True, fancybox=True, framealpha=0.85,
         edgecolor="#aaaaaa", bbox_to_anchor=(0.5, 0.0),
     )
@@ -229,25 +297,30 @@ def save_frame(Z_base, y_base, X_base,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--method",       default="ELM", choices=VALID_METHODS)
-    ap.add_argument("--pca_basis",    default="pre", choices=["pre", "post"],
-                    help="pre: PCA on base; post: PCA on last checkpoint")
-    ap.add_argument("--show_probe",   action="store_true",
-                    help="Overlay original pipeline probe boundary (green solid line)")
-    ap.add_argument("--probe_layer",  type=int, default=None,
-                    help="Layer to use for probe + visualization when --show_probe "
-                         "(default: auto from base probe best_layers[LR])")
-    ap.add_argument("--out_dir",      default=None)
-    ap.add_argument("--layer_start",  type=int, default=BAND_DEFAULT_START)
-    ap.add_argument("--layer_end",    type=int, default=BAND_DEFAULT_END)
-    ap.add_argument("--split",        default="test")
-    ap.add_argument("--gif",          action="store_true", default=True)
+    ap.add_argument("--method",      default="ELM", choices=VALID_METHODS)
+    ap.add_argument("--pca_basis",   default="pre", choices=["pre", "post"],
+                    help="pre: PCA on base model; post: PCA on last checkpoint")
+    ap.add_argument("--probes",      nargs="+", default=DEFAULT_PROBES,
+                    help=f"Probe types to overlay. Use 'all' for all types. "
+                         f"Choices: {ALL_PROBE_KEYS}")
+    ap.add_argument("--out_dir",     default=None)
+    ap.add_argument("--layer_start", type=int, default=BAND_DEFAULT_START,
+                    help="Band-mean start layer for PCA visualization")
+    ap.add_argument("--layer_end",   type=int, default=BAND_DEFAULT_END)
+    ap.add_argument("--split",       default="test")
+    ap.add_argument("--gif",         action="store_true", default=True)
     args = ap.parse_args()
 
-    suffix = "probe" if args.show_probe else args.pca_basis
-    if args.out_dir is None:
-        args.out_dir = f"pca_viz_{args.method}_{suffix}"
+    # Resolve "all" shorthand
+    if args.probes == ["all"]:
+        args.probes = ALL_PROBE_KEYS
+    for p in args.probes:
+        if p not in PROBE_CONFIGS:
+            ap.error(f"Unknown probe type '{p}'. Choices: {ALL_PROBE_KEYS}")
 
+    probe_suffix = "_".join(args.probes) if len(args.probes) <= 3 else "multi"
+    if args.out_dir is None:
+        args.out_dir = f"pca_viz_{args.method}_{args.pca_basis}_{probe_suffix}"
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -256,106 +329,89 @@ def main():
     y_all = load_labels_from_csv(WMDP_CSV_PATH, args.split)
     print(f"  {y_all.sum()} True  {(y_all==0).sum()} False  total={len(y_all)}")
 
-    # ── Probe setup ───────────────────────────────────────────────────────────
-    probe_layer = None
-    probe_set_base = None
-    if args.show_probe:
-        probe_set_base = load_probe_set(CHECKPOINT_DIR / "base_probes.pkl")
-        if probe_set_base is None:
-            raise FileNotFoundError("base_probes.pkl not found — needed for --show_probe")
-        if args.probe_layer is not None:
-            probe_layer = args.probe_layer
-        else:
-            probe_layer = probe_set_base["best_layers"]["LR"]
-        print(f"\n  Probe: per-layer LR at layer {probe_layer} "
-              f"(auto={'yes' if args.probe_layer is None else 'no'})")
-
-    # ── Load all hidden states ────────────────────────────────────────────────
-    print("\n[2/4] Loading hidden states")
+    # ── Base hidden states + probes ───────────────────────────────────────────
+    print("\n[2/4] Loading base hidden states and probes")
     base_hs = load_hs(CHECKPOINT_DIR / "base_hs_test.npy")
     if base_hs is None:
         raise FileNotFoundError("base_hs_test.npy not found in checkpoints/")
-    N_base = len(base_hs)
+    N_base   = len(base_hs)
+    y_base   = y_all[:N_base]
+    X_viz_base = band_mean(base_hs, args.layer_start, args.layer_end)
 
-    X_base = extract_features(base_hs, probe_layer, args.layer_start, args.layer_end)
-    feat_desc = (f"layer {probe_layer}" if probe_layer is not None
-                 else f"layers {args.layer_start}–{args.layer_end} mean")
-    print(f"  Features: {feat_desc}  shape={X_base.shape}")
+    probe_set_base = load_probe_set(CHECKPOINT_DIR / "base_probes.pkl")
+    best_layer = probe_set_base["best_layers"]["LR"] if probe_set_base else 0
+    print(f"  Best per-layer LR layer: {best_layer}")
 
-    ck_data = []   # (ck_num, X_ck, y_ck, probe_pipe_ck_or_None)
+    # ── Sweep checkpoints ─────────────────────────────────────────────────────
+    ck_data = []   # (ck_num, hs, y_ck, probe_set_ck)
     for ck in range(1, N_CHECKPOINTS + 1):
         hs = load_hs(CHECKPOINT_DIR / f"sweep_{args.method}" / f"ck{ck}" / "hs_test.npy")
         if hs is None:
             continue
-        X_ck = extract_features(hs, probe_layer, args.layer_start, args.layer_end)
-        y_ck = y_all[:len(hs)]
-
-        ck_probe = None
-        if args.show_probe:
-            ps = load_probe_set(
-                CHECKPOINT_DIR / f"sweep_{args.method}" / f"ck{ck}" / "probes.pkl"
-            )
-            if ps is not None and "per_layer" in ps and "LR" in ps["per_layer"]:
-                ck_probe = ps["per_layer"]["LR"].get(probe_layer)
-                if ck_probe is None:
-                    print(f"  [warn] ck{ck} probe missing layer {probe_layer}")
-            else:
-                print(f"  [warn] ck{ck} probes.pkl missing or stale")
-
-        ck_data.append((ck, X_ck, y_ck, ck_probe))
+        ps = load_probe_set(
+            CHECKPOINT_DIR / f"sweep_{args.method}" / f"ck{ck}" / "probes.pkl"
+        )
+        ck_data.append((ck, hs, y_all[:len(hs)], ps))
 
     if not ck_data:
         raise FileNotFoundError(f"No sweep checkpoints found for {args.method}")
 
     # ── Fit visualization PCA ─────────────────────────────────────────────────
-    print(f"\n[3/4] Fitting visualization PCA  (basis={args.pca_basis}, {feat_desc})")
+    print(f"\n[3/4] Fitting visualization PCA  "
+          f"(basis={args.pca_basis}, band mean layers {args.layer_start}–{args.layer_end})")
     if args.pca_basis == "pre":
-        fit_X = X_base
+        fit_X = X_viz_base
     else:
-        fit_X = ck_data[-1][1]
+        fit_X = band_mean(ck_data[-1][1], args.layer_start, args.layer_end)
         print(f"  PCA fitted on ck{ck_data[-1][0]} (last checkpoint)")
 
-    y_base = y_all[:N_base]
     Z_base, viz_scaler, viz_pca = fit_pca_scaler(fit_X)
     if args.pca_basis != "pre":
-        Z_base = project(X_base, viz_scaler, viz_pca)
+        Z_base = project(X_viz_base, viz_scaler, viz_pca)
 
-    # Project all checkpoints
-    projected = []   # (ck_num, Z_ck, X_ck, y_ck, probe_ck)
-    for ck_num, X_ck, y_ck, ck_probe in ck_data:
-        Z_ck = project(X_ck, viz_scaler, viz_pca)
-        projected.append((ck_num, Z_ck, X_ck, y_ck, ck_probe))
+    projected = []   # (ck_num, Z_ck, hs_ck, y_ck, probe_set_ck)
+    for ck_num, hs, y_ck, ps in ck_data:
+        Z_ck = project(band_mean(hs, args.layer_start, args.layer_end), viz_scaler, viz_pca)
+        projected.append((ck_num, Z_ck, hs, y_ck, ps))
 
-    # ── Global axis limits ────────────────────────────────────────────────────
-    all_Z = [Z_base] + [Z_ck for _, Z_ck, _, _, _ in projected]
+    all_Z  = [Z_base] + [Z_ck for _, Z_ck, _, _, _ in projected]
     xlim, ylim = global_limits(all_Z)
     print(f"  Global axis limits: x={xlim}  y={ylim}")
 
-    # ── Base probe pipeline ───────────────────────────────────────────────────
-    probe_base_pipe = None
-    if args.show_probe and probe_set_base is not None:
-        probe_base_pipe = probe_set_base["per_layer"]["LR"].get(probe_layer)
-        if probe_base_pipe is None:
-            print(f"  [warn] Base probe missing layer {probe_layer} — skipping probe overlay")
+    # ── Helper: build probe entries list ──────────────────────────────────────
+    def build_entries(hs_arr, probe_set, y):
+        entries = []
+        for pk in args.probes:
+            cfg   = PROBE_CONFIGS[pk]
+            pipe  = get_probe_pipe(probe_set, pk, best_layer) if probe_set else None
+            if pipe is None:
+                print(f"  [warn] probe '{pk}' not found in probe_set")
+            X_f, n_tile = (get_probe_features(hs_arr, probe_set, pk, best_layer)
+                           if probe_set and pipe is not None else (None, 1))
+            entries.append((pipe, X_f, n_tile, cfg["color"], cfg["label"]))
+        return entries
 
     # ── Generate frames ───────────────────────────────────────────────────────
-    print(f"\n[4/4] Generating frames")
+    print(f"\n[4/4] Generating frames  (probes: {args.probes})")
     frame_paths = []
 
-    for ck_num, Z_ck, X_ck, y_ck, ck_probe in projected:
+    entries_base = build_entries(base_hs, probe_set_base, y_base)
+
+    for ck_num, Z_ck, hs_ck, y_ck, ps_ck in projected:
         N_common = min(N_base, len(Z_ck))
+        entries_ck = build_entries(hs_ck, ps_ck, y_ck)
+
         frame_path = out / f"frame_ck{ck_num:02d}.png"
         save_frame(
-            Z_base[:N_common], y_base[:N_common], X_base[:N_common],
-            Z_ck[:N_common],   y_ck[:N_common],   X_ck[:N_common],
+            Z_base[:N_common], y_base[:N_common],
+            Z_ck[:N_common],   y_ck[:N_common],
             ck_num, frame_path,
             method=args.method, pca_basis=args.pca_basis,
             xlim=xlim, ylim=ylim,
-            probe_base=probe_base_pipe,
-            probe_ck=ck_probe,
+            probe_entries_base=entries_base,
+            probe_entries_ck=entries_ck,
             viz_scaler=viz_scaler,
             viz_pca=viz_pca,
-            show_probe=args.show_probe,
         )
         frame_paths.append(frame_path)
 
@@ -364,12 +420,12 @@ def main():
         try:
             from PIL import Image
             imgs = [Image.open(p) for p in frame_paths]
-            gif_path = out / f"{args.method}_{suffix}_sweep.gif"
+            gif_path = out / f"{args.method}_{args.pca_basis}_sweep.gif"
             imgs[0].save(gif_path, save_all=True, append_images=imgs[1:],
                          loop=0, duration=800)
             print(f"\nGIF saved → {gif_path}")
         except ImportError:
-            print("\n[warn] Pillow not installed — skipping GIF. pip install Pillow")
+            print("\n[warn] Pillow not installed — pip install Pillow")
 
     print(f"\nDone. {len(frame_paths)} frames in {out}/")
 
