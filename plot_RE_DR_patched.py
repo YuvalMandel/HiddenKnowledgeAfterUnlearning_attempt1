@@ -513,6 +513,8 @@ def main():
             pca_dim_per_layer=args.geometry_pca_dim_per_layer,
             C=args.geometry_C,
         )
+        # Remap safe filenames to display names so they match the dataframe index
+        geometry_dr = {_display_name(k): v for k, v in geometry_dr.items()}
         # same geometry DR used regardless of summary metric acc/auc
         for metric in metrics:
             geometry_dr_by_metric[metric] = geometry_dr
