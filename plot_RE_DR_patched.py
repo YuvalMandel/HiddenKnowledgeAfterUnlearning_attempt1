@@ -680,6 +680,12 @@ def main() -> None:
     methods  = [m.strip() for m in args.methods.split(",") if m.strip()]
     metrics  = [m.strip() for m in args.metrics.split(",") if m.strip()]
 
+    # In geometry mode --dr_band is irrelevant: DR is defined by --geometry_layers
+    # (cosine of LR probe weight vectors). The --dr_band/--dr_clf args are ignored.
+    if args.dr_mode == "geometry":
+        print(f"[info] --dr_mode geometry: DR defined by --geometry_layers "
+              f"{args.geometry_layers!r}. --dr_band {args.dr_band!r} is ignored.")
+
     # ── SLURM: generate script and exit ──────────────────────────────────────
     if args.generate_slurm:
         passthrough = [
@@ -833,6 +839,15 @@ def main() -> None:
                         pca_dim=args.geometry_pca_dim_per_layer,
                         C=args.geometry_C,
                     )
+                    # Pin the last checkpoint to the main scatter DR so ck8
+                    # lands exactly on the method dot (same model, same hs_train).
+                    # This corrects for checkpoint dirs that only have hs_test.npy.
+                    dm_cm = _display_name(cm)
+                    main_dr = geometry_dr_by_metric.get(metric, {}).get(dm_cm)
+                    last_ck = max(ck_nums)
+                    if main_dr is not None:
+                        geom_dr[last_ck] = main_dr
+
                     # ck0 stays DR=0; replace ck1-ck8 with geometry values
                     cdf["DR"] = cdf["step"].apply(
                         lambda s: 0.0 if int(s) == 0 else geom_dr.get(int(s), np.nan))
@@ -862,7 +877,11 @@ def main() -> None:
             all_vals    = pd.concat([df["attack_tamp"], df["attack_input"]]).dropna()
             shared_norm = Normalize(vmin=all_vals.min(), vmax=all_vals.max())
 
-        suffix   = f"{metric}_{args.re_band}_{args.re_clf}_RE_{args.dr_band}_{args.dr_clf}_{args.dr_mode}"
+        if args.dr_mode == "geometry":
+            dr_id = "layers" + args.geometry_layers.replace(" ", "").replace(",", "_")
+        else:
+            dr_id = f"{args.dr_band}_{args.dr_clf}"
+        suffix   = f"{metric}_{args.re_band}_{args.re_clf}_RE_{dr_id}_{args.dr_mode}"
         csv_path = out_dir / f"RE_DR_table_{suffix}.csv"
         png_path = out_dir / f"RE_DR_plot_{suffix}.png"
         df.to_csv(csv_path, index=False)
