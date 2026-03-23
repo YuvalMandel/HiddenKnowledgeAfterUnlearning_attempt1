@@ -338,6 +338,48 @@ def load_sweep_trajectory(
     return pd.concat([base_row, result], ignore_index=True)
 
 
+def compute_geometry_dr_for_checkpoints(
+    method: str,
+    ck_nums: List[int],
+    geometry_input_dir: Path,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    w_pre: np.ndarray,
+    layers: List[int],
+    mode: str,
+    pca_dim: int,
+    C: float,
+) -> Dict[int, float]:
+    """Geometry DR for each checkpoint, using the same w_pre and layer spec as the main scatter.
+
+    Looks for sweep_{sn}/ck{N}/hs_train.npy first (consistent with main scatter),
+    falls back to hs_test.npy with matching test labels if train is absent.
+    ck8's hs_train should be identical to {sn}_hs_train.npy so it lands on the method dot.
+    """
+    sn  = _safe_name_sweep(method)
+    out: Dict[int, float] = {}
+    for ck in ck_nums:
+        ck_dir     = geometry_input_dir / f"sweep_{sn}" / f"ck{ck}"
+        train_path = ck_dir / "hs_train.npy"
+        test_path  = ck_dir / "hs_test.npy"
+
+        if train_path.exists():
+            hs   = load_hidden_states(str(train_path))
+            y_ck = y_train
+        elif test_path.exists():
+            hs   = load_hidden_states(str(test_path))
+            y_ck = y_test
+        else:
+            print(f"  [warn] No hidden states for {method} ck{ck} — skipping")
+            continue
+
+        N  = min(len(hs), len(y_ck))
+        dr = compute_geometry_dr_for_one_method(
+            hs[:N], y_ck[:N], w_pre, layers, mode, pca_dim, C)
+        out[ck] = dr
+    return out
+
+
 # ── Summary-table RE/DR ───────────────────────────────────────────────────────
 
 GAT_NAME_MAP = {
@@ -729,7 +771,7 @@ def main() -> None:
         for metric in metrics:
             geometry_dr_by_metric[metric] = geometry_dr
 
-    # ── Checkpoint trajectory from sweep CSVs ────────────────────────────────
+    # ── Checkpoint trajectory from sweep CSVs (RE) + optional geometry DR ─────
     ckpt_dfs: Dict[str, Dict[str, Optional[pd.DataFrame]]] = {}  # metric -> method -> df
     ckpt_methods: List[str] = []
     if args.ckpt_method:
@@ -742,19 +784,59 @@ def main() -> None:
             None if not args.ckpt_checkpoints
             else [int(c) for c in args.ckpt_checkpoints.split(",")]
         )
-        # APP_base is needed for RE normalisation; read from summary table
+        ck_nums = ckpt_checkpoints if ckpt_checkpoints else list(range(1, N_CHECKPOINTS + 1))
+
+        # Pre-compute geometry ingredients once (shared across all ckpt methods & metrics)
+        ckpt_w_pre: Optional[np.ndarray] = None
+        ckpt_y_train: Optional[np.ndarray] = None
+        ckpt_y_test:  Optional[np.ndarray] = None
+        ckpt_layers: Optional[List[int]] = None
+        if args.dr_mode == "geometry" and args.geometry_input_dir and args.shared_df:
+            shared_ck   = pd.read_csv(args.shared_df)
+            train_ck    = shared_ck[shared_ck[args.split_col].astype(str) == args.train_split].reset_index(drop=True)
+            test_ck     = shared_ck[shared_ck[args.split_col].astype(str) == "test"].reset_index(drop=True)
+            ckpt_y_train = (train_ck[args.label_col].astype(str).str.lower().str.strip() == "true").astype(int).to_numpy()
+            ckpt_y_test  = (test_ck[args.label_col].astype(str).str.lower().str.strip()  == "true").astype(int).to_numpy()
+            ckpt_layers  = parse_layer_spec(args.geometry_layers)
+            mf_ck        = discover_hs_methods(Path(args.geometry_input_dir))
+            base_hs_ck   = load_hidden_states(mf_ck[args.base_method]["hs_train"])
+            N_b          = min(len(base_hs_ck), len(ckpt_y_train))
+            _, _, ckpt_w_pre = _fit_base_probe(
+                base_hs_ck[:N_b], ckpt_y_train[:N_b],
+                ckpt_layers, args.geometry_mode, args.geometry_pca_dim_per_layer, args.geometry_C)
+
+        # APP_base for RE normalisation
         t2_for_ck = pd.read_csv(data_dir / "summary_table2_base_probes.csv", index_col=0)
         for metric in metrics:
-            re_col    = f"{args.re_band}_{args.re_clf}_{metric}"
-            app_base  = float(t2_for_ck.loc["Base", re_col]) if re_col in t2_for_ck.columns else 0.5
+            re_col   = f"{args.re_band}_{args.re_clf}_{metric}"
+            app_base = float(t2_for_ck.loc["Base", re_col]) if re_col in t2_for_ck.columns else 0.5
             ckpt_dfs[metric] = {}
             for cm in ckpt_methods:
-                ckpt_dfs[metric][cm] = load_sweep_trajectory(
+                cdf = load_sweep_trajectory(
                     data_dir, cm,
                     args.re_band, args.re_clf,
                     args.dr_band, args.dr_clf,
                     metric, ckpt_checkpoints, app_base,
                 )
+                # Replace DR with geometry DR when in geometry mode
+                if (cdf is not None and args.dr_mode == "geometry"
+                        and ckpt_w_pre is not None and ckpt_y_train is not None):
+                    geom_dr = compute_geometry_dr_for_checkpoints(
+                        method=cm,
+                        ck_nums=ck_nums,
+                        geometry_input_dir=Path(args.geometry_input_dir),
+                        y_train=ckpt_y_train,
+                        y_test=ckpt_y_test,
+                        w_pre=ckpt_w_pre,
+                        layers=ckpt_layers,
+                        mode=args.geometry_mode,
+                        pca_dim=args.geometry_pca_dim_per_layer,
+                        C=args.geometry_C,
+                    )
+                    # ck0 stays DR=0; replace ck1-ck8 with geometry values
+                    cdf["DR"] = cdf["step"].apply(
+                        lambda s: 0.0 if int(s) == 0 else geom_dr.get(int(s), np.nan))
+                ckpt_dfs[metric][cm] = cdf
 
     # ── Attack colors ─────────────────────────────────────────────────────────
     attacks = load_attack_scores(data_dir) if args.attack_colors else None

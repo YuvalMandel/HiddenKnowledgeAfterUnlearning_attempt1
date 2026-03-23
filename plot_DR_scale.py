@@ -197,15 +197,18 @@ def fit_probe(hs: np.ndarray, y: np.ndarray,
 # ── Geometry metrics ──────────────────────────────────────────────────────────
 
 def compute_dr_sr(w_pre: np.ndarray, w_post: np.ndarray) -> Tuple[float, float]:
-    """Return (DR, SR) for a pair of weight vectors.
+    """Return (DR, SR_raw) for a pair of weight vectors.
 
-    DR = 1 - cos(w_pre, w_post)  in [0, 2]
-    SR = log2(||w_post|| / ||w_pre||)  — signed log scale ratio
+    DR     = 1 - cos(w_pre, w_post)  in [0, 2]
+    SR_raw = ||w_post|| / ||w_pre||   raw norm ratio (1 = no change)
+
+    Log transformations are applied at plot time via --scale_mode.
+    The CSV always stores the raw ratio.
     """
     cs  = cosine_sim(w_pre, w_post)
     DR  = np.nan if cs is None else float(1.0 - cs)
     na, nb = np.linalg.norm(w_pre), np.linalg.norm(w_post)
-    SR  = np.nan if na == 0 else float(np.log2(nb / na))
+    SR  = np.nan if na == 0 else float(nb / na)
     return DR, SR
 
 
@@ -310,18 +313,46 @@ def load_re_from_summary(
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
+_SCALE_LABELS = {
+    "raw":  (
+        r"SR — Scale Ratio  $\|\mathbf{w}_{\rm post}\| / \|\mathbf{w}_{\rm pre}\|$",
+        1.0,   # "no change" reference value on y-axis
+    ),
+    "log2": (
+        r"SR — Scale Ratio  $\log_2\!\left(\|\mathbf{w}_{\rm post}\| / \|\mathbf{w}_{\rm pre}\|\right)$",
+        0.0,
+    ),
+    "log":  (
+        r"SR — Scale Ratio  $\ln\!\left(\|\mathbf{w}_{\rm post}\| / \|\mathbf{w}_{\rm pre}\|\right)$",
+        0.0,
+    ),
+}
+
+
+def _apply_scale(sr_raw: pd.Series, scale_mode: str) -> pd.Series:
+    if scale_mode == "log2":
+        return sr_raw.apply(lambda v: np.log2(v) if v > 0 else np.nan)
+    if scale_mode == "log":
+        return sr_raw.apply(lambda v: np.log(v)  if v > 0 else np.nan)
+    return sr_raw  # raw
+
+
 def plot_dr_scale(
     df: pd.DataFrame,
     out_png: Path,
     metric: str,
     title: str,
+    scale_mode: str = "raw",
 ) -> None:
-    """Scatter: x = DR, y = SR (log2 scale ratio), color = RE per method."""
+    """Scatter: x = DR, y = SR (scale ratio, transformed by scale_mode), color = RE."""
 
     re_vals = df["RE"].dropna()
     if len(re_vals) == 0:
         print("[warn] No RE values to plot.")
         return
+
+    y_label, no_change_ref = _SCALE_LABELS.get(scale_mode, _SCALE_LABELS["raw"])
+    plot_sr = _apply_scale(df["SR"], scale_mode)
 
     # Diverging colormap centred at RE = 0
     re_min, re_max = float(re_vals.min()), float(re_vals.max())
@@ -338,18 +369,20 @@ def plot_dr_scale(
     ax.grid(color="grey", alpha=0.18, lw=0.6)
 
     # Reference lines
-    ax.axhline(0, color="grey",       lw=0.9, ls="--", alpha=0.45)
-    ax.axvline(0, color="grey",       lw=0.9, ls="--", alpha=0.45)
-    ax.axvline(1, color="darkorange", lw=0.8, ls=":",  alpha=0.55, label="DR = 1")
+    ax.axhline(no_change_ref, color="steelblue",  lw=0.9, ls="--", alpha=0.5,
+               label=f"SR = no change ({no_change_ref})")
+    ax.axvline(0,             color="grey",        lw=0.9, ls="--", alpha=0.45)
+    ax.axvline(1,             color="darkorange",  lw=0.8, ls=":",  alpha=0.55,
+               label="DR = 1")
 
     # Scatter
     sc = ax.scatter(
-        df["DR"], df["SR"],
+        df["DR"], plot_sr,
         c=df["RE"], cmap=cmap, norm=norm,
         s=300, zorder=5, edgecolors="k", linewidths=0.9,
     )
 
-    # Per-method color label in the legend
+    # Per-method color legend
     handles = [
         Line2D([0], [0], marker="o", color="w",
                markerfacecolor=METHOD_COLORS.get(dm, _FALLBACK_COLOR),
@@ -361,10 +394,10 @@ def plot_dr_scale(
               framealpha=0.88, edgecolor="#cccccc")
 
     # Method labels
-    for _, row in df.iterrows():
+    for (_, row), y_val in zip(df.iterrows(), plot_sr):
         ox, oy = OFFSETS.get(str(row["method"]), (8, 5))
         ax.annotate(str(row["method"]),
-                    xy=(row["DR"], row["SR"]),
+                    xy=(row["DR"], y_val),
                     xytext=(ox, oy), textcoords="offset points",
                     fontsize=9, fontweight="semibold")
 
@@ -379,7 +412,7 @@ def plot_dr_scale(
 
     # Auto-scale axes
     vx = df["DR"].dropna()
-    vy = df["SR"].dropna()
+    vy = plot_sr.dropna()
     if len(vx):
         xm = max((vx.max() - vx.min()) * 0.22 + 0.05, 0.12)
         ax.set_xlim(vx.min() - xm, vx.max() + xm)
@@ -391,9 +424,7 @@ def plot_dr_scale(
         "DR — Directional Rotation\n"
         r"$1 - \cos(\mathbf{w}_{\rm pre},\,\mathbf{w}_{\rm post})$",
         fontsize=10)
-    ax.set_ylabel(
-        r"SR — Scale Ratio  $\log_2\!\left(\|\mathbf{w}_{\rm post}\| / \|\mathbf{w}_{\rm pre}\|\right)$",
-        fontsize=10)
+    ax.set_ylabel(y_label, fontsize=10)
 
     fig.suptitle(title, fontsize=13, y=0.99)
     plt.tight_layout()
@@ -459,6 +490,10 @@ def main() -> None:
     ap.add_argument("--re_band",                    default="mb")
     ap.add_argument("--re_clf",                     default="lr")
     ap.add_argument("--metrics",                    default="acc,auc")
+    # Scale mode
+    ap.add_argument("--scale_mode", choices=["raw", "log2", "log"], default="raw",
+                    help="Y-axis scale: raw = ||w_post||/||w_pre|| (default), "
+                         "log2 = log2 ratio, log = natural log ratio")
     # Methods
     ap.add_argument("--methods",  default=",".join(DEFAULT_METHODS))
     ap.add_argument("--out_dir",  default="dr_scale_outputs")
@@ -573,7 +608,7 @@ def main() -> None:
 
         df = pd.DataFrame(rows)
 
-        suffix   = f"{metric}_{args.re_band}_{args.re_clf}_{args.geometry_layers.replace('-', '_')}"
+        suffix   = f"{metric}_{args.re_band}_{args.re_clf}_{args.geometry_layers.replace('-', '_')}_{args.scale_mode}"
         csv_path = out_dir / f"DR_scale_table_{suffix}.csv"
         png_path = out_dir / f"DR_scale_plot_{suffix}.png"
         df.to_csv(csv_path, index=False)
@@ -582,8 +617,10 @@ def main() -> None:
         plot_dr_scale(
             df, png_path,
             metric=metric,
+            scale_mode=args.scale_mode,
             title=(f"Probe Weight Geometry After Unlearning\n"
-                   f"layers={args.geometry_layers}  band={args.re_band}  metric={metric.upper()}"),
+                   f"layers={args.geometry_layers}  band={args.re_band}  "
+                   f"metric={metric.upper()}  scale={args.scale_mode}"),
         )
 
 
