@@ -246,9 +246,10 @@ def compute_geometry_dr_from_probe_weights(
     for method in methods:
         if method == base_method:
             continue
-        files = methods_files.get(method)
+        sn    = _safe_name(method)
+        files = methods_files.get(method) or methods_files.get(sn)
         if not files or "hs_train" not in files:
-            raise FileNotFoundError(f"Hidden states for method '{method}' not found in {geometry_input_dir}")
+            raise FileNotFoundError(f"Hidden states for method '{method}' (safe: '{sn}') not found in {geometry_input_dir}")
         hs_train = load_hidden_states(files["hs_train"])
         out[method] = compute_geometry_dr_for_one_method(
             hs_train, y_train, w_pre, layers, mode, pca_dim_per_layer, C)
