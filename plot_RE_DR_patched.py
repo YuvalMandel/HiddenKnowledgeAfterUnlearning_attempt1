@@ -46,7 +46,6 @@ from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -256,70 +255,87 @@ def compute_geometry_dr_from_probe_weights(
     return out
 
 
-# ── Checkpoint helpers ────────────────────────────────────────────────────────
+# ── Checkpoint trajectory from sweep CSVs ─────────────────────────────────────
+#
+# Checkpoint data lives in:  data/sweep_{sn}/{sn}_sweep.csv
+# Columns: checkpoint (1-8), mp_{clf}_{band}_{metric}, bp_{clf}_{band}_{metric}
+#          optionally xp_{clf}_{band}_{metric}
+#
+#   mp_ = APP_post  (method probe → method model)
+#   bp_ = ApP       (base  probe → method model)
+#   xp_ = APp       (method probe → base  model)  — enables full symmetric DR
 
-def discover_checkpoints(ckpt_dir: Path, method_safe: str) -> List[Tuple[str, str]]:
-    """Return sorted [(step_label, hs_train_path)] for checkpoint files.
-
-    Expected naming: {method_safe}_ckpt{step}_hs_train.npy
-    """
-    pat = re.compile(rf"^{re.escape(method_safe)}_ckpt(?P<step>[^_]+)_hs_train\.npy$")
-    hits = []
-    for p in ckpt_dir.iterdir():
-        m = pat.match(p.name)
-        if m:
-            hits.append((m.group("step"), str(p)))
-    try:
-        hits.sort(key=lambda x: int(x[0]))
-    except ValueError:
-        hits.sort()
-    return hits
+N_CHECKPOINTS = 8
 
 
-def compute_checkpoint_re_dr(
-    ckpt_steps: List[Tuple[str, str]],
-    base_hs_train: np.ndarray,
-    y_train: np.ndarray,
-    layers: List[int],
-    mode: str,
-    pca_dim: int,
-    C: float,
+def _safe_name_sweep(m: str) -> str:
+    """Match hidden_knowledge_after_unlearning.safe_name() for sweep dir names."""
+    return m.replace("&", "_").replace("/", "_").replace(" ", "_")
+
+
+def load_sweep_trajectory(
+    data_dir: Path,
+    method: str,
+    re_band: str,
+    re_clf: str,
+    dr_band: str,
+    dr_clf: str,
     metric: str,
-) -> pd.DataFrame:
-    """Compute RE and geometry-DR for each checkpoint.
+    checkpoints: Optional[List[int]],
+    app_base: float,
+) -> Optional[pd.DataFrame]:
+    """Load RE and DR trajectory from the precomputed sweep CSV.
 
-    RE: base probe applied to checkpoint train representations vs base train representations.
-    DR: 1 - cos(w_base, w_ckpt) from probes fitted on respective train states.
+    Returns DataFrame with columns: step (int), RE, DR (or DR_fwd if xp_ absent).
+    Returns None if the sweep CSV is missing.
     """
-    base_comp, base_pipe, w_pre = _fit_base_probe(
-        base_hs_train, y_train, layers, mode, pca_dim, C)
+    sn   = _safe_name_sweep(method)
+    path = data_dir / f"sweep_{sn}" / f"{sn}_sweep.csv"
+    if not path.exists():
+        print(f"  [warn] Sweep CSV not found: {path}")
+        return None
 
-    Xb = base_comp.transform(base_hs_train)
-    if metric == "acc":
-        APP_base = accuracy_score(y_train, base_pipe.predict(Xb))
-    else:
-        APP_base = roc_auc_score(y_train, base_pipe.predict_proba(Xb)[:, 1])
+    df = pd.read_csv(path)
+
+    mp_col = f"mp_{re_clf}_{re_band}_{metric}"
+    bp_col = f"bp_{re_clf}_{re_band}_{metric}"
+    xp_col = f"xp_{dr_clf}_{dr_band}_{metric}"
+
+    for col in (mp_col, bp_col):
+        if col not in df.columns:
+            print(f"  [warn] Column '{col}' missing in {path}")
+            return None
+
+    if checkpoints is not None:
+        df = df[df["checkpoint"].isin(checkpoints)]
 
     rows = []
-    for step_label, train_path in ckpt_steps:
-        hs_ckpt = load_hidden_states(train_path)
-        N = min(len(hs_ckpt), len(y_train))
-        Xm = base_comp.transform(hs_ckpt[:N])
-        y_eval = y_train[:N]
+    for _, row in df.iterrows():
+        ck       = int(row["checkpoint"])
+        app_post = float(row[mp_col])
+        apP      = float(row[bp_col])
 
-        if metric == "acc":
-            APP_post = accuracy_score(y_eval, base_pipe.predict(Xm))
+        denom_re = app_base - 0.5
+        RE = np.nan if abs(denom_re) < 1e-12 else (app_base - app_post) / denom_re
+
+        denom_fwd = app_post - 0.5
+        DR_fwd = np.nan if abs(denom_fwd) < 1e-12 else (app_post - apP) / denom_fwd
+
+        if xp_col in df.columns and not pd.isna(row.get(xp_col, np.nan)):
+            aPp    = float(row[xp_col])
+            DR_bwd = (app_base - aPp) / denom_re if abs(denom_re) > 1e-12 else np.nan
+            DR     = float(np.nanmean([DR_fwd, DR_bwd]))
         else:
-            APP_post = roc_auc_score(y_eval, base_pipe.predict_proba(Xm)[:, 1])
+            DR = DR_fwd  # fall back to forward-only
 
-        denom = APP_base - 0.5
-        RE = np.nan if abs(denom) < 1e-12 else (APP_base - APP_post) / denom
-        DR = compute_geometry_dr_for_one_method(
-            hs_ckpt, y_train, w_pre, layers, mode, pca_dim, C)
+        rows.append({"step": ck, "RE": RE, "DR": DR})
 
-        rows.append({"step": step_label, "RE": RE, "DR": DR,
-                     "APP_base": APP_base, "APP_post": APP_post})
-    return pd.DataFrame(rows)
+    if not rows:
+        return None
+    result = pd.DataFrame(rows).sort_values("step").reset_index(drop=True)
+    # Prepend base (ck0): RE=0, DR=0 by definition
+    base_row = pd.DataFrame([{"step": 0, "RE": 0.0, "DR": 0.0}])
+    return pd.concat([base_row, result], ignore_index=True)
 
 
 # ── Summary-table RE/DR ───────────────────────────────────────────────────────
@@ -417,8 +433,7 @@ def draw_scatter(
     metric: str,
     attack_col: Optional[str],
     shared_norm: Optional[Normalize],
-    ckpt_df: Optional[pd.DataFrame],
-    ckpt_method_display: Optional[str],
+    ckpt_trajectories: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
 ) -> None:
     dr_mode = str(df["dr_mode"].iloc[0])
 
@@ -431,16 +446,24 @@ def draw_scatter(
     ax.axhline(1, color="steelblue",  lw=0.8, ls=":",  alpha=0.55, zorder=2)
     ax.axvline(1, color="darkorange", lw=0.8, ls=":",  alpha=0.55, zorder=2)
 
-    # ── Checkpoint trajectory (behind main scatter) ───────────────────────────
-    if ckpt_df is not None and ckpt_method_display and not ckpt_df.empty:
-        ckpt_color = METHOD_COLORS.get(ckpt_method_display, _FALLBACK_COLOR)
-        ax.plot(ckpt_df["DR"].to_numpy(), ckpt_df["RE"].to_numpy(),
+    # ── Checkpoint trajectories (behind main scatter) ────────────────────────
+    traj_items = list((ckpt_trajectories or {}).items())
+    vx_extra: List[pd.Series] = []
+    vy_extra: List[pd.Series] = []
+    for cm, cdf in traj_items:
+        if cdf is None or cdf.empty:
+            continue
+        dm_cm      = _display_name(cm)
+        ckpt_color = METHOD_COLORS.get(dm_cm, _FALLBACK_COLOR)
+        ax.plot(cdf["DR"].to_numpy(), cdf["RE"].to_numpy(),
                 "-o", color=ckpt_color, alpha=0.45, lw=1.8, ms=5, zorder=3)
-        for _, row in ckpt_df.iterrows():
-            ax.annotate(str(row["step"]),
-                        xy=(row["DR"], row["RE"]),
+        for _, row in cdf.iterrows():
+            lbl = "base" if int(row["step"]) == 0 else f"ck{row['step']}"
+            ax.annotate(lbl, xy=(row["DR"], row["RE"]),
                         xytext=(4, 4), textcoords="offset points",
                         fontsize=7, color=ckpt_color, alpha=0.75)
+        vx_extra.append(cdf["DR"].dropna())
+        vy_extra.append(cdf["RE"].dropna())
 
     # ── Main scatter ──────────────────────────────────────────────────────────
     if attack_col and attack_col in df.columns and df[attack_col].notna().any():
@@ -470,12 +493,9 @@ def draw_scatter(
     ax.set_xlabel(_dr_axis_label(dr_mode), fontsize=10)
     ax.set_ylabel(_re_axis_label(metric),  fontsize=10)
 
-    # ── Auto-scale ────────────────────────────────────────────────────────────
-    vx = df["DR"].dropna()
-    vy = df["RE"].dropna()
-    if ckpt_df is not None and not ckpt_df.empty:
-        vx = pd.concat([vx, ckpt_df["DR"].dropna()])
-        vy = pd.concat([vy, ckpt_df["RE"].dropna()])
+    # ── Auto-scale (including trajectory range) ───────────────────────────────
+    vx = pd.concat([df["DR"].dropna()] + vx_extra)
+    vy = pd.concat([df["RE"].dropna()] + vy_extra)
     if len(vx):
         xm = max((vx.max() - vx.min()) * 0.20 + 0.05, 0.12)
         ax.set_xlim(vx.min() - xm, vx.max() + xm)
@@ -483,7 +503,7 @@ def draw_scatter(
         ym = max((vy.max() - vy.min()) * 0.20 + 0.05, 0.12)
         ax.set_ylim(vy.min() - ym, vy.max() + ym)
 
-    # ── Legend (method colors) ────────────────────────────────────────────────
+    # ── Legend (method colors + trajectory entries) ────────────────────────────
     if not (attack_col and attack_col in df.columns and df[attack_col].notna().any()):
         handles = [
             Line2D([0], [0],
@@ -494,10 +514,13 @@ def draw_scatter(
                    markersize=9, label=m)
             for m in df["method"].tolist()
         ]
-        if ckpt_df is not None and ckpt_method_display and not ckpt_df.empty:
-            ckpt_color = METHOD_COLORS.get(ckpt_method_display, _FALLBACK_COLOR)
+        for cm, cdf in traj_items:
+            if cdf is None or cdf.empty:
+                continue
+            dm_cm      = _display_name(cm)
+            ckpt_color = METHOD_COLORS.get(dm_cm, _FALLBACK_COLOR)
             handles.append(Line2D([0], [0], color=ckpt_color, lw=2.0,
-                                  alpha=0.6, label=f"{ckpt_method_display} checkpoints"))
+                                  alpha=0.6, label=f"{dm_cm} checkpoints"))
         ax.legend(handles=handles, fontsize=8.5, loc="best",
                   framealpha=0.88, edgecolor="#cccccc")
 
@@ -508,14 +531,13 @@ def plot_metric(
     title_prefix: str,
     attack_col: Optional[str],
     shared_norm: Optional[Normalize],
-    ckpt_df: Optional[pd.DataFrame],
-    ckpt_method_display: Optional[str],
+    ckpt_trajectories: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
 ) -> None:
     metric = str(df["metric"].iloc[0])
     fig, ax = plt.subplots(figsize=(12, 7))
     fig.patch.set_facecolor("white")
     fig.suptitle(f"{title_prefix} — {metric.upper()}", fontsize=13, y=0.98)
-    draw_scatter(ax, df, metric, attack_col, shared_norm, ckpt_df, ckpt_method_display)
+    draw_scatter(ax, df, metric, attack_col, shared_norm, ckpt_trajectories)
     plt.tight_layout()
     plt.savefig(out_png, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
@@ -590,13 +612,11 @@ def main() -> None:
     ap.add_argument("--geometry_pca_dim_per_layer",   type=int, default=0)
     ap.add_argument("--geometry_C",                   type=float, default=1.0)
 
-    # Checkpoint trajectory
+    # Checkpoint trajectory (reads from precomputed sweep CSVs in data_dir)
     ap.add_argument("--ckpt_method", default=None,
-                    help="Method to overlay checkpoint trajectory for (safe name, e.g. GradDiff)")
-    ap.add_argument("--ckpt_dir",    default=None,
-                    help="Dir containing {safe_name}_ckpt{step}_hs_train.npy")
-    ap.add_argument("--ckpt_steps",  default=None,
-                    help="Comma-separated step labels; auto-discovers all if omitted")
+                    help="Method to overlay sweep trajectory for, e.g. GradDiff  (or 'all')")
+    ap.add_argument("--ckpt_checkpoints", default=None,
+                    help="Comma-separated checkpoint numbers 1-8; all if omitted")
 
     # SLURM
     ap.add_argument("--generate_slurm",    action="store_true",
@@ -710,36 +730,32 @@ def main() -> None:
         for metric in metrics:
             geometry_dr_by_metric[metric] = geometry_dr
 
-    # ── Checkpoint trajectory ─────────────────────────────────────────────────
-    ckpt_dfs: Dict[str, Optional[pd.DataFrame]] = {m: None for m in metrics}
-    ckpt_method_display: Optional[str] = None
-    if args.ckpt_method and args.ckpt_dir:
-        ckpt_dir           = Path(args.ckpt_dir)
-        ckpt_safe          = _safe_name(args.ckpt_method)
-        ckpt_method_display = _display_name(args.ckpt_method)
-        if args.ckpt_steps:
-            ckpt_step_list = [(s.strip(),
-                               str(ckpt_dir / f"{ckpt_safe}_ckpt{s.strip()}_hs_train.npy"))
-                              for s in args.ckpt_steps.split(",")]
-        else:
-            ckpt_step_list = discover_checkpoints(ckpt_dir, ckpt_safe)
-
-        if not ckpt_step_list:
-            print(f"[warn] No checkpoint files found for {args.ckpt_method} in {ckpt_dir}")
-        elif not args.shared_df or not args.geometry_input_dir:
-            print("[warn] --shared_df and --geometry_input_dir required for checkpoint RE/DR; skipping")
-        else:
-            shared_df_ck  = pd.read_csv(args.shared_df)
-            train_df_ck   = shared_df_ck[shared_df_ck[args.split_col].astype(str) == args.train_split].reset_index(drop=True)
-            y_train_ck    = (train_df_ck[args.label_col].astype(str).str.lower().str.strip() == "true").astype(int).to_numpy()
-            layers_ck     = parse_layer_spec(args.geometry_layers)
-            methods_files = discover_hs_methods(Path(args.geometry_input_dir))
-            base_hs_ck    = load_hidden_states(methods_files[args.base_method]["hs_train"])
-            for metric in metrics:
-                ckpt_dfs[metric] = compute_checkpoint_re_dr(
-                    ckpt_step_list, base_hs_ck, y_train_ck,
-                    layers_ck, args.geometry_mode,
-                    args.geometry_pca_dim_per_layer, args.geometry_C, metric)
+    # ── Checkpoint trajectory from sweep CSVs ────────────────────────────────
+    ckpt_dfs: Dict[str, Dict[str, Optional[pd.DataFrame]]] = {}  # metric -> method -> df
+    ckpt_methods: List[str] = []
+    if args.ckpt_method:
+        ckpt_methods = (
+            ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+            if args.ckpt_method == "all"
+            else [m.strip() for m in args.ckpt_method.split(",")]
+        )
+        ckpt_checkpoints: Optional[List[int]] = (
+            None if not args.ckpt_checkpoints
+            else [int(c) for c in args.ckpt_checkpoints.split(",")]
+        )
+        # APP_base is needed for RE normalisation; read from summary table
+        t2_for_ck = pd.read_csv(data_dir / "summary_table2_base_probes.csv", index_col=0)
+        for metric in metrics:
+            re_col    = f"{args.re_band}_{args.re_clf}_{metric}"
+            app_base  = float(t2_for_ck.loc["Base", re_col]) if re_col in t2_for_ck.columns else 0.5
+            ckpt_dfs[metric] = {}
+            for cm in ckpt_methods:
+                ckpt_dfs[metric][cm] = load_sweep_trajectory(
+                    data_dir, cm,
+                    args.re_band, args.re_clf,
+                    args.dr_band, args.dr_clf,
+                    metric, ckpt_checkpoints, app_base,
+                )
 
     # ── Attack colors ─────────────────────────────────────────────────────────
     attacks = load_attack_scores(data_dir) if args.attack_colors else None
@@ -770,16 +786,17 @@ def main() -> None:
         png_path = out_dir / f"RE_DR_plot_{suffix}.png"
         df.to_csv(csv_path, index=False)
 
-        ckpt_df = ckpt_dfs.get(metric)
-        if ckpt_df is not None and not ckpt_df.empty:
-            ckpt_df.to_csv(out_dir / f"RE_DR_ckpt_{ckpt_safe}_{metric}.csv", index=False)
+        # Collect trajectory DataFrames for this metric
+        metric_ckpt: Dict[str, Optional[pd.DataFrame]] = ckpt_dfs.get(metric, {})
+        for cm, cdf in metric_ckpt.items():
+            if cdf is not None and not cdf.empty:
+                cdf.to_csv(out_dir / f"RE_DR_ckpt_{_safe_name(cm)}_{metric}.csv", index=False)
 
         plot_metric(df, png_path,
                     title_prefix="Hidden Knowledge After Unlearning",
                     attack_col=attack_col,
                     shared_norm=shared_norm,
-                    ckpt_df=ckpt_df,
-                    ckpt_method_display=ckpt_method_display)
+                    ckpt_trajectories=metric_ckpt)
 
         manifest_rows.append({"metric": metric, "csv": str(csv_path),
                                "png": str(png_path), "dr_mode": args.dr_mode})
