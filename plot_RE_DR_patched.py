@@ -478,7 +478,7 @@ def draw_scatter(
             dm = str(row["method"])
             ax.scatter(row["DR"], row["RE"],
                        color=METHOD_COLORS.get(dm, _FALLBACK_COLOR),
-                       marker=METHOD_MARKERS.get(dm, _FALLBACK_MARKER),
+                       marker="o",
                        s=280, zorder=5, edgecolors="k", linewidths=0.8)
 
     # ── Method labels ─────────────────────────────────────────────────────────
@@ -507,8 +507,7 @@ def draw_scatter(
     if not (attack_col and attack_col in df.columns and df[attack_col].notna().any()):
         handles = [
             Line2D([0], [0],
-                   marker=METHOD_MARKERS.get(m, _FALLBACK_MARKER),
-                   color="w",
+                   marker="o", color="w",
                    markerfacecolor=METHOD_COLORS.get(m, _FALLBACK_COLOR),
                    markeredgecolor="k", markeredgewidth=0.7,
                    markersize=9, label=m)
