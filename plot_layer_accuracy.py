@@ -1575,10 +1575,6 @@ def main():
                 )
 
 
-if __name__ == "__main__":
-    main()
-
-
 # ---------------------------------------------------------------------------
 # K-fold aggregate line-plot (bio only)
 # ---------------------------------------------------------------------------
@@ -1743,3 +1739,7 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
 
     _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
     plt.close(fig)
+
+
+if __name__ == "__main__":
+    main()
