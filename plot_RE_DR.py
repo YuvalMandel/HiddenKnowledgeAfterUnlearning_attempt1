@@ -26,15 +26,24 @@ DR = (DR_forward + DR_backward) / 2
 
 Attack score (color) = "WMDP, Best Tamp. Attack" from LLM-GAT summary table
    (best tampering attack WMDP accuracy; higher = more knowledge retained after unlearning)
+
+K-fold mode (--kfold):
+  RE is recomputed from the 5-fold aggregated probe accuracies in
+  kfold_table3_probes.csv (mean ± CI95).  DR still uses single-fold Tables 2 & 5
+  (cross-probe eval is not part of the kfold pipeline).  Vertical error bars
+  show ±CI95 on the RE axis.
 """
 
 import argparse
+import csv
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 from pathlib import Path
+
+DATA_DIR = Path("data")
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser(description=__doc__,
@@ -45,14 +54,17 @@ ap.add_argument("--dr_band",  default="mb",   help="Probe band for DR  (default:
 ap.add_argument("--dr_clf",   default="lr",   help="Classifier for DR  (default: lr)")
 ap.add_argument("--metric",   default="acc",  help="Metric column suffix (default: acc)")
 ap.add_argument("--out",      default=None,   help="Output file (default: auto)")
+ap.add_argument("--kfold",    action="store_true", default=False,
+                help=(
+                    "Use 5-fold aggregated RE (mean ± CI95) from kfold_table3_probes.csv. "
+                    "DR still comes from single-fold Tables 2 & 5. "
+                    "Adds vertical error bars on RE axis."
+                ))
 args = ap.parse_args()
 
 RE_COL  = f"{args.re_band}_{args.re_clf}_{args.metric}"
 DR_COL  = f"{args.dr_band}_{args.dr_clf}_{args.metric}"
-# APp (cross-probe t5) uses same band/clf as DR
 APp_COL = DR_COL
-
-DATA_DIR = Path("data")
 
 # --------------------------------------------------------------------------- #
 #  Load tables                                                                 #
@@ -73,49 +85,93 @@ GAT_NAME_MAP = {
     "TAR":        "TAR",
     "PB&J":       "PB&J",
 }
-# Build lookup: our name -> GAT attack score
 gat_attack = {
     our: float(tgat.loc[gat, "WMDP, Best Tamp. Attack"])
     for gat, our in GAT_NAME_MAP.items()
 }
 
-APP_base = float(t2.loc["Base", RE_COL])
-print(f"APP_base (Base->Base, {RE_COL}): {APP_base:.4f}")
-
 METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+
+# --------------------------------------------------------------------------- #
+#  Optionally load kfold aggregated values for RE                              #
+# --------------------------------------------------------------------------- #
+kf_acc: dict = {}          # model → (mean_acc, ci95_acc)
+kf_acc_col_mean = f"{args.re_band}_{args.re_clf}_{args.metric}_mean"
+kf_acc_col_ci95 = f"{args.re_band}_{args.re_clf}_{args.metric}_ci95"
+
+if args.kfold:
+    kf_path = DATA_DIR / "kfold_table3_probes.csv"
+    if not kf_path.exists():
+        raise FileNotFoundError(
+            f"{kf_path} not found. "
+            "Run: python kfold_probe.py --stage kfold_tables"
+        )
+    # kfold model keys: "base" for Base, method names otherwise
+    _KF_KEY = {"Base": "base", **{m: m for m in METHODS}}
+    with open(kf_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            mdl  = row["model"]
+            mean = row.get(kf_acc_col_mean, "")
+            ci95 = row.get(kf_acc_col_ci95, "")
+            try:
+                kf_acc[mdl] = (float(mean), float(ci95))
+            except (ValueError, TypeError):
+                pass
+
+    # APP_base from kfold
+    if "base" in kf_acc:
+        APP_base_kf, APP_base_ci = kf_acc["base"]
+        print(f"APP_base (kfold mean, {RE_COL}): {APP_base_kf:.4f} ± {APP_base_ci:.4f}")
+    else:
+        raise KeyError("'base' row not found in kfold_table3_probes.csv")
+else:
+    APP_base_kf = APP_base_ci = None
+
+APP_base_sf = float(t2.loc["Base", RE_COL])
+APP_base    = APP_base_kf if args.kfold else APP_base_sf
+print(f"APP_base (single-fold, {RE_COL}): {APP_base_sf:.4f}")
 
 # --------------------------------------------------------------------------- #
 #  Compute metrics                                                              #
 # --------------------------------------------------------------------------- #
 rows = []
 for m in METHODS:
-    APP_post = float(t3.loc[m, RE_COL])    # Post probe -> Post model
-    ApP      = float(t2.loc[m, DR_COL])    # Base probe -> Post model
-    APp      = float(t5.loc[m, APp_COL])   # Post probe -> Base model
-    attack   = gat_attack[m]                   # LLM-GAT best tampering attack score
+    # DR always from single-fold tables
+    APP_post_sf = float(t3.loc[m, RE_COL])
+    ApP         = float(t2.loc[m, DR_COL])
+    APp         = float(t5.loc[m, APp_COL])
+    attack      = gat_attack[m]
 
-    # Representational Erasure
-    RE = (APP_base - APP_post) / (APP_base - 0.5)
+    # RE
+    if args.kfold and m in kf_acc:
+        APP_post_kf, APP_post_ci = kf_acc[m]
+        RE_mean = (APP_base_kf - APP_post_kf) / (APP_base_kf - 0.5)
+        # Error propagation (first-order): δRE ≈ sqrt(δpost² + δbase²) / (APP_base - 0.5)
+        denom   = APP_base_kf - 0.5
+        RE_ci95 = float(np.sqrt(APP_post_ci**2 + APP_base_ci**2) / abs(denom)) if abs(denom) > 1e-6 else float("nan")
+        RE      = RE_mean
+    else:
+        APP_post_kf = APP_post_sf
+        RE = (APP_base - APP_post_sf) / (APP_base - 0.5)
+        RE_ci95 = float("nan")
 
     # DR-forward: old axis fails on post model
-    denom_fwd = APP_post - 0.5
-    if abs(denom_fwd) < 1e-6:
-        DR_fwd = float("nan")
-    else:
-        DR_fwd = (APP_post - ApP) / denom_fwd
+    denom_fwd = APP_post_sf - 0.5
+    DR_fwd = (APP_post_sf - ApP) / denom_fwd if abs(denom_fwd) > 1e-6 else float("nan")
 
     # DR-backward: new axis fails on base model
-    # 1 - (APp - 0.5) / (APP_base - 0.5)
-    DR_bwd = (APP_base - APp) / (APP_base - 0.5)
+    DR_bwd = (APP_base_sf - APp) / (APP_base_sf - 0.5)
 
     DR = (DR_fwd + DR_bwd) / 2.0
 
-    print(f"{m:10s}  APP_post={APP_post:.4f}  ApP={ApP:.4f}  APp={APp:.4f}"
-          f"  RE={RE:+.3f}  DR_fwd={DR_fwd:+.3f}  DR_bwd={DR_bwd:+.3f}"
+    print(f"{m:10s}  APP_post={APP_post_kf:.4f}  ApP={ApP:.4f}  APp={APp:.4f}"
+          f"  RE={RE:+.3f}  RE_ci95={'nan' if np.isnan(RE_ci95) else f'{RE_ci95:.3f}'}"
+          f"  DR_fwd={DR_fwd:+.3f}  DR_bwd={DR_bwd:+.3f}"
           f"  DR={DR:+.3f}  attack={attack:.4f}")
 
-    rows.append(dict(method=m, APP_post=APP_post, ApP=ApP, APp=APp,
-                     RE=RE, DR_fwd=DR_fwd, DR_bwd=DR_bwd, DR=DR, attack=attack))
+    rows.append(dict(method=m, APP_post=APP_post_kf, ApP=ApP, APp=APp,
+                     RE=RE, RE_ci95=RE_ci95,
+                     DR_fwd=DR_fwd, DR_bwd=DR_bwd, DR=DR, attack=attack))
 
 df = pd.DataFrame(rows)
 
@@ -144,14 +200,24 @@ YLABEL = (
     "RE  --  Representational Erasure\n"
     r"$\frac{A_{PP}^{\rm base} - A_{PP}^{\rm post}}{A_{PP}^{\rm base} - 0.5}$"
 )
+if args.kfold:
+    YLABEL += "\n(5-fold mean ± 95 % CI)"
 
-def draw_panel(ax, df, attack_col, cbar_label, shared_norm):
+
+def draw_panel(ax, df, attack_col, cbar_label, shared_norm, show_re_ci=False):
     cmap = plt.get_cmap("RdYlGn_r")
     sc = ax.scatter(
         df["DR"], df["RE"],
         c=df[attack_col], cmap=cmap, norm=shared_norm,
         s=220, zorder=5, edgecolors="k", linewidths=0.7,
     )
+    if show_re_ci:
+        for _, row in df.iterrows():
+            ci = row.get("RE_ci95", float("nan"))
+            if not np.isnan(ci):
+                ax.errorbar(row["DR"], row["RE"],
+                            yerr=ci, fmt="none",
+                            ecolor="black", elinewidth=1.2, capsize=4, zorder=6)
     for _, row in df.iterrows():
         ox, oy = OFFSETS.get(row["method"], (8, 5))
         ax.annotate(row["method"], xy=(row["DR"], row["RE"]),
@@ -181,30 +247,34 @@ df["attack_input"] = df["method"].map({m: float(tgat.loc[g, "WMDP, Best Input At
                                         for g, m in GAT_NAME_MAP.items()})
 
 # Shared colour scale across both panels for fair comparison
-all_vals = pd.concat([df["attack_tamp"], df["attack_input"]])
+all_vals   = pd.concat([df["attack_tamp"], df["attack_input"]])
 shared_norm = Normalize(vmin=all_vals.min(), vmax=all_vals.max())
 
 # --------------------------------------------------------------------------- #
 #  Side-by-side figure                                                          #
 # --------------------------------------------------------------------------- #
+kfold_note = "  (RE = 5-fold mean ± CI95;  DR = single-fold)" if args.kfold else ""
 fig, axes = plt.subplots(1, 2, figsize=(17, 7))
 fig.suptitle(
     "Hidden Knowledge After Unlearning\n"
-    "Representational Erasure vs Geometric Rotation of the Knowledge Axis",
+    "Representational Erasure vs Geometric Rotation of the Knowledge Axis"
+    + kfold_note,
     fontsize=13, y=1.01,
 )
 
 draw_panel(axes[0], df, "attack_tamp",
-           "Best Tampering Attack  (WMDP, LLM-GAT)", shared_norm)
+           "Best Tampering Attack  (WMDP, LLM-GAT)", shared_norm,
+           show_re_ci=args.kfold)
 axes[0].set_title("Color = Best Tampering Attack", fontsize=11)
 
 draw_panel(axes[1], df, "attack_input",
-           "Best Input Attack  (WMDP, LLM-GAT)", shared_norm)
+           "Best Input Attack  (WMDP, LLM-GAT)", shared_norm,
+           show_re_ci=args.kfold)
 axes[1].set_title("Color = Best Input Attack", fontsize=11)
 
 plt.tight_layout()
-_auto_out = f"RE_DR_{args.re_band}_{args.re_clf}_RE_{args.dr_band}_{args.dr_clf}_DR.png"
+kfold_tag = "_kfold" if args.kfold else ""
+_auto_out = f"RE_DR_{args.re_band}_{args.re_clf}_RE_{args.dr_band}_{args.dr_clf}_DR{kfold_tag}.png"
 out = Path(args.out) if args.out else DATA_DIR / _auto_out
 plt.savefig(out, dpi=150, bbox_inches="tight")
 print(f"\nSaved -> {out}")
-plt.show()

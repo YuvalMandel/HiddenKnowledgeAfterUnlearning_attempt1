@@ -1402,6 +1402,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--kfold", action="store_true", default=False,
+        help=(
+            "Use 5-fold aggregated data instead of single-fold hidden states.\n"
+            "Reads kfold_per_layer_table.csv; draws mean line + ±CI95 shaded band.\n"
+            "Only valid with --mode methods --plot_type line --dataset bio."
+        ),
+    )
+    parser.add_argument(
         "--cyber_subset", choices=CYBER_SUBSETS, default=None,
         help=(
             "Filter the cyber test set to a named subset before evaluating probes.\n"
@@ -1425,6 +1433,26 @@ def main():
     dataset        = args.dataset
     normalize      = args.relative
     cyber_subset   = args.cyber_subset if dataset == "cyber" else None
+
+    # ── k-fold aggregate mode (bio-only, line plots) ──────────────────────────
+    if args.kfold:
+        if args.mode != "methods" or args.plot_type != "line":
+            parser.error("--kfold only supports --mode methods --plot_type line")
+        if dataset != "bio":
+            parser.error("--kfold only supports --dataset bio (kfold is bio-only)")
+        kfold_out = Path(args.out) if args.out else Path(
+            f"kfold_line_methods_"
+            f"{args.metric or 'all_metrics'}_"
+            f"{args.clf.lower() if args.clf else 'all_clf'}_"
+            f"{args.probe_source}.png"
+        )
+        make_plot_kfold(
+            data_dir=data_dir,
+            out_path=kfold_out,
+            clf_filter=clf_filter,
+            metric=args.metric,
+        )
+        return
 
     # Resolve base output path (auto-generate if not given)
     if args.out is not None:
@@ -1549,3 +1577,169 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# K-fold aggregate line-plot (bio only)
+# ---------------------------------------------------------------------------
+
+# Map kfold model name → display name used in ALL_MODELS
+_KFOLD_MODEL_DISPLAY = {v: k for k, v in ALL_MODELS.items()}
+_KFOLD_MODEL_DISPLAY["base"] = "Base (Instruct)"   # kfold uses "base", display uses "Base (Instruct)"
+
+
+def collect_data_kfold(data_dir: Path, clfs: list, metrics: list) -> dict:
+    """
+    Read kfold_per_layer_table.csv and return
+    data[metric][clf_name][model_name] = (layers, means, ci95s).
+
+    model_name uses the same display keys as ALL_MODELS (e.g. "Base (Instruct)").
+    """
+    pl_path = data_dir / "kfold_per_layer_table.csv"
+    if not pl_path.exists():
+        raise FileNotFoundError(
+            f"{pl_path} not found — run: python kfold_probe.py --stage kfold_tables"
+        )
+
+    # Load: indexed by (model, clf, layer)
+    raw: dict = {}   # (model_display, clf, layer) -> {metric: (mean, ci95)}
+    with open(pl_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            mdl   = _KFOLD_MODEL_DISPLAY.get(row["model"], row["model"])
+            clf   = row["clf"]
+            layer = int(row["layer"])
+            raw.setdefault((mdl, clf, layer), {})
+            for m in metrics:
+                mean_v = _safe_float(row.get(f"mean_{m}"))
+                ci_v   = _safe_float(row.get(f"ci95_{m}"))
+                if mean_v is not None:
+                    raw[(mdl, clf, layer)][m] = (mean_v, ci_v if ci_v is not None else 0.0)
+
+    # Reshape to data[metric][clf][model] = (layers, means, ci95s)
+    data = {m: {clf: {} for clf in clfs} for m in metrics}
+    # Gather all layers per (model, clf)
+    from collections import defaultdict
+    tmp = defaultdict(lambda: defaultdict(dict))  # (model, clf) -> metric -> layer -> (mean, ci)
+    for (mdl, clf, layer), m_dict in raw.items():
+        if clf not in clfs:
+            continue
+        for m, (mean_v, ci_v) in m_dict.items():
+            if m in metrics:
+                tmp[(mdl, clf)][m][layer] = (mean_v, ci_v)
+
+    for (mdl, clf), m_dict in tmp.items():
+        for m, layer_dict in m_dict.items():
+            if m not in metrics:
+                continue
+            sorted_layers = sorted(layer_dict.keys())
+            means = [layer_dict[l][0] for l in sorted_layers]
+            ci95s = [layer_dict[l][1] for l in sorted_layers]
+            data[m][clf][mdl] = (sorted_layers, means, ci95s)
+
+    return data
+
+
+def _safe_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def make_plot_kfold(data_dir: Path, out_path: Path,
+                   clf_filter: list, metric: str | None):
+    """
+    Line plot of per-layer probe accuracy from the 5-fold aggregated data.
+    Draws mean line + shaded ±CI95 band per model (bio only).
+    """
+    clfs            = clf_filter if clf_filter else CLF_NAMES
+    metrics_to_plot = [metric] if metric else METRIC_NAMES
+
+    data = collect_data_kfold(data_dir, clfs, metrics_to_plot)
+
+    # Compute per-row y-max from means
+    row_ymax = {}
+    for m in metrics_to_plot:
+        mx = Y_MIN
+        for clf_data in data[m].values():
+            for _, means, _ in clf_data.values():
+                if means:
+                    mx = max(mx, max(means))
+        row_ymax[m] = min(mx * (1 + Y_PAD), 1.0)
+
+    n_rows = len(metrics_to_plot)
+    n_clfs = len(clfs)
+
+    fig, axes = plt.subplots(
+        n_rows, n_clfs,
+        figsize=(7 * n_clfs, 4.5 * n_rows),
+        sharey="row",
+        squeeze=False,
+    )
+    fig.suptitle(
+        "Per-Layer Probe Accuracy — 5-Fold CV  (mean ± 95 % CI)  [Bio WMDP]",
+        fontsize=11, x=0.5, ha="center",
+    )
+
+    for row_idx, m in enumerate(metrics_to_plot):
+        y_max = row_ymax[m]
+        for ax_idx, clf_name in enumerate(clfs):
+            ax = axes[row_idx][ax_idx]
+            _setup_ax(ax, row_idx, ax_idx, n_rows,
+                      clf_name if n_clfs > 1 else None, m)
+            ax.set_ylim(Y_MIN, y_max)
+
+            clf_data    = data[m].get(clf_name, {})
+            any_plotted = False
+
+            for model_name in ALL_MODELS:
+                if model_name not in clf_data:
+                    continue
+                layers, means, ci95s = clf_data[model_name]
+                means  = np.array(means)
+                ci95s  = np.array(ci95s)
+                color  = MODEL_COLORS[model_name]
+                lw     = 2.4 if model_name in THICK_MODELS else 1.2
+                ls     = "--" if model_name in DASHED_MODELS else "-"
+                zorder = 4 if model_name in THICK_MODELS else 2
+
+                ax.plot(layers, means, color=color, linewidth=lw,
+                        linestyle=ls, zorder=zorder)
+                # Shade ± CI95 band
+                ax.fill_between(layers, means - ci95s, means + ci95s,
+                                color=color, alpha=0.15, linewidth=0, zorder=zorder - 1)
+                any_plotted = True
+
+            if not any_plotted:
+                ax.text(0.5, 0.5, "No data",
+                        ha="center", va="center",
+                        transform=ax.transAxes, fontsize=10)
+
+    # Legend
+    legend_handles, legend_labels = [], []
+    models_with_data = set()
+    for m in metrics_to_plot:
+        for clf in clfs:
+            models_with_data.update(data[m].get(clf, {}).keys())
+
+    for model_name in LEGEND_CURVE_ORDER:
+        if model_name not in models_with_data:
+            continue
+        color = MODEL_COLORS[model_name]
+        lw    = 2.4 if model_name in THICK_MODELS else 1.2
+        ls    = "--" if model_name in DASHED_MODELS else "-"
+        legend_handles.append(
+            mlines.Line2D([], [], color=color, linewidth=lw, linestyle=ls,
+                          label=model_name)
+        )
+        legend_labels.append(model_name)
+
+    # Add CI band patch to legend
+    import matplotlib.patches as mpatches
+    legend_handles.append(
+        mpatches.Patch(color="grey", alpha=0.3, label="±95 % CI (5-fold)")
+    )
+    legend_labels.append("±95 % CI (5-fold)")
+
+    _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
+    plt.close(fig)

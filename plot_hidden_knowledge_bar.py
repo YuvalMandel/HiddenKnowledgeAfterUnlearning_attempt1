@@ -17,8 +17,14 @@ Data sources:
   data/summary_table1_gen_logit.csv     -> gen_acc, logit_acc, logit_auc
   data/summary_table2_base_probes.csv   -> fl_lr_acc, fl_lr_auc  (Base row)
   data/summary_table3_method_probes.csv -> fl_lr_acc, fl_lr_auc  (method rows)
+
+K-fold mode (--kfold):
+  Reads data/kfold_table3_probes.csv for probe values (mean ± CI95).
+  Gen/logit values still come from the single-fold summary tables (no kfold gen/logit).
+  Probe bars show mean height; ±CI95 is drawn as an error cap on each bar.
 """
 
+import argparse
 import csv
 import matplotlib
 matplotlib.use("Agg")   # no popup window
@@ -28,16 +34,6 @@ import numpy as np
 from pathlib import Path
 
 DATA_DIR = Path("data")
-
-# ── Load tables ───────────────────────────────────────────────────────────────
-
-def read_csv_as_dict(path):
-    with open(path, newline="") as f:
-        return {row["method"]: row for row in csv.DictReader(f)}
-
-t1 = read_csv_as_dict(DATA_DIR / "summary_table1_gen_logit.csv")
-t2 = read_csv_as_dict(DATA_DIR / "summary_table2_base_probes.csv")
-t3 = read_csv_as_dict(DATA_DIR / "summary_table3_method_probes.csv")
 
 # ── Model order & display names ───────────────────────────────────────────────
 
@@ -52,47 +48,39 @@ MODELS = [
     ("TAR",       "TAR"),
     ("PB&J",      "PB&J"),
 ]
-labels = [lbl for _, lbl in MODELS]
 
-# ── Extract values ────────────────────────────────────────────────────────────
+# kfold CSV uses "base" for the base model; others match
+_KFOLD_KEY = {
+    "Base": "base",
+    **{k: k for k, _ in MODELS[1:]},
+}
 
-def fget(row, col):
-    v = row.get(col, "")
-    return float(v) if v not in ("", None) else float("nan")
-
-gen_accs   = []
-logit_accs = []
-logit_aucs = []
-probe_accs = []
-probe_aucs = []
-
-for key, _ in MODELS:
-    gen_accs.append(fget(t1[key], "gen_acc"))
-    logit_accs.append(fget(t1[key], "logit_acc"))
-    logit_aucs.append(fget(t1[key], "logit_auc"))
-    probe_row = t2[key] if key == "Base" else t3[key]
-    probe_accs.append(fget(probe_row, "fl_lr_acc"))
-    probe_aucs.append(fget(probe_row, "fl_lr_auc"))
-
-# ── Shared style ──────────────────────────────────────────────────────────────
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 COLORS = {
     "gen":   "#E07B54",
     "logit": "#F2C14E",
     "probe": "#4C72B0",
 }
-N = len(MODELS)
-x = np.arange(N)
+
+
+def read_csv_as_dict(path, key_col="method"):
+    with open(path, newline="") as f:
+        return {row[key_col]: row for row in csv.DictReader(f)}
+
+
+def fget(row, col):
+    v = row.get(col, "")
+    return float(v) if v not in ("", None) else float("nan")
 
 
 def add_value_labels(ax, bar_groups):
     for bars in bar_groups:
         for bar in bars:
-            top   = bar.get_y() + bar.get_height()   # actual top of bar in data coords
-            value = top                               # the displayed value equals the top
+            top = bar.get_y() + bar.get_height()
             if not np.isnan(top):
                 ax.text(bar.get_x() + bar.get_width() / 2, top + 0.003,
-                        f"{value:.2f}", ha="center", va="bottom",
+                        f"{top:.2f}", ha="center", va="bottom",
                         fontsize=7, rotation=0)
 
 
@@ -110,73 +98,164 @@ def format_yaxis(ax, ylabel, ymin=0, ymax=1.0, step=0.1):
     ax.set_axisbelow(True)
 
 
-# ── Plot 1: Accuracy ──────────────────────────────────────────────────────────
+def add_errorbars(ax, x_positions, values, errors, width, color):
+    """Draw symmetric error caps centred on each bar top."""
+    errs = np.array(errors, dtype=float)
+    vals = np.array(values, dtype=float)
+    valid = ~np.isnan(errs) & ~np.isnan(vals)
+    if not valid.any():
+        return
+    ax.errorbar(
+        x_positions[valid], vals[valid],
+        yerr=errs[valid],
+        fmt="none",
+        ecolor="black",
+        elinewidth=1.2,
+        capsize=4,
+        zorder=5,
+    )
 
-width  = 0.26
-offset = [-width, 0, width]
 
-fig1, ax1 = plt.subplots(figsize=(13, 5.5))
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-b_gen   = ax1.bar(x + offset[0], gen_accs,   width, color=COLORS["gen"],   zorder=3)
-b_logit = ax1.bar(x + offset[1], logit_accs, width, color=COLORS["logit"], zorder=3)
-b_probe = ax1.bar(x + offset[2], probe_accs, width, color=COLORS["probe"], zorder=3)
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kfold", action="store_true", default=False,
+                    help=(
+                        "Use 5-fold aggregated probe values (mean ± CI95) "
+                        "from kfold_table3_probes.csv. "
+                        "Gen/logit bars remain single-fold values."
+                    ))
+    ap.add_argument("--out_acc", default=None,
+                    help="Output path for accuracy plot (default: auto)")
+    ap.add_argument("--out_auc", default=None,
+                    help="Output path for AUC plot (default: auto)")
+    args = ap.parse_args()
 
-ax1.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
-ax1.set_xticks(x)
-ax1.set_xticklabels(labels, fontsize=10)
-format_yaxis(ax1, "Accuracy")
-ax1.set_title(
-    "Hidden Knowledge After Unlearning — Bio (WMDP)\n"
-    "Surface behaviour vs. internal hidden-state probe  [Accuracy]",
-    fontsize=13, pad=12
-)
-handles1 = [
-    mpatches.Patch(color=COLORS["gen"],   label="Generation acc (surface)"),
-    mpatches.Patch(color=COLORS["logit"], label="Logit acc (surface)"),
-    mpatches.Patch(color=COLORS["probe"], label="Probe acc — full-layer LR (internal)"),
-    plt.Line2D([0], [0], color="black", linewidth=1.2, linestyle="--", label="Chance (50%)"),
-]
-ax1.legend(handles=handles1, loc="upper right", fontsize=9, framealpha=0.9)
-add_value_labels(ax1, [b_gen, b_logit, b_probe])
-add_separators(ax1, N)
+    kfold  = args.kfold
+    suffix = "_kfold" if kfold else ""
+    out1   = Path(args.out_acc) if args.out_acc else Path(f"hidden_knowledge_bar_acc{suffix}.png")
+    out2   = Path(args.out_auc) if args.out_auc else Path(f"hidden_knowledge_bar_auc{suffix}.png")
 
-fig1.tight_layout()
-out1 = Path("hidden_knowledge_bar_acc.png")
-fig1.savefig(out1, dpi=150, bbox_inches="tight")
-print(f"Saved: {out1}")
+    # ── Load surface tables (always single-fold) ──────────────────────────────
+    t1 = read_csv_as_dict(DATA_DIR / "summary_table1_gen_logit.csv")
+    t2 = read_csv_as_dict(DATA_DIR / "summary_table2_base_probes.csv")
+    t3 = read_csv_as_dict(DATA_DIR / "summary_table3_method_probes.csv")
 
-# ── Plot 2: AUC ───────────────────────────────────────────────────────────────
+    labels     = [lbl for _, lbl in MODELS]
+    N          = len(MODELS)
+    x          = np.arange(N)
+    gen_accs   = [fget(t1[k], "gen_acc")   for k, _ in MODELS]
+    logit_accs = [fget(t1[k], "logit_acc") for k, _ in MODELS]
+    logit_aucs = [fget(t1[k], "logit_auc") for k, _ in MODELS]
 
-width2  = 0.32
-offset2 = [-width2 / 2, width2 / 2]
+    # ── Load probe values ─────────────────────────────────────────────────────
+    probe_accs     = []
+    probe_aucs     = []
+    probe_acc_errs = []
+    probe_auc_errs = []
 
-fig2, ax2 = plt.subplots(figsize=(13, 5.5))
+    if kfold:
+        kf = read_csv_as_dict(DATA_DIR / "kfold_table3_probes.csv", key_col="model")
+        for key, _ in MODELS:
+            row = kf.get(_KFOLD_KEY[key], {})
+            probe_accs.append(fget(row, "fl_lr_acc_mean"))
+            probe_aucs.append(fget(row, "fl_lr_auc_mean"))
+            probe_acc_errs.append(fget(row, "fl_lr_acc_ci95"))
+            probe_auc_errs.append(fget(row, "fl_lr_auc_ci95"))
+    else:
+        for key, _ in MODELS:
+            probe_row = t2[key] if key == "Base" else t3[key]
+            probe_accs.append(fget(probe_row, "fl_lr_acc"))
+            probe_aucs.append(fget(probe_row, "fl_lr_auc"))
+        probe_acc_errs = [float("nan")] * N
+        probe_auc_errs = [float("nan")] * N
 
-AUC_YMIN = 0.4
-b_lauc = ax2.bar(x + offset2[0], np.array(logit_aucs) - AUC_YMIN, width2,
-                 bottom=AUC_YMIN, color=COLORS["logit"], zorder=3)
-b_pauc = ax2.bar(x + offset2[1], np.array(probe_aucs) - AUC_YMIN, width2,
-                 bottom=AUC_YMIN, color=COLORS["probe"], zorder=3)
+    probe_accs     = np.array(probe_accs)
+    probe_aucs     = np.array(probe_aucs)
+    probe_acc_errs = np.array(probe_acc_errs)
+    probe_auc_errs = np.array(probe_auc_errs)
 
-ax2.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
-ax2.set_xticks(x)
-ax2.set_xticklabels(labels, fontsize=10)
-format_yaxis(ax2, "AUC (ROC)", ymin=0.4, ymax=0.8, step=0.05)
-ax2.set_title(
-    "Hidden Knowledge After Unlearning — Bio (WMDP)\n"
-    "Surface behaviour vs. internal hidden-state probe  [AUC]",
-    fontsize=13, pad=12
-)
-handles2 = [
-    mpatches.Patch(color=COLORS["logit"], label="Logit AUC (surface)"),
-    mpatches.Patch(color=COLORS["probe"], label="Probe AUC — full-layer LR (internal)"),
-    plt.Line2D([0], [0], color="black", linewidth=1.2, linestyle="--", label="Chance (50%)"),
-]
-ax2.legend(handles=handles2, loc="upper right", fontsize=9, framealpha=0.9)
-add_value_labels(ax2, [b_lauc, b_pauc])
-add_separators(ax2, N)
+    err_label = "±95 % CI (5-fold CV)" if kfold else None
 
-fig2.tight_layout()
-out2 = Path("hidden_knowledge_bar_auc.png")
-fig2.savefig(out2, dpi=150, bbox_inches="tight")
-print(f"Saved: {out2}")
+    # ── Plot 1: Accuracy ──────────────────────────────────────────────────────
+    width  = 0.26
+    offset = [-width, 0, width]
+
+    fig1, ax1 = plt.subplots(figsize=(13, 5.5))
+
+    b_gen   = ax1.bar(x + offset[0], gen_accs,   width, color=COLORS["gen"],   zorder=3)
+    b_logit = ax1.bar(x + offset[1], logit_accs, width, color=COLORS["logit"], zorder=3)
+    b_probe = ax1.bar(x + offset[2], probe_accs, width, color=COLORS["probe"], zorder=3)
+    add_errorbars(ax1, x + offset[2], probe_accs, probe_acc_errs, width, COLORS["probe"])
+
+    ax1.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, fontsize=10)
+    format_yaxis(ax1, "Accuracy")
+    title1 = "Hidden Knowledge After Unlearning — Bio (WMDP)\nSurface behaviour vs. internal hidden-state probe  [Accuracy]"
+    if kfold:
+        title1 += "\n(probe = 5-fold CV mean ± 95 % CI)"
+    ax1.set_title(title1, fontsize=13, pad=12)
+
+    handles1 = [
+        mpatches.Patch(color=COLORS["gen"],   label="Generation acc (surface)"),
+        mpatches.Patch(color=COLORS["logit"], label="Logit acc (surface)"),
+        mpatches.Patch(color=COLORS["probe"], label="Probe acc — full-layer LR (internal)"),
+        plt.Line2D([0], [0], color="black", linewidth=1.2, linestyle="--", label="Chance (50%)"),
+    ]
+    if err_label:
+        handles1.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
+                                   marker="|", markersize=8, label=err_label))
+    ax1.legend(handles=handles1, loc="upper right", fontsize=9, framealpha=0.9)
+    add_value_labels(ax1, [b_gen, b_logit, b_probe])
+    add_separators(ax1, N)
+
+    fig1.tight_layout()
+    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out1}")
+    plt.close(fig1)
+
+    # ── Plot 2: AUC ───────────────────────────────────────────────────────────
+    AUC_YMIN = 0.4
+    width2   = 0.32
+    offset2  = [-width2 / 2, width2 / 2]
+
+    fig2, ax2 = plt.subplots(figsize=(13, 5.5))
+
+    b_lauc = ax2.bar(x + offset2[0], np.array(logit_aucs) - AUC_YMIN, width2,
+                     bottom=AUC_YMIN, color=COLORS["logit"], zorder=3)
+    b_pauc = ax2.bar(x + offset2[1], probe_aucs - AUC_YMIN, width2,
+                     bottom=AUC_YMIN, color=COLORS["probe"], zorder=3)
+    add_errorbars(ax2, x + offset2[1], probe_aucs, probe_auc_errs, width2, COLORS["probe"])
+
+    ax2.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, fontsize=10)
+    format_yaxis(ax2, "AUC (ROC)", ymin=0.4, ymax=0.8, step=0.05)
+    title2 = "Hidden Knowledge After Unlearning — Bio (WMDP)\nSurface behaviour vs. internal hidden-state probe  [AUC]"
+    if kfold:
+        title2 += "\n(probe = 5-fold CV mean ± 95 % CI)"
+    ax2.set_title(title2, fontsize=13, pad=12)
+
+    handles2 = [
+        mpatches.Patch(color=COLORS["logit"], label="Logit AUC (surface)"),
+        mpatches.Patch(color=COLORS["probe"], label="Probe AUC — full-layer LR (internal)"),
+        plt.Line2D([0], [0], color="black", linewidth=1.2, linestyle="--", label="Chance (50%)"),
+    ]
+    if err_label:
+        handles2.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
+                                   marker="|", markersize=8, label=err_label))
+    ax2.legend(handles=handles2, loc="upper right", fontsize=9, framealpha=0.9)
+    add_value_labels(ax2, [b_lauc, b_pauc])
+    add_separators(ax2, N)
+
+    fig2.tight_layout()
+    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    print(f"Saved: {out2}")
+    plt.close(fig2)
+
+
+if __name__ == "__main__":
+    main()

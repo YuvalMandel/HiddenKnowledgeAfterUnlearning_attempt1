@@ -48,6 +48,24 @@ except ImportError:
     from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 
 # =============================================================================
+# 95 % CI helper (uses scipy.stats.t if available; else look-up table)
+# =============================================================================
+try:
+    from scipy.stats import t as _t_dist
+    def _ci95_half(sample_std: float, n: int) -> float:
+        """Half-width of 95 % CI: t_{n-1, 0.975} × s / √n  (sample std, ddof=1)."""
+        if n < 2:
+            return float("nan")
+        return float(_t_dist.ppf(0.975, df=n - 1) * sample_std / (n ** 0.5))
+except ImportError:
+    _T95 = {1: float("inf"), 2: 12.706, 3: 4.303, 4: 3.182, 5: 2.776,
+            6: 2.571, 7: 2.447, 8: 2.365, 9: 2.306, 10: 2.262}
+    def _ci95_half(sample_std: float, n: int) -> float:
+        if n < 2:
+            return float("nan")
+        return float(_T95.get(n, 2.0) * sample_std / (n ** 0.5))
+
+# =============================================================================
 # Configuration (must match hidden_knowledge_after_unlearning.py)
 # =============================================================================
 RANDOM_SEED  = 42
@@ -705,22 +723,30 @@ def run_kfold_summary():
                 for m_col in numeric_metrics:
                     vals = fold_vals[m_col]
                     if vals:
-                        row[f"mean_{m_col}"] = float(np.mean(vals))
-                        row[f"std_{m_col}"]  = float(np.std(vals))
+                        row[f"mean_{m_col}"]      = float(np.mean(vals))
+                        row[f"std_{m_col}"]       = float(np.std(vals))
+                        ssd = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
+                        row[f"ci95_half_{m_col}"] = _ci95_half(ssd, n_complete)
                     else:
-                        row[f"mean_{m_col}"] = ""
-                        row[f"std_{m_col}"]  = ""
+                        row[f"mean_{m_col}"]      = ""
+                        row[f"std_{m_col}"]       = ""
+                        row[f"ci95_half_{m_col}"] = ""
                 if fold_vals["best_layer"]:
-                    row["mean_best_layer"] = float(np.mean(fold_vals["best_layer"]))
-                    row["std_best_layer"]  = float(np.std(fold_vals["best_layer"]))
+                    bls = fold_vals["best_layer"]
+                    row["mean_best_layer"]      = float(np.mean(bls))
+                    row["std_best_layer"]       = float(np.std(bls))
+                    ssd = float(np.std(bls, ddof=1)) if len(bls) >= 2 else 0.0
+                    row["ci95_half_best_layer"] = _ci95_half(ssd, len(bls))
                 else:
-                    row["mean_best_layer"] = ""
-                    row["std_best_layer"]  = ""
+                    row["mean_best_layer"]      = ""
+                    row["std_best_layer"]       = ""
+                    row["ci95_half_best_layer"] = ""
                 agg_rows.append(row)
 
     agg_fields = (["model", "probe_type", "clf", "n_folds_complete", "mean_n_test",
-                   "mean_best_layer", "std_best_layer"] +
-                  [f"{s}_{m}" for m in numeric_metrics for s in ("mean", "std")])
+                   "mean_best_layer", "std_best_layer", "ci95_half_best_layer"] +
+                  [f"{s}_{m}" for m in numeric_metrics
+                   for s in ("mean", "std", "ci95_half")])
     agg_path = DATA_DIR / "kfold_results_aggregated.csv"
     with open(agg_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=agg_fields)
@@ -774,15 +800,22 @@ def run_kfold_summary():
         for m_col in ("accuracy", "true_accuracy", "false_accuracy",
                       "precision", "recall", "f1", "auc"):
             vals = m_dict.get(m_col, [])
-            row[f"mean_{m_col}"] = float(np.mean(vals)) if vals else ""
-            row[f"std_{m_col}"]  = float(np.std(vals))  if vals else ""
+            if vals:
+                row[f"mean_{m_col}"]      = float(np.mean(vals))
+                row[f"std_{m_col}"]       = float(np.std(vals))
+                ssd = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
+                row[f"ci95_half_{m_col}"] = _ci95_half(ssd, len(vals))
+            else:
+                row[f"mean_{m_col}"]      = ""
+                row[f"std_{m_col}"]       = ""
+                row[f"ci95_half_{m_col}"] = ""
         pl_agg_rows.append(row)
 
     pl_agg_path = DATA_DIR / "kfold_per_layer_aggregated.csv"
     pl_agg_fields = (["model", "clf", "layer"] +
                      [f"{s}_{m}" for m in ("accuracy", "true_accuracy", "false_accuracy",
                                            "precision", "recall", "f1", "auc")
-                      for s in ("mean", "std")])
+                      for s in ("mean", "std", "ci95_half")])
     with open(pl_agg_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=pl_agg_fields)
         w.writeheader()
@@ -809,13 +842,160 @@ def run_kfold_summary():
 
 
 # =============================================================================
+# K-fold wide-format table (mirrors single-fold summary_table3_method_probes.csv)
+# =============================================================================
+
+# Abbreviation maps — must match hidden_knowledge_after_unlearning.py
+_PT_ABBR = {
+    "per_layer":     "pl",
+    "mid_band":      "mb",
+    "vote_ensemble": "vote",
+    "avg_ensemble":  "avg",
+    "full_layer":    "fl",
+    "init_band":     "ib",
+    "init_band_emb": "ibe",
+    "end_band":      "eb",
+    "ib_no_pca":     "ibnp",
+}
+_METRIC_ABBR = {
+    "accuracy":       "acc",
+    "true_accuracy":  "true",
+    "false_accuracy": "fals",
+    "precision":      "prec",
+    "recall":         "rec",
+    "f1":             "f1",
+    "auc":            "auc",
+}
+_CLF_ABBR = {"LR": "lr", "RF": "rf", "AdaBoost": "ada"}
+
+_NUMERIC_METRICS = ["accuracy", "true_accuracy", "false_accuracy",
+                    "precision", "recall", "f1", "auc"]
+
+
+def run_kfold_tables():
+    """
+    Read kfold_results_aggregated.csv and kfold_per_layer_aggregated.csv and
+    produce a wide-format CSV that mirrors the structure of
+    summary_table3_method_probes.csv (each row = one model; each probe×clf×metric
+    triple becomes three columns: _mean, _std, _ci95).
+
+    Output: data/kfold_table3_probes.csv
+    Also writes: data/kfold_per_layer_table.csv (per-layer means ± CI, one row
+    per model×clf×layer for easy plotting).
+    """
+    agg_path = DATA_DIR / "kfold_results_aggregated.csv"
+    pl_path  = DATA_DIR / "kfold_per_layer_aggregated.csv"
+
+    if not agg_path.exists():
+        print(f"[kfold_tables] {agg_path} not found — run --stage kfold_summary first.",
+              flush=True)
+        return
+
+    # ── Load aggregated CSV into nested dict ─────────────────────────────────
+    # agg[model][probe_type][clf] = {mean_accuracy: float, std_accuracy: float, ...}
+    agg = {}
+    with open(agg_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            m   = row["model"]
+            pt  = row["probe_type"]
+            clf = row["clf"]
+            agg.setdefault(m, {}).setdefault(pt, {})[clf] = row
+
+    # ── Build column list ─────────────────────────────────────────────────────
+    # Order: same probe-type order as PROBE_TYPES, same metric/clf order as main script.
+    # Each column cell expands to three: _mean, _std, _ci95.
+    cols = ["model"]
+    for pt in PROBE_TYPES:
+        pa = _PT_ABBR[pt]
+        for clf in CLF_NAMES:
+            ca = _CLF_ABBR[clf]
+            if pt == "per_layer":
+                for stat in ("mean", "std", "ci95"):
+                    cols.append(f"{pa}_{ca}_lyr_{stat}")
+            for ma_key, ma in _METRIC_ABBR.items():
+                for stat in ("mean", "std", "ci95"):
+                    cols.append(f"{pa}_{ca}_{ma}_{stat}")
+
+    # ── Build rows ────────────────────────────────────────────────────────────
+    rows = []
+    for model in ALL_MODELS:
+        row = {"model": model}
+        for pt in PROBE_TYPES:
+            pa = _PT_ABBR[pt]
+            for clf in CLF_NAMES:
+                ca  = _CLF_ABBR[clf]
+                src = agg.get(model, {}).get(pt, {}).get(clf, {})
+                if pt == "per_layer":
+                    for stat, src_key in (("mean", "mean_best_layer"),
+                                          ("std",  "std_best_layer"),
+                                          ("ci95", "ci95_half_best_layer")):
+                        v = src.get(src_key, "")
+                        row[f"{pa}_{ca}_lyr_{stat}"] = v
+                for ma_key, ma in _METRIC_ABBR.items():
+                    for stat, src_key in (("mean", f"mean_{ma_key}"),
+                                          ("std",  f"std_{ma_key}"),
+                                          ("ci95", f"ci95_half_{ma_key}")):
+                        v = src.get(src_key, "")
+                        row[f"{pa}_{ca}_{ma}_{stat}"] = v
+        rows.append(row)
+
+    out_path = DATA_DIR / "kfold_table3_probes.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"[kfold_tables] Wrote {len(rows)} rows × {len(cols)} cols → {out_path}",
+          flush=True)
+
+    # ── Per-layer table (for kfold-aware line plots) ──────────────────────────
+    if not pl_path.exists():
+        print(f"[kfold_tables] {pl_path} not found — skipping per-layer table.",
+              flush=True)
+        return
+
+    # Pass-through: pl_path already has model/clf/layer + mean_*/std_*/ci95_half_* columns.
+    # Rename ci95_half_* → ci95_* for plot-script consistency, write kfold_per_layer_table.csv.
+    pl_rows = []
+    with open(pl_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        orig_fields = reader.fieldnames or []
+        for row in reader:
+            new_row = {}
+            for k, v in row.items():
+                new_key = k.replace("ci95_half_", "ci95_")
+                new_row[new_key] = v
+            pl_rows.append(new_row)
+
+    pl_out_fields = [k.replace("ci95_half_", "ci95_") for k in orig_fields]
+    pl_out_path = DATA_DIR / "kfold_per_layer_table.csv"
+    with open(pl_out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=pl_out_fields)
+        w.writeheader()
+        w.writerows(pl_rows)
+    print(f"[kfold_tables] Wrote {len(pl_rows)} rows → {pl_out_path}", flush=True)
+
+    # ── Print quick summary table ─────────────────────────────────────────────
+    print("\n[kfold_tables] mid_band LR accuracy  (mean ± CI95):", flush=True)
+    print(f"  {'Model':<15} {'mean':>8} {'± CI95':>8}", flush=True)
+    print("  " + "─" * 35, flush=True)
+    for model in ALL_MODELS:
+        src = agg.get(model, {}).get("mid_band", {}).get("LR", {})
+        mean_v = src.get("mean_accuracy", "")
+        ci_v   = src.get("ci95_half_accuracy", "")
+        try:
+            print(f"  {model:<15} {float(mean_v):>8.4f} {float(ci_v):>8.4f}", flush=True)
+        except (ValueError, TypeError):
+            print(f"  {model:<15} {'N/A':>8}", flush=True)
+
+
+# =============================================================================
 # Entry point
 # =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="5-fold probe cross-validation")
     parser.add_argument("--stage", required=True,
-                        choices=["kfold_train", "kfold_summary"],
+                        choices=["kfold_train", "kfold_summary", "kfold_tables"],
                         help="Stage to run")
     parser.add_argument("--fold", type=int, default=None,
                         help="Fold index 0-4 (required for kfold_train)")
@@ -836,6 +1016,10 @@ def main():
     elif args.stage == "kfold_summary":
         DATA_DIR.mkdir(exist_ok=True)
         run_kfold_summary()
+
+    elif args.stage == "kfold_tables":
+        DATA_DIR.mkdir(exist_ok=True)
+        run_kfold_tables()
 
 
 if __name__ == "__main__":

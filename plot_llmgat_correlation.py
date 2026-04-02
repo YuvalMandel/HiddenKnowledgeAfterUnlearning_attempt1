@@ -126,12 +126,17 @@ def fit_line(ax, x, y, color):
     ax.plot(xr, m * xr + b, color=color, linewidth=1.4, linestyle="--", alpha=0.6, zorder=1)
 
 
-def scatter_with_labels(ax, x, y, short, color):
-    for xi, yi, name in zip(x, y, short):
+def scatter_with_labels(ax, x, y, short, color, x_errs=None):
+    for i, (xi, yi, name) in enumerate(zip(x, y, short)):
         if np.isnan(xi) or np.isnan(yi):
             continue
         ax.scatter(xi, yi, color=color, s=80, zorder=3,
                    edgecolors="white", linewidths=0.6)
+        if x_errs is not None:
+            xe = x_errs[i]
+            if not np.isnan(xe):
+                ax.errorbar(xi, yi, xerr=xe, fmt="none",
+                            ecolor="black", elinewidth=1.2, capsize=4, zorder=4)
         ax.annotate(name, xy=(xi, yi), xytext=(5, 4),
                     textcoords="offset points", fontsize=8, color="#222222")
 
@@ -163,8 +168,10 @@ def main():
                         help="Probe summary CSV for unlearned methods "
                              "(default: summary_table3_method_probes.csv)")
     parser.add_argument("--probe_type",   default="ml",
-                        choices=["pl", "ml", "vote", "avg"],
-                        help="Probe type (default: ml)")
+                        choices=["pl", "ml", "mb", "vote", "avg"],
+                        help="Probe type (default: ml). "
+                             "Use 'mb' (= mid-band) when --kfold is set, "
+                             "as kfold_table3_probes.csv uses the 'mb' abbreviation.")
     parser.add_argument("--probe_clf",    default="LR",
                         choices=["LR", "RF", "AdaBoost"],
                         help="Classifier (default: LR)")
@@ -179,45 +186,74 @@ def main():
                         help="Y-axis: 'scores' (default) = two subplots, one per attack; "
                              "'gap' = single plot with |Tamp−Input|")
     parser.add_argument("--out",          default=None)
+    parser.add_argument("--kfold",        action="store_true", default=False,
+                        help=(
+                            "Use 5-fold aggregated probe values (mean ± CI95) "
+                            "from kfold_table3_probes.csv. "
+                            "Adds horizontal ±CI95 error bars to each scatter point. "
+                            "Use --probe_type mb for mid-band (not ml)."
+                        ))
     args = parser.parse_args()
 
     data_dir    = Path(args.data_dir)
     llmgat_path = data_dir / "LLM-GAT_summary_table.csv"
     gen_path    = data_dir / "summary_table1_gen_logit.csv"
-    probe_path  = data_dir / args.probe_table
+
+    # k-fold mode: probe values come from kfold_table3_probes.csv
+    if args.kfold:
+        probe_path = data_dir / "kfold_table3_probes.csv"
+        # "ml" is not in kfold CSV — remap to "mb" (mid-band)
+        kf_pt = "mb" if args.probe_type == "ml" else args.probe_type
+        pcol_mean = probe_col_name(kf_pt, args.probe_clf, args.probe_metric) + "_mean"
+        pcol_ci95 = probe_col_name(kf_pt, args.probe_clf, args.probe_metric) + "_ci95"
+        pcol      = pcol_mean   # used for printing / compatibility
+        kf_probe_key_col = "model"
+        print(f"  [kfold] probe columns: {pcol_mean} / {pcol_ci95}")
+    else:
+        probe_path       = data_dir / args.probe_table
+        pcol             = probe_col_name(args.probe_type, args.probe_clf, args.probe_metric)
+        pcol_mean        = pcol
+        pcol_ci95        = None
+        kf_probe_key_col = "method"
 
     for p in [llmgat_path, gen_path, probe_path]:
         if not p.exists():
             raise FileNotFoundError(f"Required file not found: {p}")
 
-    pcol = probe_col_name(args.probe_type, args.probe_clf, args.probe_metric)
     print(f"  Probe column  : {pcol}")
     print(f"  Baseline col  : {args.gen_col} (fallback: gen_acc)")
-    print(f"  Probe table   : {args.probe_table}")
+    print(f"  Probe table   : {probe_path.name}")
 
     llmgat_rows = load_csv_as_dict(llmgat_path, key_col="Method")
     gen_rows    = load_csv_as_dict(gen_path,    key_col="method")
-    probe_rows  = load_csv_as_dict(probe_path,  key_col="method")
+    probe_rows  = load_csv_as_dict(probe_path,  key_col=kf_probe_key_col)
 
-    methods, hk_scores, ia_scores, ta_scores = [], [], [], []
+    # kfold CSV uses "base", "GradDiff", etc.; single-fold uses "Base", "GradDiff", etc.
+    _KF_METHOD_KEY = {v: v for v in METHOD_MAP.values()}   # identity for methods
+
+    methods, hk_scores, hk_ci95s, ia_scores, ta_scores = [], [], [], [], []
 
     for llmgat_name, our_name in METHOD_MAP.items():
         if llmgat_name not in llmgat_rows:
             continue
         lg  = llmgat_rows[llmgat_name]
         gen = gen_rows.get(our_name)
-        prb = probe_rows.get(our_name)
+
+        # kfold probe rows are keyed by kfold model name (same as our_name for methods)
+        prb_key = our_name
+        prb = probe_rows.get(prb_key)
 
         if gen is None:
             print(f"  [skip] {llmgat_name}: missing gen row in table1")
             continue
         if prb is None:
-            print(f"  [skip] {llmgat_name}: missing probe row in {args.probe_table}")
+            print(f"  [skip] {llmgat_name}: missing probe row in {probe_path.name}")
             continue
 
         baseline  = get_baseline(gen, args.gen_col)
-        probe_val = get_probe_val(prb, pcol)
+        probe_val = get_probe_val(prb, pcol_mean)
         hk        = probe_val - baseline
+        hk_ci     = get_probe_val(prb, pcol_ci95) if pcol_ci95 else float("nan")
 
         try:
             ia = float(lg.get("WMDP, Best Input Attack") or "nan")
@@ -227,24 +263,32 @@ def main():
 
         methods.append(llmgat_name)
         hk_scores.append(hk)
+        hk_ci95s.append(hk_ci)
         ia_scores.append(ia)
         ta_scores.append(ta)
 
+        ci_str = f"  ci95={hk_ci:.3f}" if not np.isnan(hk_ci) else ""
         print(f"  {llmgat_name:20s}  baseline={baseline:.3f}  probe={probe_val:.3f}"
-              f"  hk={hk:+.3f}  input={ia:.3f}  tamp={ta:.3f}")
+              f"  hk={hk:+.3f}{ci_str}  input={ia:.3f}  tamp={ta:.3f}")
 
     if not methods:
         raise RuntimeError("No methods matched.")
 
-    hk    = np.array(hk_scores, dtype=float)
-    ia    = np.array(ia_scores,  dtype=float)
-    ta    = np.array(ta_scores,  dtype=float)
+    hk    = np.array(hk_scores,  dtype=float)
+    hk_ci = np.array(hk_ci95s,   dtype=float)
+    ia    = np.array(ia_scores,   dtype=float)
+    ta    = np.array(ta_scores,   dtype=float)
     short = [SHORT_NAME[n] for n in methods]
+    x_errs = hk_ci if args.kfold else None
 
-    probe_lbl = f"{args.probe_type.upper()} / {args.probe_clf} / {args.probe_metric}"
-    xlabel    = f"Hidden Knowledge Gap  (probe {args.probe_metric} − {args.gen_col})"
-    tag       = f"{args.probe_type}_{args.probe_clf}_{args.probe_metric}"
-    probe_stem = Path(args.probe_table).stem.replace("summary_", "")
+    probe_lbl  = f"{args.probe_type.upper()} / {args.probe_clf} / {args.probe_metric}"
+    xlabel     = f"Hidden Knowledge Gap  (probe {args.probe_metric} − {args.gen_col})"
+    if args.kfold:
+        xlabel += "  [5-fold mean ± CI95]"
+    tag        = f"{args.probe_type}_{args.probe_clf}_{args.probe_metric}"
+    kfold_tag  = "_kfold" if args.kfold else ""
+    probe_stem = ("kfold_t3" if args.kfold
+                  else Path(args.probe_table).stem.replace("summary_", ""))
 
     # -----------------------------------------------------------------------
     # scores mode — single plot, Best Tamp. Attack only
@@ -260,13 +304,13 @@ def main():
         )
 
         fit_line(ax, hk, ta, C_TAMP)
-        scatter_with_labels(ax, hk, ta, short, C_TAMP)
+        scatter_with_labels(ax, hk, ta, short, C_TAMP, x_errs=x_errs)
         annotate_r(ax, hk, ta, C_TAMP, "Best Tamp. Attack", 0.93)
         style_ax(ax, hk, ta, xlabel, "WMDP Best Tamp. Attack")
 
         plt.tight_layout()
         out = Path(args.out) if args.out else (
-            data_dir / f"correlation_hk_vs_tamp_attack_{probe_stem}_{tag}.png"
+            data_dir / f"correlation_hk_vs_tamp_attack_{probe_stem}_{tag}{kfold_tag}.png"
         )
 
     # -----------------------------------------------------------------------
@@ -284,14 +328,14 @@ def main():
         )
 
         fit_line(ax, hk, delta, COLOR)
-        scatter_with_labels(ax, hk, delta, short, COLOR)
+        scatter_with_labels(ax, hk, delta, short, COLOR, x_errs=x_errs)
         annotate_r(ax, hk, delta, COLOR, "|Tamp. − Input|", 0.93)
         style_ax(ax, hk, delta, xlabel,
                  "|Attack Vulnerability Gap|  |Tamp. Attack − Input Attack|")
 
         plt.tight_layout()
         out = Path(args.out) if args.out else (
-            data_dir / f"correlation_hk_vs_attack_gap_{probe_stem}_{tag}.png"
+            data_dir / f"correlation_hk_vs_attack_gap_{probe_stem}_{tag}{kfold_tag}.png"
         )
 
     fig.savefig(out, dpi=150, bbox_inches="tight")
