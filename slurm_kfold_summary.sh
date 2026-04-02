@@ -20,4 +20,8 @@ echo ""
 echo "Running kfold summary..."
 python kfold_probe.py --stage kfold_summary
 
+echo ""
+echo "Running kfold tables (wide-format pivot for plot scripts)..."
+python kfold_probe.py --stage kfold_tables
+
 echo "Job finished at $(date)"
