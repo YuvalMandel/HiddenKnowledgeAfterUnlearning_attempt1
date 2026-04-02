@@ -1402,6 +1402,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--models", nargs="+", default=None,
+        metavar="MODEL",
+        help=(
+            "Restrict kfold plot to these model display names "
+            "(e.g. --models 'Base (Instruct)' GradDiff RMU). "
+            "Colors are preserved from the full palette. "
+            "Only used with --kfold."
+        ),
+    )
+    parser.add_argument(
         "--kfold", action="store_true", default=False,
         help=(
             "Use 5-fold aggregated data instead of single-fold hidden states.\n"
@@ -1451,6 +1461,7 @@ def main():
             out_path=kfold_out,
             clf_filter=clf_filter,
             metric=args.metric,
+            models_filter=args.models,
         )
         return
 
@@ -1643,13 +1654,17 @@ def _safe_float(v):
 
 
 def make_plot_kfold(data_dir: Path, out_path: Path,
-                   clf_filter: list, metric: str | None):
+                   clf_filter: list, metric: str | None,
+                   models_filter: list | None = None):
     """
     Line plot of per-layer probe accuracy from the 5-fold aggregated data.
     Draws mean line + shaded ±CI95 band per model (bio only).
     """
     clfs            = clf_filter if clf_filter else CLF_NAMES
     metrics_to_plot = [metric] if metric else METRIC_NAMES
+    # models_to_show: same order as ALL_MODELS, colors preserved
+    models_to_show  = [m for m in ALL_MODELS
+                       if models_filter is None or m in models_filter]
 
     data = collect_data_kfold(data_dir, clfs, metrics_to_plot)
 
@@ -1688,7 +1703,7 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
             clf_data    = data[m].get(clf_name, {})
             any_plotted = False
 
-            for model_name in ALL_MODELS:
+            for model_name in models_to_show:
                 if model_name not in clf_data:
                     continue
                 layers, means, ci95s = clf_data[model_name]
@@ -1718,7 +1733,8 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
         for clf in clfs:
             models_with_data.update(data[m].get(clf, {}).keys())
 
-    for model_name in LEGEND_CURVE_ORDER:
+    legend_order = [m for m in LEGEND_CURVE_ORDER if models_filter is None or m in models_filter]
+    for model_name in legend_order:
         if model_name not in models_with_data:
             continue
         color = MODEL_COLORS[model_name]
