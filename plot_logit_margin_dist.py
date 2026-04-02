@@ -144,12 +144,15 @@ def load_final_ck(data_dir: Path, method: str):
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────
 
-def _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust=1.0):
+def _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust=1.0, xmin=None):
     """Draw a KDE curve onto ax."""
     from scipy.stats import gaussian_kde
     kde = gaussian_kde(margins, bw_method="scott")
     kde.set_bandwidth(kde.factor * bw_adjust)
-    xs = np.linspace(margins.min() - 0.5, margins.max() + 0.5, 512)
+    x_lo = margins.min() - 0.5
+    if xmin is not None:
+        x_lo = max(x_lo, xmin)
+    xs = np.linspace(x_lo, margins.max() + 0.5, 512)
     ax.plot(xs, kde(xs), color=color, lw=lw, ls=ls, alpha=alpha, label=label)
 
 
@@ -174,6 +177,7 @@ def make_plot_single(
     bw_adjust: float,
     title: str,
     xlabel: str = "Logit margin  (true − false)",
+    xmin: float = None,
 ):
     """All distributions on one axes."""
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -184,11 +188,14 @@ def make_plot_single(
     else:
         for label, (margins, color, lw, ls, alpha) in data.items():
             if plot_type == "kde":
-                _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust)
+                _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust, xmin=xmin)
             else:
                 _hist_plot(ax, margins, color, alpha, label)
 
-    ax.axvline(0, color="gray", lw=0.8, ls=":")
+    if xmin is None:
+        ax.axvline(0, color="gray", lw=0.8, ls=":")
+    else:
+        ax.set_xlim(left=xmin)
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel("Density", fontsize=12)
     ax.set_title(title, fontsize=13)
@@ -241,6 +248,7 @@ def make_plot_facet(
     out_path: Path,
     bw_adjust: float,
     xlabel: str = "Logit margin  (true − false)",
+    xmin: float = None,
 ):
     methods = list(method_data.keys())
     n = len(methods)
@@ -256,7 +264,7 @@ def make_plot_facet(
         if base_margins is not None:
             if plot_type == "kde":
                 _kde_plot(ax, base_margins, BASE_COLOR, lw=2.0, ls="-",
-                          alpha=0.9, label="Base", bw_adjust=bw_adjust)
+                          alpha=0.9, label="Base", bw_adjust=bw_adjust, xmin=xmin)
             elif plot_type == "hist":
                 _hist_plot(ax, base_margins, BASE_COLOR, alpha=0.5, label="Base")
             elif plot_type == "violin":
@@ -264,10 +272,13 @@ def make_plot_facet(
         # Draw each checkpoint
         for ck_label, (margins, color, lw, ls, alpha) in method_data[method].items():
             if plot_type == "kde":
-                _kde_plot(ax, margins, color, lw, ls, alpha, ck_label, bw_adjust)
+                _kde_plot(ax, margins, color, lw, ls, alpha, ck_label, bw_adjust, xmin=xmin)
             elif plot_type == "hist":
                 _hist_plot(ax, margins, color, alpha, ck_label)
-        ax.axvline(0, color="gray", lw=0.8, ls=":")
+        if xmin is None:
+            ax.axvline(0, color="gray", lw=0.8, ls=":")
+        else:
+            ax.set_xlim(left=xmin)
         ax.set_title(method, fontsize=11)
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel("Density", fontsize=9)
@@ -413,9 +424,11 @@ def main():
     if args.abs:
         xlabel = "|true − false|  (confidence magnitude)"
         margin_label = "confidence magnitude"
+        xmin = 0.0
     else:
         xlabel = "Logit margin  (true − false)"
         margin_label = "margin"
+        xmin = None
 
     # ── Build flat data dict for single-axes ──────────────────────────────────
     if not args.facet:
@@ -430,9 +443,9 @@ def main():
         title = (f"Bio logit {margin_label} distributions — "
                  f"{', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})")
 
-        make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title, xlabel)
+        make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title, xlabel, xmin)
     else:
-        make_plot_facet(base_margins, method_data, args.plot_type, out_path, args.bw_adjust, xlabel)
+        make_plot_facet(base_margins, method_data, args.plot_type, out_path, args.bw_adjust, xlabel, xmin)
 
 
 if __name__ == "__main__":
