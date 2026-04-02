@@ -249,33 +249,36 @@ def make_plot_single(
     print(f"Saved → {out_path}")
 
 
-# ── Correct / incorrect split plot ───────────────────────────────────────────
+# ── Grid plot (1×2, 2×1, or 2×2 panels) ─────────────────────────────────────
 
-def make_plot_split_correct(
-    data_correct: dict,    # {label: (margins, color, lw, ls, alpha)} — correct subset
-    data_incorrect: dict,  # same structure — incorrect subset
+def make_plot_grid(
+    panels: list,     # [(panel_title, data_dict), ...]  — length == nrows * ncols
+    nrows: int,
+    ncols: int,
     plot_type: str,
     out_path: Path,
     bw_adjust: float,
-    title: str,
+    suptitle: str,
     xlabel: str = "Logit margin  (true − false)",
     xmin: float = None,
 ):
-    """Two side-by-side panels: correct predictions (left) | incorrect (right)."""
-    fig, (ax_c, ax_w) = plt.subplots(1, 2, figsize=(18, 5))
+    """Render a nrows × ncols grid of distribution panels."""
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(9 * ncols, 5 * nrows),
+                             squeeze=False)
+    axes_flat = axes.flatten()
 
-    _draw_on_ax(ax_c, data_correct,   plot_type, bw_adjust, xmin, xlabel)
-    _draw_on_ax(ax_w, data_incorrect, plot_type, bw_adjust, xmin, xlabel)
+    for ax, (panel_title, data) in zip(axes_flat, panels):
+        _draw_on_ax(ax, data, plot_type, bw_adjust, xmin, xlabel)
+        n_pts = sum(len(v[0]) for v in data.values()) if data else 0
+        ax.set_title(f"{panel_title}  (n={n_pts:,})", fontsize=11)
+        _add_legend(ax, n_cols=max(1, len(data) // 20))
 
-    n_c = sum(len(v[0]) for v in data_correct.values())
-    n_w = sum(len(v[0]) for v in data_incorrect.values())
-    ax_c.set_title(f"Correct predictions  (n={n_c:,} total)", fontsize=12)
-    ax_w.set_title(f"Incorrect predictions  (n={n_w:,} total)", fontsize=12)
+    # Hide any unused axes (shouldn't happen with correct panel count, but defensive)
+    for ax in axes_flat[len(panels):]:
+        ax.set_visible(False)
 
-    _add_legend(ax_c, n_cols=max(1, len(data_correct)   // 20))
-    _add_legend(ax_w, n_cols=max(1, len(data_incorrect) // 20))
-
-    fig.suptitle(title, fontsize=13)
+    fig.suptitle(suptitle, fontsize=13)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -383,13 +386,19 @@ def main():
     )
     parser.add_argument(
         "--split_correct", action="store_true",
-        help="Show two panels: one for questions the model answered correctly, "
-             "one for questions it answered incorrectly. "
-             "Correctness is based on each model's own logit prediction vs the expected label.",
+        help="Split panels by whether each model predicted correctly (per-model). "
+             "Alone: 2 panels (correct | incorrect). "
+             "With --split_gold: 2×2 grid.",
+    )
+    parser.add_argument(
+        "--split_gold", action="store_true",
+        help="Split panels by the gold label (True | False). "
+             "Alone: 2 panels (gold True | gold False). "
+             "With --split_correct: 2×2 grid.",
     )
     parser.add_argument(
         "--pairs_csv", default="data/wmdp_tf_pairs.csv",
-        help="Path to wmdp_tf_pairs.csv (needed for --split_correct). "
+        help="Path to wmdp_tf_pairs.csv (needed for --split_correct / --split_gold). "
              "Default: data/wmdp_tf_pairs.csv",
     )
     parser.add_argument(
@@ -435,7 +444,10 @@ def main():
         mstr  = "all" if len(methods) == len(ALL_METHODS) else "_".join(safe_name(m) for m in methods)
         ckstr = "all" if checkpoints == list(range(1, N_CHECKPOINTS + 1)) else "_".join(str(c) for c in checkpoints)
         abs_tag    = "_abs"   if args.abs           else ""
-        split_tag  = "_split" if args.split_correct else ""
+        split_tag  = ("_splitCG" if (args.split_correct and args.split_gold)
+                      else "_splitC" if args.split_correct
+                      else "_splitG" if args.split_gold
+                      else "")
         facet_tag  = "_facet" if args.facet         else ""
         suffix = f"_{args.plot_type}{abs_tag}{split_tag}{facet_tag}"
         out_path = Path(f"plots/logit_margin_dist_m{mstr}_ck{ckstr}{suffix}.png")
@@ -522,31 +534,69 @@ def main():
     title = (f"Bio logit {margin_label} distributions — "
              f"{', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})")
 
-    # ── Split-correct: build correct / incorrect subsets ─────────────────────
-    if args.split_correct:
+    # ── Splitting (correct and/or gold label) ────────────────────────────────
+    need_split = args.split_correct or args.split_gold
+    if need_split:
         pairs_csv = Path(args.pairs_csv)
         if not pairs_csv.exists():
-            print(f"[error] --split_correct requires {pairs_csv} (not found).", file=sys.stderr)
+            print(f"[error] {pairs_csv} not found (needed for --split_correct / --split_gold).",
+                  file=sys.stderr)
             sys.exit(1)
-        labels = load_test_labels(pairs_csv)
-        flat_correct   = {}
-        flat_incorrect = {}
-        for lbl, (disp, color, lw, ls, alpha) in flat_data.items():
-            raw = raw_margins_map.get(lbl)
-            if raw is None or len(raw) != len(labels):
-                print(f"[warn] '{lbl}': cannot split — length mismatch or missing raw data, "
-                      "placing in both panels unchanged.", file=sys.stderr)
-                flat_correct[lbl]   = (disp, color, lw, ls, alpha)
-                flat_incorrect[lbl] = (disp, color, lw, ls, alpha)
-                continue
-            mask = compute_correct_mask(raw, labels)
-            flat_correct[lbl]   = (disp[mask],  color, lw, ls, alpha)
-            flat_incorrect[lbl] = (disp[~mask], color, lw, ls, alpha)
+        labels    = load_test_labels(pairs_csv)
+        gold_mask = np.array([lab == "True" for lab in labels])  # same for all series
 
-        make_plot_split_correct(
-            flat_correct, flat_incorrect,
-            args.plot_type, out_path, args.bw_adjust, title, xlabel, xmin,
-        )
+        # Per-series correctness masks (only computed when --split_correct)
+        correct_masks: dict = {}
+        if args.split_correct:
+            for lbl, (disp, *_) in flat_data.items():
+                raw = raw_margins_map.get(lbl)
+                if raw is None or len(raw) != len(labels):
+                    print(f"[warn] '{lbl}': length mismatch, treating as all-correct.",
+                          file=sys.stderr)
+                    correct_masks[lbl] = np.ones(len(disp), dtype=bool)
+                else:
+                    correct_masks[lbl] = compute_correct_mask(raw, labels)
+
+        def _subset(combined_mask_fn):
+            """Build a flat_data dict filtered by a per-label mask function."""
+            d = {}
+            for lbl, (disp, color, lw, ls, alpha) in flat_data.items():
+                raw = raw_margins_map.get(lbl)
+                if raw is None or len(raw) != len(labels):
+                    d[lbl] = (disp, color, lw, ls, alpha)   # can't filter — keep full
+                else:
+                    m = combined_mask_fn(lbl)
+                    d[lbl] = (disp[m], color, lw, ls, alpha)
+            return d
+
+        if args.split_correct and args.split_gold:
+            # 2×2: rows = correct/incorrect, cols = gold True/False
+            panels = [
+                ("Correct  ·  Gold True",
+                 _subset(lambda l: correct_masks[l] & gold_mask)),
+                ("Correct  ·  Gold False",
+                 _subset(lambda l: correct_masks[l] & ~gold_mask)),
+                ("Incorrect  ·  Gold True",
+                 _subset(lambda l: ~correct_masks[l] & gold_mask)),
+                ("Incorrect  ·  Gold False",
+                 _subset(lambda l: ~correct_masks[l] & ~gold_mask)),
+            ]
+            make_plot_grid(panels, 2, 2, args.plot_type, out_path, args.bw_adjust,
+                           title, xlabel, xmin)
+        elif args.split_correct:
+            panels = [
+                ("Correct",   _subset(lambda l: correct_masks[l])),
+                ("Incorrect", _subset(lambda l: ~correct_masks[l])),
+            ]
+            make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
+                           title, xlabel, xmin)
+        else:  # split_gold only
+            panels = [
+                ("Gold label: True",  _subset(lambda l: gold_mask)),
+                ("Gold label: False", _subset(lambda l: ~gold_mask)),
+            ]
+            make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
+                           title, xlabel, xmin)
     elif not args.facet:
         make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title, xlabel, xmin)
     else:
