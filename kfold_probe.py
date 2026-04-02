@@ -76,9 +76,12 @@ CHECKPOINT_DIR = Path("checkpoints")
 DATA_DIR       = Path("data")
 WMDP_CSV_PATH  = DATA_DIR / "wmdp_tf_pairs.csv"
 KFOLD_DIR      = CHECKPOINT_DIR / "kfold"
+KFOLD_SWEEP_DIR = CHECKPOINT_DIR / "kfold_sweep"
 
 # Models: base + 8 unlearning methods
-ALL_MODELS = ["base", "GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+ALL_MODELS    = ["base", "GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+SWEEP_METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB&J"]
+N_CHECKPOINTS = 8
 
 # Probe band config (must match main script)
 PCA_DIMS_MULTI    = 256
@@ -116,6 +119,37 @@ def result_path(fold: int, model: str) -> Path:
     KFOLD_DIR.mkdir(parents=True, exist_ok=True)
     sn = "base" if model == "base" else safe_name(model)
     return KFOLD_DIR / f"f{fold}_{sn}_results.json"
+
+
+def get_sweep_npy_paths(method: str, ck_num: int):
+    """Return (train, val, test) npy paths for a sweep checkpoint."""
+    sn = safe_name(method)
+    ck_dir = CHECKPOINT_DIR / f"sweep_{sn}" / f"ck{ck_num}"
+    return (ck_dir / "hs_train.npy",
+            ck_dir / "hs_val.npy",
+            ck_dir / "hs_test.npy")
+
+
+def sweep_result_path(method: str, ck_num: int, fold: int) -> Path:
+    sn = safe_name(method)
+    d = KFOLD_SWEEP_DIR / f"sweep_{sn}" / f"ck{ck_num}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"f{fold}_results.json"
+
+
+def load_hs_for_sweep(method: str, ck_num: int) -> np.ndarray:
+    train_p, val_p, test_p = get_sweep_npy_paths(method, ck_num)
+    missing = [p for p in (train_p, val_p, test_p) if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing sweep npy files for {method} ck{ck_num}: {[str(p) for p in missing]}"
+        )
+    print(f"  Loading sweep hidden states for '{method}' ck{ck_num}...", flush=True)
+    hs_tr = np.load(train_p)
+    hs_va = np.load(val_p)
+    hs_te = np.load(test_p)
+    print(f"    train {hs_tr.shape}  val {hs_va.shape}  test {hs_te.shape}", flush=True)
+    return np.concatenate([hs_tr, hs_va, hs_te], axis=0)
 
 
 # =============================================================================
@@ -539,6 +573,47 @@ def compute_all_layers_probe_stats(probe_set, hs_test, y_test):
 # Stage: kfold_train
 # =============================================================================
 
+def _run_kfold_core(fold: int, hs_all: np.ndarray, out_path: Path,
+                    label: str, by_qid: dict, folds: list, fold_size: int):
+    """Shared probe-train + evaluate logic. Called by both kfold_train and kfold_sweep_train."""
+    if out_path.exists():
+        print(f"  [skip] Result already exists: {out_path}", flush=True)
+        return
+
+    (tr_idx, tr_lbl, va_idx, va_lbl, te_idx, te_lbl) = \
+        get_split_indices(fold, by_qid, folds)
+    print(f"  Split sizes — train: {len(tr_idx)}  val: {len(va_idx)}  test: {len(te_idx)}",
+          flush=True)
+
+    hs_train = hs_all[tr_idx]
+    hs_val   = hs_all[va_idx]
+    hs_test  = hs_all[te_idx]
+
+    print(f"\n  Training probes...", flush=True)
+    probe_set = train_probe_set(hs_train, tr_lbl, hs_val, va_lbl, label=label)
+
+    print(f"\n  Evaluating on test set...", flush=True)
+    probe_stats   = compute_all_probe_stats(probe_set, hs_test, te_lbl)
+    per_layer_all = compute_all_layers_probe_stats(probe_set, hs_test, te_lbl)
+
+    record = {
+        "fold":         fold,
+        "label":        label,
+        "n_train":      int(len(tr_idx)),
+        "n_val":        int(len(va_idx)),
+        "n_test":       int(len(te_idx)),
+        "fold_size_q":  int(fold_size),
+        "probe_stats":  probe_stats,
+        "per_layer_all": {
+            clf: {str(l): v for l, v in layers.items()}
+            for clf, layers in per_layer_all.items()
+        },
+    }
+    with open(out_path, "w") as f:
+        json.dump(record, f, indent=2)
+    print(f"\n  Saved: {out_path}", flush=True)
+
+
 def run_kfold_train(fold: int, model: str):
     print(f"\n{'='*60}", flush=True)
     print(f"  kfold_train  fold={fold}  model={model}", flush=True)
@@ -549,52 +624,36 @@ def run_kfold_train(fold: int, model: str):
         print(f"  [skip] Result already exists: {out_path}", flush=True)
         return
 
-    # Build fold assignment from CSV
     print("  Building fold assignment from CSV...", flush=True)
-    by_qid, folds, n_train, n_val, fold_size = build_fold_assignment()
+    by_qid, folds, _, _, fold_size = build_fold_assignment()
 
-    # Get split indices for this fold
-    (tr_idx, tr_lbl, va_idx, va_lbl, te_idx, te_lbl) = \
-        get_split_indices(fold, by_qid, folds)
-    print(f"  Split sizes — train: {len(tr_idx)}  val: {len(va_idx)}  test: {len(te_idx)}",
-          flush=True)
+    hs_all = load_hs_for_model(model)
+    _run_kfold_core(fold, hs_all, out_path,
+                    label=f"f{fold}_{model}",
+                    by_qid=by_qid, folds=folds, fold_size=fold_size)
 
-    # Load hidden states for this model
-    hs_all = load_hs_for_model(model)  # (N, n_layers, hidden_dim)
 
-    hs_train = hs_all[tr_idx]
-    hs_val   = hs_all[va_idx]
-    hs_test  = hs_all[te_idx]
-    del hs_all  # free memory
+# =============================================================================
+# Stage: kfold_sweep_train
+# =============================================================================
 
-    # Train probes
-    print(f"\n  Training probes...", flush=True)
-    probe_set = train_probe_set(hs_train, tr_lbl, hs_val, va_lbl,
-                                label=f"f{fold}_{model}")
+def run_kfold_sweep_train(method: str, ck_num: int, fold: int):
+    print(f"\n{'='*60}", flush=True)
+    print(f"  kfold_sweep_train  method={method}  ck={ck_num}  fold={fold}", flush=True)
+    print(f"{'='*60}", flush=True)
 
-    # Evaluate on test set
-    print(f"\n  Evaluating on test set...", flush=True)
-    probe_stats    = compute_all_probe_stats(probe_set, hs_test, te_lbl)
-    per_layer_all  = compute_all_layers_probe_stats(probe_set, hs_test, te_lbl)
+    out_path = sweep_result_path(method, ck_num, fold)
+    if out_path.exists():
+        print(f"  [skip] Result already exists: {out_path}", flush=True)
+        return
 
-    # Serialise (probe objects are not JSON-serialisable; we only save stats)
-    record = {
-        "fold":         fold,
-        "model":        model,
-        "n_train":      int(len(tr_idx)),
-        "n_val":        int(len(va_idx)),
-        "n_test":       int(len(te_idx)),
-        "fold_size_q":  int(fold_size),
-        "probe_stats":  probe_stats,
-        "per_layer_all": {
-            clf_name: {str(l): v for l, v in layers.items()}
-            for clf_name, layers in per_layer_all.items()
-        },
-    }
+    print("  Building fold assignment from CSV...", flush=True)
+    by_qid, folds, _, _, fold_size = build_fold_assignment()
 
-    with open(out_path, "w") as f:
-        json.dump(record, f, indent=2)
-    print(f"\n  Saved: {out_path}", flush=True)
+    hs_all = load_hs_for_sweep(method, ck_num)
+    _run_kfold_core(fold, hs_all, out_path,
+                    label=f"f{fold}_{method}_ck{ck_num}",
+                    by_qid=by_qid, folds=folds, fold_size=fold_size)
 
 
 # =============================================================================
@@ -989,19 +1048,340 @@ def run_kfold_tables():
 
 
 # =============================================================================
+# Stage: kfold_sweep_summary
+# =============================================================================
+
+def run_kfold_sweep_summary():
+    """
+    Aggregate kfold_sweep per-fold JSONs across all (method, ck) pairs.
+
+    Reads:  checkpoints/kfold_sweep/sweep_{method}/ck{N}/f{fold}_results.json
+    Writes:
+      data/kfold_sweep_results_per_fold.csv
+      data/kfold_sweep_results_aggregated.csv
+      data/kfold_sweep_per_layer_all.csv
+      data/kfold_sweep_per_layer_aggregated.csv
+    """
+    print("\n[kfold_sweep_summary] Loading results...", flush=True)
+
+    # results[method][ck_num][fold] = record
+    results = {m: {ck: {} for ck in range(1, N_CHECKPOINTS + 1)}
+               for m in SWEEP_METHODS}
+    missing = []
+    for method in SWEEP_METHODS:
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            for fold in range(N_FOLDS):
+                p = sweep_result_path(method, ck_num, fold)
+                if not p.exists():
+                    missing.append(str(p))
+                    continue
+                with open(p) as f:
+                    results[method][ck_num][fold] = json.load(f)
+
+    if missing:
+        print(f"  WARNING: {len(missing)} result file(s) missing:", flush=True)
+        for m in missing[:10]:
+            print(f"    {m}", flush=True)
+        if len(missing) > 10:
+            print(f"    ... and {len(missing)-10} more", flush=True)
+
+    numeric_metrics = ["accuracy", "true_accuracy", "false_accuracy",
+                       "precision", "recall", "f1", "auc"]
+
+    # ── CSV 1: per-fold rows ──────────────────────────────────────────────────
+    pf_rows = []
+    for method in SWEEP_METHODS:
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            for fold in range(N_FOLDS):
+                rec = results[method][ck_num].get(fold)
+                if rec is None:
+                    continue
+                ps = rec["probe_stats"]
+                for pt in PROBE_TYPES:
+                    pt_stats = ps.get(pt, {})
+                    for clf_name in CLF_NAMES:
+                        s = pt_stats.get(clf_name, {})
+                        row = {
+                            "method": method, "ck": ck_num,
+                            "fold": fold, "probe_type": pt, "clf": clf_name,
+                            "n_train": rec.get("n_train", ""),
+                            "n_val":   rec.get("n_val",   ""),
+                            "n_test":  rec.get("n_test",  ""),
+                            "best_layer": s.get("best_layer", ""),
+                        }
+                        for mc in METRIC_COLS:
+                            row[mc] = s.get(mc, "")
+                        pf_rows.append(row)
+
+    pf_fields = ["method", "ck", "fold", "probe_type", "clf",
+                 "n_train", "n_val", "n_test", "best_layer"] + METRIC_COLS
+    pf_path = DATA_DIR / "kfold_sweep_results_per_fold.csv"
+    with open(pf_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=pf_fields)
+        w.writeheader(); w.writerows(pf_rows)
+    print(f"  Wrote {len(pf_rows)} rows → {pf_path}", flush=True)
+
+    # ── CSV 2: aggregated (mean ± std ± CI95 across folds) ───────────────────
+    agg_rows = []
+    for method in SWEEP_METHODS:
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            for pt in PROBE_TYPES:
+                for clf_name in CLF_NAMES:
+                    fold_vals = {m: [] for m in numeric_metrics + ["best_layer", "n_test"]}
+                    for fold in range(N_FOLDS):
+                        rec = results[method][ck_num].get(fold)
+                        if rec is None:
+                            continue
+                        s = rec["probe_stats"].get(pt, {}).get(clf_name, {})
+                        for mc in numeric_metrics:
+                            v = _safe_float(s.get(mc))
+                            if v is not None:
+                                fold_vals[mc].append(v)
+                        if pt == "per_layer":
+                            bl = s.get("best_layer")
+                            if bl is not None:
+                                fold_vals["best_layer"].append(int(bl))
+                        fold_vals["n_test"].append(rec.get("n_test", 0))
+
+                    n_complete = len(fold_vals["accuracy"])
+                    if n_complete == 0:
+                        continue
+
+                    row = {
+                        "method": method, "ck": ck_num,
+                        "probe_type": pt, "clf": clf_name,
+                        "n_folds_complete": n_complete,
+                        "mean_n_test": float(np.mean(fold_vals["n_test"])) if fold_vals["n_test"] else "",
+                    }
+                    for mc in numeric_metrics:
+                        vals = fold_vals[mc]
+                        if vals:
+                            ssd = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
+                            row[f"mean_{mc}"]      = float(np.mean(vals))
+                            row[f"std_{mc}"]       = float(np.std(vals))
+                            row[f"ci95_half_{mc}"] = _ci95_half(ssd, n_complete)
+                        else:
+                            row[f"mean_{mc}"] = row[f"std_{mc}"] = row[f"ci95_half_{mc}"] = ""
+                    if fold_vals["best_layer"]:
+                        bls = fold_vals["best_layer"]
+                        ssd = float(np.std(bls, ddof=1)) if len(bls) >= 2 else 0.0
+                        row["mean_best_layer"]      = float(np.mean(bls))
+                        row["std_best_layer"]       = float(np.std(bls))
+                        row["ci95_half_best_layer"] = _ci95_half(ssd, len(bls))
+                    else:
+                        row["mean_best_layer"] = row["std_best_layer"] = row["ci95_half_best_layer"] = ""
+                    agg_rows.append(row)
+
+    agg_fields = (["method", "ck", "probe_type", "clf", "n_folds_complete", "mean_n_test",
+                   "mean_best_layer", "std_best_layer", "ci95_half_best_layer"] +
+                  [f"{s}_{m}" for m in numeric_metrics for s in ("mean", "std", "ci95_half")])
+    agg_path = DATA_DIR / "kfold_sweep_results_aggregated.csv"
+    with open(agg_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=agg_fields)
+        w.writeheader(); w.writerows(agg_rows)
+    print(f"  Wrote {len(agg_rows)} rows → {agg_path}", flush=True)
+
+    # ── CSV 3: per-layer all folds ─────────────────────────────────────────────
+    pl_rows = []
+    for method in SWEEP_METHODS:
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            for fold in range(N_FOLDS):
+                rec = results[method][ck_num].get(fold)
+                if rec is None:
+                    continue
+                for clf_name in CLF_NAMES:
+                    for l_str, stats in rec.get("per_layer_all", {}).get(clf_name, {}).items():
+                        row = {"method": method, "ck": ck_num,
+                               "fold": fold, "clf": clf_name, "layer": int(l_str)}
+                        row.update(stats)
+                        pl_rows.append(row)
+
+    pl_path = DATA_DIR / "kfold_sweep_per_layer_all.csv"
+    pl_fields = ["method", "ck", "fold", "clf", "layer",
+                 "accuracy", "true_accuracy", "false_accuracy",
+                 "precision", "recall", "f1", "auc"]
+    with open(pl_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=pl_fields)
+        w.writeheader(); w.writerows(pl_rows)
+    print(f"  Wrote {len(pl_rows)} rows → {pl_path}", flush=True)
+
+    # ── CSV 4: per-layer aggregated ───────────────────────────────────────────
+    from collections import defaultdict
+    pl_agg: dict = defaultdict(lambda: defaultdict(list))
+    for row in pl_rows:
+        key = (row["method"], row["ck"], row["clf"], row["layer"])
+        for mc in ("accuracy", "true_accuracy", "false_accuracy",
+                   "precision", "recall", "f1", "auc"):
+            v = _safe_float(row.get(mc))
+            if v is not None:
+                pl_agg[key][mc].append(v)
+
+    pl_agg_rows = []
+    for (method, ck_num, clf_name, layer), m_dict in sorted(pl_agg.items()):
+        row = {"method": method, "ck": ck_num, "clf": clf_name, "layer": layer}
+        for mc in ("accuracy", "true_accuracy", "false_accuracy",
+                   "precision", "recall", "f1", "auc"):
+            vals = m_dict.get(mc, [])
+            if vals:
+                ssd = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
+                row[f"mean_{mc}"]      = float(np.mean(vals))
+                row[f"std_{mc}"]       = float(np.std(vals))
+                row[f"ci95_{mc}"]      = _ci95_half(ssd, len(vals))
+            else:
+                row[f"mean_{mc}"] = row[f"std_{mc}"] = row[f"ci95_{mc}"] = ""
+        pl_agg_rows.append(row)
+
+    pl_agg_path = DATA_DIR / "kfold_sweep_per_layer_aggregated.csv"
+    pl_agg_fields = (["method", "ck", "clf", "layer"] +
+                     [f"{s}_{m}" for m in ("accuracy", "true_accuracy", "false_accuracy",
+                                           "precision", "recall", "f1", "auc")
+                      for s in ("mean", "std", "ci95")])
+    with open(pl_agg_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=pl_agg_fields)
+        w.writeheader(); w.writerows(pl_agg_rows)
+    print(f"  Wrote {len(pl_agg_rows)} rows → {pl_agg_path}", flush=True)
+
+    # Quick summary
+    print("\n[kfold_sweep_summary] mid_band LR accuracy (mean ± CI95) at ck8:", flush=True)
+    print(f"  {'Method':<15} {'mean':>8} {'± CI95':>8}", flush=True)
+    print("  " + "─" * 35, flush=True)
+    for method in SWEEP_METHODS:
+        for row in agg_rows:
+            if (row["method"] == method and row["ck"] == 8
+                    and row["probe_type"] == "mid_band" and row["clf"] == "LR"):
+                try:
+                    print(f"  {method:<15} {float(row['mean_accuracy']):>8.4f}"
+                          f" {float(row['ci95_half_accuracy']):>8.4f}", flush=True)
+                except (ValueError, TypeError):
+                    print(f"  {method:<15} {'N/A':>8}", flush=True)
+                break
+
+
+# =============================================================================
+# Stage: kfold_sweep_tables
+# =============================================================================
+
+def run_kfold_sweep_tables():
+    """
+    Pivot kfold_sweep_results_aggregated.csv into wide-format tables for plot scripts.
+
+    Writes:
+      data/kfold_sweep_table_probes.csv   — rows: (method, ck); cols: pt_clf_metric_{mean/std/ci95}
+      data/kfold_sweep_per_layer_table.csv — rename ci95_half → ci95 in per_layer_aggregated
+    """
+    agg_path = DATA_DIR / "kfold_sweep_results_aggregated.csv"
+    pl_path  = DATA_DIR / "kfold_sweep_per_layer_aggregated.csv"
+
+    if not agg_path.exists():
+        print(f"[kfold_sweep_tables] {agg_path} not found — run kfold_sweep_summary first.",
+              flush=True)
+        return
+
+    # Load aggregated → nested dict: agg[method][ck][pt][clf] = row
+    agg: dict = {}
+    with open(agg_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            m  = row["method"]
+            ck = int(row["ck"])
+            pt = row["probe_type"]
+            cl = row["clf"]
+            agg.setdefault(m, {}).setdefault(ck, {}).setdefault(pt, {})[cl] = row
+
+    # Build column list (same structure as kfold_table3_probes.csv)
+    cols = ["method", "ck"]
+    for pt in PROBE_TYPES:
+        pa = _PT_ABBR[pt]
+        for clf in CLF_NAMES:
+            ca = _CLF_ABBR[clf]
+            if pt == "per_layer":
+                for stat in ("mean", "std", "ci95"):
+                    cols.append(f"{pa}_{ca}_lyr_{stat}")
+            for ma_key, ma in _METRIC_ABBR.items():
+                for stat in ("mean", "std", "ci95"):
+                    cols.append(f"{pa}_{ca}_{ma}_{stat}")
+
+    rows = []
+    for method in SWEEP_METHODS:
+        for ck_num in range(1, N_CHECKPOINTS + 1):
+            row = {"method": method, "ck": ck_num}
+            for pt in PROBE_TYPES:
+                pa = _PT_ABBR[pt]
+                for clf in CLF_NAMES:
+                    ca  = _CLF_ABBR[clf]
+                    src = agg.get(method, {}).get(ck_num, {}).get(pt, {}).get(clf, {})
+                    if pt == "per_layer":
+                        for stat, src_key in (("mean", "mean_best_layer"),
+                                              ("std",  "std_best_layer"),
+                                              ("ci95", "ci95_half_best_layer")):
+                            row[f"{pa}_{ca}_lyr_{stat}"] = src.get(src_key, "")
+                    for ma_key, ma in _METRIC_ABBR.items():
+                        for stat, src_key in (("mean", f"mean_{ma_key}"),
+                                              ("std",  f"std_{ma_key}"),
+                                              ("ci95", f"ci95_half_{ma_key}")):
+                            row[f"{pa}_{ca}_{ma}_{stat}"] = src.get(src_key, "")
+            rows.append(row)
+
+    out_path = DATA_DIR / "kfold_sweep_table_probes.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader(); w.writerows(rows)
+    print(f"[kfold_sweep_tables] Wrote {len(rows)} rows × {len(cols)} cols → {out_path}",
+          flush=True)
+
+    # Per-layer table (ci95_half_ → ci95_ rename for plot-script consistency)
+    if not pl_path.exists():
+        print(f"[kfold_sweep_tables] {pl_path} not found — skipping per-layer table.",
+              flush=True)
+        return
+
+    pl_rows, orig_fields = [], None
+    with open(pl_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        orig_fields = reader.fieldnames or []
+        for row in reader:
+            pl_rows.append({k.replace("ci95_half_", "ci95_"): v for k, v in row.items()})
+
+    pl_out_fields = [k.replace("ci95_half_", "ci95_") for k in orig_fields]
+    pl_out_path = DATA_DIR / "kfold_sweep_per_layer_table.csv"
+    with open(pl_out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=pl_out_fields)
+        w.writeheader(); w.writerows(pl_rows)
+    print(f"[kfold_sweep_tables] Wrote {len(pl_rows)} rows → {pl_out_path}", flush=True)
+
+    # Quick summary
+    print("\n[kfold_sweep_tables] mid_band LR accuracy  (mean ± CI95) at ck8:", flush=True)
+    print(f"  {'Method':<15} {'mean':>8} {'± CI95':>8}", flush=True)
+    print("  " + "─" * 35, flush=True)
+    for method in SWEEP_METHODS:
+        src = agg.get(method, {}).get(8, {}).get("mid_band", {}).get("LR", {})
+        try:
+            print(f"  {method:<15} {float(src['mean_accuracy']):>8.4f}"
+                  f" {float(src['ci95_half_accuracy']):>8.4f}", flush=True)
+        except (ValueError, TypeError, KeyError):
+            print(f"  {method:<15} {'N/A':>8}", flush=True)
+
+
+# =============================================================================
 # Entry point
 # =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="5-fold probe cross-validation")
     parser.add_argument("--stage", required=True,
-                        choices=["kfold_train", "kfold_summary", "kfold_tables"],
+                        choices=["kfold_train", "kfold_summary", "kfold_tables",
+                                 "kfold_sweep_train", "kfold_sweep_summary",
+                                 "kfold_sweep_tables"],
                         help="Stage to run")
     parser.add_argument("--fold", type=int, default=None,
-                        help="Fold index 0-4 (required for kfold_train)")
+                        help="Fold index 0-4 (required for kfold_train / kfold_sweep_train)")
     parser.add_argument("--model", type=str, default=None,
                         help=f"Model name (required for kfold_train). "
                              f"One of: {', '.join(ALL_MODELS)}")
+    parser.add_argument("--method", type=str, default=None,
+                        help=f"Unlearning method (required for kfold_sweep_train). "
+                             f"One of: {', '.join(SWEEP_METHODS)}")
+    parser.add_argument("--checkpoint", type=int, default=None,
+                        help="Checkpoint number 1-8 (required for kfold_sweep_train)")
     args = parser.parse_args()
 
     if args.stage == "kfold_train":
@@ -1020,6 +1400,25 @@ def main():
     elif args.stage == "kfold_tables":
         DATA_DIR.mkdir(exist_ok=True)
         run_kfold_tables()
+
+    elif args.stage == "kfold_sweep_train":
+        if args.fold is None or args.method is None or args.checkpoint is None:
+            parser.error("--fold, --method, and --checkpoint are required for kfold_sweep_train")
+        if args.fold < 0 or args.fold >= N_FOLDS:
+            parser.error(f"--fold must be 0-{N_FOLDS-1}")
+        if args.method not in SWEEP_METHODS:
+            parser.error(f"--method must be one of: {SWEEP_METHODS}")
+        if args.checkpoint < 1 or args.checkpoint > N_CHECKPOINTS:
+            parser.error(f"--checkpoint must be 1-{N_CHECKPOINTS}")
+        run_kfold_sweep_train(args.method, args.checkpoint, args.fold)
+
+    elif args.stage == "kfold_sweep_summary":
+        DATA_DIR.mkdir(exist_ok=True)
+        run_kfold_sweep_summary()
+
+    elif args.stage == "kfold_sweep_tables":
+        DATA_DIR.mkdir(exist_ok=True)
+        run_kfold_sweep_tables()
 
 
 if __name__ == "__main__":

@@ -1444,25 +1444,66 @@ def main():
     normalize      = args.relative
     cyber_subset   = args.cyber_subset if dataset == "cyber" else None
 
-    # ── k-fold aggregate mode (bio-only, line plots) ──────────────────────────
+    # ── k-fold aggregate mode (bio-only, line or heatmap) ────────────────────
     if args.kfold:
-        if args.mode != "methods" or args.plot_type != "line":
-            parser.error("--kfold only supports --mode methods --plot_type line")
+        if args.mode != "methods":
+            parser.error("--kfold only supports --mode methods")
         if dataset != "bio":
             parser.error("--kfold only supports --dataset bio (kfold is bio-only)")
-        kfold_out = Path(args.out) if args.out else Path(
-            f"kfold_line_methods_"
-            f"{args.metric or 'all_metrics'}_"
-            f"{args.clf.lower() if args.clf else 'all_clf'}_"
-            f"{args.probe_source}.png"
-        )
-        make_plot_kfold(
-            data_dir=data_dir,
-            out_path=kfold_out,
-            clf_filter=clf_filter,
-            metric=args.metric,
-            models_filter=args.models,
-        )
+
+        clfs            = clf_filter if clf_filter else CLF_NAMES
+        metrics_to_plot = [args.metric] if args.metric else METRIC_NAMES
+        models_filter   = args.models
+
+        # Build display-name row order (respects --models filter, preserves palette order)
+        models_to_show = [m for m in ALL_MODELS
+                          if models_filter is None or m in models_filter]
+
+        # Load kfold per-layer data; convert 3-tuple → 2-tuple for heatmap renderer
+        raw_kf = collect_data_kfold(data_dir, clfs, metrics_to_plot)
+        # data_means[metric][clf][model] = (layers, means)  — used by _render_heatmap
+        data_means = {
+            m: {
+                clf: {
+                    mdl: (lmc[0], lmc[1])
+                    for mdl, lmc in raw_kf[m].get(clf, {}).items()
+                    if models_filter is None or mdl in models_filter
+                }
+                for clf in clfs
+            }
+            for m in metrics_to_plot
+        }
+
+        models_tag = "_".join(m.replace(" ", "").replace("(", "").replace(")", "")
+                              for m in models_to_show) if models_filter else "all"
+        metric_tag = args.metric or "all_metrics"
+        clf_tag    = args.clf.lower() if args.clf else "all_clf"
+
+        if args.plot_type == "heatmap":
+            kfold_out = Path(args.out) if args.out else Path(
+                f"kfold_heatmap_methods_{metric_tag}_{clf_tag}_{models_tag}.png"
+            )
+            _render_heatmap(
+                data_means, metrics_to_plot, clfs,
+                row_labels=models_to_show,
+                out_path=kfold_out,
+                title=(
+                    f"Per-Layer Probe Accuracy — 5-Fold CV Mean  [Bio WMDP]\n"
+                    f"Models: {', '.join(models_to_show)}"
+                ),
+                normalize=normalize,
+            )
+        else:
+            kfold_out = Path(args.out) if args.out else Path(
+                f"kfold_line_methods_{metric_tag}_{clf_tag}_{models_tag}.png"
+            )
+            make_plot_kfold(
+                data_dir=data_dir,
+                out_path=kfold_out,
+                clf_filter=clf_filter,
+                metric=args.metric,
+                models_filter=models_filter,
+            )
         return
 
     # Resolve base output path (auto-generate if not given)
