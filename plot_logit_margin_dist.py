@@ -173,13 +173,14 @@ def make_plot_single(
     out_path: Path,
     bw_adjust: float,
     title: str,
+    xlabel: str = "Logit margin  (true − false)",
 ):
     """All distributions on one axes."""
     fig, ax = plt.subplots(figsize=(12, 5))
 
     if plot_type == "violin":
         # Violin needs different layout — fall back to grouped violins
-        _make_violin_axes(ax, data)
+        _make_violin_axes(ax, data, xlabel=xlabel)
     else:
         for label, (margins, color, lw, ls, alpha) in data.items():
             if plot_type == "kde":
@@ -188,7 +189,7 @@ def make_plot_single(
                 _hist_plot(ax, margins, color, alpha, label)
 
     ax.axvline(0, color="gray", lw=0.8, ls=":")
-    ax.set_xlabel("Logit margin  (true − false)", fontsize=12)
+    ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel("Density", fontsize=12)
     ax.set_title(title, fontsize=13)
 
@@ -199,7 +200,7 @@ def make_plot_single(
     print(f"Saved → {out_path}")
 
 
-def _make_violin_axes(ax, data: dict):
+def _make_violin_axes(ax, data: dict, xlabel: str = "Logit margin  (true − false)"):
     """Draw violin plots: x = index, grouped by series order in data."""
     positions = list(range(len(data)))
     parts = ax.violinplot(
@@ -219,7 +220,7 @@ def _make_violin_axes(ax, data: dict):
 
     ax.set_xticks(positions)
     ax.set_xticklabels(list(data.keys()), rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("Logit margin  (true − false)")
+    ax.set_ylabel(xlabel)
 
 
 def _add_legend(ax, n_cols=1):
@@ -239,6 +240,7 @@ def make_plot_facet(
     plot_type: str,
     out_path: Path,
     bw_adjust: float,
+    xlabel: str = "Logit margin  (true − false)",
 ):
     methods = list(method_data.keys())
     n = len(methods)
@@ -267,7 +269,7 @@ def make_plot_facet(
                 _hist_plot(ax, margins, color, alpha, ck_label)
         ax.axvline(0, color="gray", lw=0.8, ls=":")
         ax.set_title(method, fontsize=11)
-        ax.set_xlabel("Logit margin", fontsize=9)
+        ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel("Density", fontsize=9)
         _add_legend(ax, n_cols=1)
 
@@ -304,6 +306,10 @@ def main():
         "--final", action="store_true",
         help="Also include the 'final checkpoint' CSV for each method "
              "(checkpoints/{safe_method}_bio_logit_test.csv).",
+    )
+    parser.add_argument(
+        "--abs", action="store_true",
+        help="Plot |true_logit - false_logit| (confidence magnitude) instead of the signed margin.",
     )
     parser.add_argument(
         "--no_base", action="store_true",
@@ -347,14 +353,18 @@ def main():
     if args.out is None:
         mstr  = "all" if len(methods) == len(ALL_METHODS) else "_".join(safe_name(m) for m in methods)
         ckstr = "all" if checkpoints == list(range(1, N_CHECKPOINTS + 1)) else "_".join(str(c) for c in checkpoints)
-        suffix = f"_{args.plot_type}" + ("_facet" if args.facet else "")
+        abs_tag = "_abs" if args.abs else ""
+        suffix = f"_{args.plot_type}{abs_tag}" + ("_facet" if args.facet else "")
         out_path = Path(f"plots/logit_margin_dist_m{mstr}_ck{ckstr}{suffix}.png")
     else:
         out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Load data ─────────────────────────────────────────────────────────────
+    margin_transform = np.abs if args.abs else (lambda x: x)
     base_margins = None if args.no_base else load_base(data_dir)
+    if base_margins is not None:
+        base_margins = margin_transform(base_margins)
 
     # method_data[method][ck_label] = (margins, color, lw, ls, alpha)
     method_data: dict = {}
@@ -369,6 +379,7 @@ def main():
             if margins is None:
                 print(f"[skip] {method} ck{ck}: no data", file=sys.stderr)
                 continue
+            margins = margin_transform(margins)
             col   = ck_colors[ci]
             lw    = 1.2 + 0.4 * (ci / max(n_cks - 1, 1))   # thin→thick
             alpha = 0.55 + 0.40 * (ci / max(n_cks - 1, 1))  # transparent→opaque
@@ -377,6 +388,7 @@ def main():
         if args.final:
             margins = load_final_ck(data_dir, method)
             if margins is not None:
+                margins = margin_transform(margins)
                 entries[f"{method} final"] = (margins, base_hex, 2.0, FINAL_LSTYLE, 0.9)
             else:
                 print(f"[skip] {method} final: no CSV found", file=sys.stderr)
@@ -397,6 +409,14 @@ def main():
     print(f"Plotting {total_series} distributions "
           f"({'faceted' if args.facet else 'single axes'}, {args.plot_type})")
 
+    # ── Shared label strings ──────────────────────────────────────────────────
+    if args.abs:
+        xlabel = "|true − false|  (confidence magnitude)"
+        margin_label = "confidence magnitude"
+    else:
+        xlabel = "Logit margin  (true − false)"
+        margin_label = "margin"
+
     # ── Build flat data dict for single-axes ──────────────────────────────────
     if not args.facet:
         flat_data = {}
@@ -405,17 +425,14 @@ def main():
         for method, entries in method_data.items():
             flat_data.update(entries)
 
-        title_parts = []
-        if base_margins is not None:
-            title_parts.append("Base")
-        title_parts.extend(methods)
         ck_str = (f"ck1–{N_CHECKPOINTS}" if checkpoints == list(range(1, N_CHECKPOINTS + 1))
                   else "ck" + ",".join(str(c) for c in checkpoints))
-        title = f"Bio logit margin distributions — {', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})"
+        title = (f"Bio logit {margin_label} distributions — "
+                 f"{', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})")
 
-        make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title)
+        make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title, xlabel)
     else:
-        make_plot_facet(base_margins, method_data, args.plot_type, out_path, args.bw_adjust)
+        make_plot_facet(base_margins, method_data, args.plot_type, out_path, args.bw_adjust, xlabel)
 
 
 if __name__ == "__main__":
