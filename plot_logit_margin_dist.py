@@ -142,6 +142,41 @@ def load_final_ck(data_dir: Path, method: str):
     return np.array(margins) if margins else None
 
 
+def load_test_labels(pairs_csv: Path) -> list:
+    """Return ordered list of expected labels ("True"/"False") for the test split.
+
+    Reads data/wmdp_tf_pairs.csv, filters rows where split=="test", and returns
+    labels in file order — which matches the row_id ordering in the logit CSVs.
+    """
+    import csv as _csv
+    labels = []
+    with open(pairs_csv, newline="", encoding="utf-8") as f:
+        for row in _csv.DictReader(f):
+            if row["split"] == "test":
+                labels.append(row["label"])   # "True" or "False"
+    return labels
+
+
+def compute_correct_mask(raw_margins: np.ndarray, labels: list) -> np.ndarray:
+    """Boolean mask: True where the model's prediction matches the expected label.
+
+    Uses the *raw* (signed) margin to decide the predicted label:
+      pred = "True" if tf_margin > 0 else "False"
+    Then correct = (pred == expected).
+
+    Always call this on raw margins BEFORE any abs transform.
+    """
+    if len(raw_margins) != len(labels):
+        raise ValueError(
+            f"Margin array length ({len(raw_margins)}) != labels length ({len(labels)}). "
+            "Make sure the pairs CSV and the logit data come from the same test split."
+        )
+    return np.array(
+        [("True" if m > 0 else "False") == lab for m, lab in zip(raw_margins, labels)],
+        dtype=bool,
+    )
+
+
 # ── Plotting helpers ──────────────────────────────────────────────────────────
 
 def _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust=1.0, xmin=None):
@@ -168,6 +203,30 @@ def _violin_pos(method_idx, ck_idx, n_methods, n_cks):
     return method_idx * spacing + ck_idx
 
 
+# ── Core per-axes draw helper ─────────────────────────────────────────────────
+
+def _draw_on_ax(ax, data, plot_type, bw_adjust, xmin, xlabel):
+    """Draw all series in data onto ax; set reference line, xlim, and axis labels."""
+    if plot_type == "violin":
+        _make_violin_axes(ax, data, xlabel=xlabel)
+    else:
+        for label, (margins, color, lw, ls, alpha) in data.items():
+            if len(margins) < 2:
+                print(f"  [warn] '{label}': only {len(margins)} point(s), skipping",
+                      file=sys.stderr)
+                continue
+            if plot_type == "kde":
+                _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust, xmin=xmin)
+            else:
+                _hist_plot(ax, margins, color, alpha, label)
+    if xmin is None:
+        ax.axvline(0, color="gray", lw=0.8, ls=":")
+    else:
+        ax.set_xlim(left=xmin)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel("Density", fontsize=10)
+
+
 # ── Single-axes plot ──────────────────────────────────────────────────────────
 
 def make_plot_single(
@@ -181,26 +240,42 @@ def make_plot_single(
 ):
     """All distributions on one axes."""
     fig, ax = plt.subplots(figsize=(12, 5))
-
-    if plot_type == "violin":
-        # Violin needs different layout — fall back to grouped violins
-        _make_violin_axes(ax, data, xlabel=xlabel)
-    else:
-        for label, (margins, color, lw, ls, alpha) in data.items():
-            if plot_type == "kde":
-                _kde_plot(ax, margins, color, lw, ls, alpha, label, bw_adjust, xmin=xmin)
-            else:
-                _hist_plot(ax, margins, color, alpha, label)
-
-    if xmin is None:
-        ax.axvline(0, color="gray", lw=0.8, ls=":")
-    else:
-        ax.set_xlim(left=xmin)
-    ax.set_xlabel(xlabel, fontsize=12)
-    ax.set_ylabel("Density", fontsize=12)
+    _draw_on_ax(ax, data, plot_type, bw_adjust, xmin, xlabel)
     ax.set_title(title, fontsize=13)
-
     _add_legend(ax, n_cols=max(1, len(data) // 20))
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved → {out_path}")
+
+
+# ── Correct / incorrect split plot ───────────────────────────────────────────
+
+def make_plot_split_correct(
+    data_correct: dict,    # {label: (margins, color, lw, ls, alpha)} — correct subset
+    data_incorrect: dict,  # same structure — incorrect subset
+    plot_type: str,
+    out_path: Path,
+    bw_adjust: float,
+    title: str,
+    xlabel: str = "Logit margin  (true − false)",
+    xmin: float = None,
+):
+    """Two side-by-side panels: correct predictions (left) | incorrect (right)."""
+    fig, (ax_c, ax_w) = plt.subplots(1, 2, figsize=(18, 5))
+
+    _draw_on_ax(ax_c, data_correct,   plot_type, bw_adjust, xmin, xlabel)
+    _draw_on_ax(ax_w, data_incorrect, plot_type, bw_adjust, xmin, xlabel)
+
+    n_c = sum(len(v[0]) for v in data_correct.values())
+    n_w = sum(len(v[0]) for v in data_incorrect.values())
+    ax_c.set_title(f"Correct predictions  (n={n_c:,} total)", fontsize=12)
+    ax_w.set_title(f"Incorrect predictions  (n={n_w:,} total)", fontsize=12)
+
+    _add_legend(ax_c, n_cols=max(1, len(data_correct)   // 20))
+    _add_legend(ax_w, n_cols=max(1, len(data_incorrect) // 20))
+
+    fig.suptitle(title, fontsize=13)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -260,28 +335,12 @@ def make_plot_facet(
 
     for ax_idx, method in enumerate(methods):
         ax = axes_flat[ax_idx]
-        # Draw base reference
+        panel_data = {}
         if base_margins is not None:
-            if plot_type == "kde":
-                _kde_plot(ax, base_margins, BASE_COLOR, lw=2.0, ls="-",
-                          alpha=0.9, label="Base", bw_adjust=bw_adjust, xmin=xmin)
-            elif plot_type == "hist":
-                _hist_plot(ax, base_margins, BASE_COLOR, alpha=0.5, label="Base")
-            elif plot_type == "violin":
-                pass  # violin facet not implemented; silently skip
-        # Draw each checkpoint
-        for ck_label, (margins, color, lw, ls, alpha) in method_data[method].items():
-            if plot_type == "kde":
-                _kde_plot(ax, margins, color, lw, ls, alpha, ck_label, bw_adjust, xmin=xmin)
-            elif plot_type == "hist":
-                _hist_plot(ax, margins, color, alpha, ck_label)
-        if xmin is None:
-            ax.axvline(0, color="gray", lw=0.8, ls=":")
-        else:
-            ax.set_xlim(left=xmin)
+            panel_data["Base"] = (base_margins, BASE_COLOR, 2.0, "-", 0.9)
+        panel_data.update(method_data[method])
+        _draw_on_ax(ax, panel_data, plot_type, bw_adjust, xmin, xlabel)
         ax.set_title(method, fontsize=11)
-        ax.set_xlabel(xlabel, fontsize=9)
-        ax.set_ylabel("Density", fontsize=9)
         _add_legend(ax, n_cols=1)
 
     # Hide empty panels
@@ -321,6 +380,17 @@ def main():
     parser.add_argument(
         "--abs", action="store_true",
         help="Plot |true_logit - false_logit| (confidence magnitude) instead of the signed margin.",
+    )
+    parser.add_argument(
+        "--split_correct", action="store_true",
+        help="Show two panels: one for questions the model answered correctly, "
+             "one for questions it answered incorrectly. "
+             "Correctness is based on each model's own logit prediction vs the expected label.",
+    )
+    parser.add_argument(
+        "--pairs_csv", default="data/wmdp_tf_pairs.csv",
+        help="Path to wmdp_tf_pairs.csv (needed for --split_correct). "
+             "Default: data/wmdp_tf_pairs.csv",
     )
     parser.add_argument(
         "--no_base", action="store_true",
@@ -364,8 +434,10 @@ def main():
     if args.out is None:
         mstr  = "all" if len(methods) == len(ALL_METHODS) else "_".join(safe_name(m) for m in methods)
         ckstr = "all" if checkpoints == list(range(1, N_CHECKPOINTS + 1)) else "_".join(str(c) for c in checkpoints)
-        abs_tag = "_abs" if args.abs else ""
-        suffix = f"_{args.plot_type}{abs_tag}" + ("_facet" if args.facet else "")
+        abs_tag    = "_abs"   if args.abs           else ""
+        split_tag  = "_split" if args.split_correct else ""
+        facet_tag  = "_facet" if args.facet         else ""
+        suffix = f"_{args.plot_type}{abs_tag}{split_tag}{facet_tag}"
         out_path = Path(f"plots/logit_margin_dist_m{mstr}_ck{ckstr}{suffix}.png")
     else:
         out_path = Path(args.out)
@@ -373,9 +445,15 @@ def main():
 
     # ── Load data ─────────────────────────────────────────────────────────────
     margin_transform = np.abs if args.abs else (lambda x: x)
-    base_margins = None if args.no_base else load_base(data_dir)
-    if base_margins is not None:
-        base_margins = margin_transform(base_margins)
+
+    # raw_margins_map keeps the pre-transform margins for correctness splitting.
+    # flat_data / method_data store post-transform (display) margins.
+    raw_margins_map: dict = {}   # {series_label: raw_np_array}
+
+    raw_base = None if args.no_base else load_base(data_dir)
+    base_margins = margin_transform(raw_base) if raw_base is not None else None
+    if raw_base is not None:
+        raw_margins_map["Base"] = raw_base
 
     # method_data[method][ck_label] = (margins, color, lw, ls, alpha)
     method_data: dict = {}
@@ -386,21 +464,23 @@ def main():
         entries = {}
 
         for ci, ck in enumerate(sorted(checkpoints)):
-            margins = load_sweep_ck(data_dir, method, ck)
-            if margins is None:
+            raw = load_sweep_ck(data_dir, method, ck)
+            if raw is None:
                 print(f"[skip] {method} ck{ck}: no data", file=sys.stderr)
                 continue
-            margins = margin_transform(margins)
+            lbl   = f"{method} ck{ck}"
+            raw_margins_map[lbl] = raw
             col   = ck_colors[ci]
             lw    = 1.2 + 0.4 * (ci / max(n_cks - 1, 1))   # thin→thick
             alpha = 0.55 + 0.40 * (ci / max(n_cks - 1, 1))  # transparent→opaque
-            entries[f"{method} ck{ck}"] = (margins, col, lw, "-", alpha)
+            entries[lbl] = (margin_transform(raw), col, lw, "-", alpha)
 
         if args.final:
-            margins = load_final_ck(data_dir, method)
-            if margins is not None:
-                margins = margin_transform(margins)
-                entries[f"{method} final"] = (margins, base_hex, 2.0, FINAL_LSTYLE, 0.9)
+            raw = load_final_ck(data_dir, method)
+            if raw is not None:
+                lbl = f"{method} final"
+                raw_margins_map[lbl] = raw
+                entries[lbl] = (margin_transform(raw), base_hex, 2.0, FINAL_LSTYLE, 0.9)
             else:
                 print(f"[skip] {method} final: no CSV found", file=sys.stderr)
 
@@ -430,19 +510,44 @@ def main():
         margin_label = "margin"
         xmin = None
 
-    # ── Build flat data dict for single-axes ──────────────────────────────────
-    if not args.facet:
-        flat_data = {}
-        if base_margins is not None:
-            flat_data["Base"] = (base_margins, BASE_COLOR, 2.5, "-", 1.0)
-        for method, entries in method_data.items():
-            flat_data.update(entries)
+    # ── Build flat data dict ───────────────────────────────────────────────────
+    flat_data = {}
+    if base_margins is not None:
+        flat_data["Base"] = (base_margins, BASE_COLOR, 2.5, "-", 1.0)
+    for method, entries in method_data.items():
+        flat_data.update(entries)
 
-        ck_str = (f"ck1–{N_CHECKPOINTS}" if checkpoints == list(range(1, N_CHECKPOINTS + 1))
-                  else "ck" + ",".join(str(c) for c in checkpoints))
-        title = (f"Bio logit {margin_label} distributions — "
-                 f"{', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})")
+    ck_str = (f"ck1–{N_CHECKPOINTS}" if checkpoints == list(range(1, N_CHECKPOINTS + 1))
+              else "ck" + ",".join(str(c) for c in checkpoints))
+    title = (f"Bio logit {margin_label} distributions — "
+             f"{', '.join(methods[:4])}{'…' if len(methods) > 4 else ''} ({ck_str})")
 
+    # ── Split-correct: build correct / incorrect subsets ─────────────────────
+    if args.split_correct:
+        pairs_csv = Path(args.pairs_csv)
+        if not pairs_csv.exists():
+            print(f"[error] --split_correct requires {pairs_csv} (not found).", file=sys.stderr)
+            sys.exit(1)
+        labels = load_test_labels(pairs_csv)
+        flat_correct   = {}
+        flat_incorrect = {}
+        for lbl, (disp, color, lw, ls, alpha) in flat_data.items():
+            raw = raw_margins_map.get(lbl)
+            if raw is None or len(raw) != len(labels):
+                print(f"[warn] '{lbl}': cannot split — length mismatch or missing raw data, "
+                      "placing in both panels unchanged.", file=sys.stderr)
+                flat_correct[lbl]   = (disp, color, lw, ls, alpha)
+                flat_incorrect[lbl] = (disp, color, lw, ls, alpha)
+                continue
+            mask = compute_correct_mask(raw, labels)
+            flat_correct[lbl]   = (disp[mask],  color, lw, ls, alpha)
+            flat_incorrect[lbl] = (disp[~mask], color, lw, ls, alpha)
+
+        make_plot_split_correct(
+            flat_correct, flat_incorrect,
+            args.plot_type, out_path, args.bw_adjust, title, xlabel, xmin,
+        )
+    elif not args.facet:
         make_plot_single(flat_data, args.plot_type, out_path, args.bw_adjust, title, xlabel, xmin)
     else:
         make_plot_facet(base_margins, method_data, args.plot_type, out_path, args.bw_adjust, xlabel, xmin)
