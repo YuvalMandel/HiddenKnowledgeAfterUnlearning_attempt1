@@ -1446,10 +1446,49 @@ def main():
 
     # ── k-fold aggregate mode (bio-only, line or heatmap) ────────────────────
     if args.kfold:
-        if args.mode != "methods":
-            parser.error("--kfold only supports --mode methods")
         if dataset != "bio":
             parser.error("--kfold only supports --dataset bio (kfold is bio-only)")
+
+        # ── kfold sweep (checkpoints mode) ───────────────────────────────────
+        if args.mode == "checkpoints":
+            if args.method is None or args.method == "all":
+                parser.error("--kfold --mode checkpoints requires --method METHOD "
+                             f"(not 'all'). Choose from: {', '.join(SWEEP_METHODS)}")
+            if args.method not in SWEEP_METHODS:
+                parser.error(f"Unknown method '{args.method}'. "
+                             f"Choose from: {', '.join(SWEEP_METHODS)}")
+            if args.plot_type == "line":
+                parser.error("--kfold --mode checkpoints only supports --plot_type heatmap "
+                             "(line plot not yet implemented for kfold sweep).")
+
+            clfs            = clf_filter if clf_filter else CLF_NAMES
+            metrics_to_plot = [args.metric] if args.metric else METRIC_NAMES
+            metric_tag      = args.metric or "all_metrics"
+            clf_tag         = args.clf.lower() if args.clf else "all_clf"
+            sn              = _re.sub(r"[^a-zA-Z0-9_-]", "_", args.method)
+
+            kfold_sweep_out = Path(args.out) if args.out else Path(
+                f"kfold_sweep_heatmap_{sn}_{metric_tag}_{clf_tag}.png"
+            )
+            ck_row_labels = [f"ck{n}" for n in range(1, N_CHECKPOINTS + 1)]
+
+            sweep_data = collect_data_kfold_sweep(
+                data_dir, args.method, clfs, metrics_to_plot
+            )
+            _render_heatmap(
+                sweep_data, metrics_to_plot, clfs,
+                row_labels=ck_row_labels,
+                out_path=kfold_sweep_out,
+                title=(f"{args.method} — Per-Layer Probe Accuracy  "
+                       f"5-Fold CV Mean  [Bio WMDP]\n"
+                       f"Y = training checkpoint,  X = layer"),
+                normalize=normalize,
+            )
+            print(f"Saved → {kfold_sweep_out}")
+            return
+
+        if args.mode != "methods":
+            parser.error("--kfold supports --mode methods or --mode checkpoints.")
 
         clfs            = clf_filter if clf_filter else CLF_NAMES
         metrics_to_plot = [args.metric] if args.metric else METRIC_NAMES
@@ -1692,6 +1731,51 @@ def _safe_float(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def collect_data_kfold_sweep(data_dir: Path, method: str,
+                              clfs: list, metrics: list) -> dict:
+    """
+    Read kfold_sweep_per_layer_aggregated.csv for one method.
+
+    Returns data[metric][clf][ck_label] = (layers, means)
+    where ck_label = "ck1" … "ck8".
+    """
+    pl_path = data_dir / "kfold_sweep_per_layer_aggregated.csv"
+    if not pl_path.exists():
+        raise FileNotFoundError(
+            f"{pl_path} not found — generate it first:\n"
+            "  python kfold_probe.py --stage kfold_sweep_summary\n"
+            "  python kfold_probe.py --stage kfold_sweep_tables"
+        )
+
+    from collections import defaultdict
+    # tmp[(clf, ck_label)][metric][layer] = mean_value
+    tmp = defaultdict(lambda: defaultdict(dict))
+    with open(pl_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row["method"] != method:
+                continue
+            clf   = row["clf"]
+            layer = int(row["layer"])
+            ck    = int(row["ck"])
+            if clf not in clfs:
+                continue
+            ck_label = f"ck{ck}"
+            for m in metrics:
+                v = _safe_float(row.get(f"mean_{m}"))
+                if v is not None:
+                    tmp[(clf, ck_label)][m][layer] = v
+
+    data = {m: {clf: {} for clf in clfs} for m in metrics}
+    for (clf, ck_label), m_dict in tmp.items():
+        for m, layer_dict in m_dict.items():
+            if m not in metrics:
+                continue
+            sorted_layers = sorted(layer_dict)
+            data[m][clf][ck_label] = (sorted_layers,
+                                      [layer_dict[l] for l in sorted_layers])
+    return data
 
 
 def make_plot_kfold(data_dir: Path, out_path: Path,
