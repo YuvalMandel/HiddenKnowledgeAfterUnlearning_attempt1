@@ -777,43 +777,60 @@ def collect_data_checkpoints(checkpoint_dir: Path, method_name: str, clfs: list,
 
 def _setup_ax(ax, row_idx, ax_idx, n_rows, clf_name, metric):
     if row_idx == 0 and clf_name is not None:
-        ax.set_title(clf_name, fontsize=12)
+        ax.set_title(clf_name, fontsize=9)
     if ax_idx == 0:
-        ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
+        ax.set_ylabel(METRIC_LABELS[metric], fontsize=8)
     if row_idx == n_rows - 1:
-        ax.set_xlabel("Layer", fontsize=10)
+        ax.set_xlabel("Layer", fontsize=8)
     ax.set_xlim(0.5, N_LAYERS + 0.5)
     ax.set_xticks(range(1, N_LAYERS + 1))
     ax.tick_params(axis="x", labelsize=7)
-    ax.tick_params(axis="y", labelsize=8)
+    ax.tick_params(axis="y", labelsize=7)
     ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.5)
     ax.axhline(0.5, color="gray", linestyle=":", linewidth=1.2, zorder=1)
 
 
-def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path):
+def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path,
+                     legend_outside=False):
     legend_handles.append(
         mlines.Line2D([], [], color="gray", linewidth=1.2,
                       linestyle=":", label="Chance (0.5)")
     )
     legend_labels.append("Chance (0.5)")
 
-    fig.subplots_adjust(
-        left=0.07, right=0.97,
-        bottom=0.07, top=0.94,
-        hspace=0.35,
-    )
-    # Place legend inside the bottom-left of the last axes
-    last_ax = axes[-1][0]
-    last_ax.legend(
-        legend_handles, legend_labels,
-        loc="lower left",
-        ncol=4,
-        fontsize=9,
-        framealpha=0.9,
-        title="Model",
-        title_fontsize=9,
-    )
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    if legend_outside:
+        fig.subplots_adjust(
+            left=0.07, right=0.97,
+            bottom=0.20, top=0.92,
+            hspace=0.35,
+        )
+        fig.legend(
+            legend_handles, legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.07),
+            ncol=4,
+            fontsize=7,
+            framealpha=0.9,
+            title="Model",
+            title_fontsize=7,
+        )
+    else:
+        fig.subplots_adjust(
+            left=0.07, right=0.97,
+            bottom=0.07, top=0.94,
+            hspace=0.35,
+        )
+        last_ax = axes[-1][0]
+        last_ax.legend(
+            legend_handles, legend_labels,
+            loc="lower left",
+            ncol=4,
+            fontsize=7,
+            framealpha=0.9,
+            title="Model",
+            title_fontsize=7,
+        )
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
     print(f"\nSaved -> {out_path}")
 
 
@@ -1821,7 +1838,7 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
     )
     fig.suptitle(
         "Per-Layer Probe Accuracy — 5-Fold CV  (mean ± 95 % CI)  [Bio WMDP]",
-        fontsize=11, x=0.5, ha="center",
+        fontsize=9, x=0.5, ha="center",
     )
 
     for row_idx, m in enumerate(metrics_to_plot):
@@ -1885,7 +1902,8 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
     )
     legend_labels.append("±95 % CI (5-fold)")
 
-    _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
+    _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path,
+                     legend_outside=True)
     plt.close(fig)
 
 

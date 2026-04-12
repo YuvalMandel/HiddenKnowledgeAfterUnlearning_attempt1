@@ -82,7 +82,7 @@ def add_value_labels(ax, bar_groups):
             if not np.isnan(top):
                 ax.text(bar.get_x() + bar.get_width() / 2, mid,
                         f"{top:.2f}", ha="center", va="center",
-                        fontsize=7, rotation=0, color="white",
+                        fontsize=6, rotation=0, color="white",
                         fontweight="bold")
 
 
@@ -95,7 +95,8 @@ def format_yaxis(ax, ylabel, ymin=0, ymax=1.0, step=0.1):
     ax.set_ylim(ymin, ymax)
     ax.set_yticks(np.arange(ymin, ymax + step / 2, step))
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
-    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.tick_params(axis="y", labelsize=7)
     ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7, zorder=0)
     ax.set_axisbelow(True)
 
@@ -198,12 +199,12 @@ def main():
 
     ax1.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, fontsize=10)
+    ax1.set_xticklabels(labels, fontsize=7)
     format_yaxis(ax1, "Accuracy")
     title1 = "Hidden Knowledge After Unlearning — Bio (WMDP)\nSurface behaviour vs. internal hidden-state probe  [Accuracy]"
     if kfold:
         title1 += "\n(probe = 5-fold CV mean ± 95 % CI)"
-    ax1.set_title(title1, fontsize=13, pad=12)
+    ax1.set_title(title1, fontsize=9, pad=8)
 
     handles1 = [
         mpatches.Patch(color=COLORS["gen"],   label="Generation acc (surface)"),
@@ -214,12 +215,12 @@ def main():
     if err_label:
         handles1.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
                                    marker="|", markersize=8, label=err_label))
-    ax1.legend(handles=handles1, loc="upper right", fontsize=9, framealpha=0.9)
+    ax1.legend(handles=handles1, loc="upper right", fontsize=7, framealpha=0.9)
     add_value_labels(ax1, [b_gen, b_logit, b_probe])
     add_separators(ax1, N)
 
     fig1.tight_layout()
-    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    fig1.savefig(out1, dpi=300, bbox_inches="tight")
     print(f"Saved: {out1}")
     plt.close(fig1)
 
@@ -238,12 +239,12 @@ def main():
 
     ax2.axhline(0.5, color="black", linewidth=1.2, linestyle="--", zorder=2)
     ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, fontsize=10)
+    ax2.set_xticklabels(labels, fontsize=7)
     format_yaxis(ax2, "AUC (ROC)", ymin=0.4, ymax=0.8, step=0.05)
     title2 = "Hidden Knowledge After Unlearning — Bio (WMDP)\nSurface behaviour vs. internal hidden-state probe  [AUC]"
     if kfold:
         title2 += "\n(probe = 5-fold CV mean ± 95 % CI)"
-    ax2.set_title(title2, fontsize=13, pad=12)
+    ax2.set_title(title2, fontsize=9, pad=8)
 
     handles2 = [
         mpatches.Patch(color=COLORS["logit"], label="Logit AUC (surface)"),
@@ -253,12 +254,12 @@ def main():
     if err_label:
         handles2.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
                                    marker="|", markersize=8, label=err_label))
-    ax2.legend(handles=handles2, loc="upper right", fontsize=9, framealpha=0.9)
+    ax2.legend(handles=handles2, loc="upper right", fontsize=7, framealpha=0.9)
     add_value_labels(ax2, [b_lauc, b_pauc])
     add_separators(ax2, N)
 
     fig2.tight_layout()
-    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    fig2.savefig(out2, dpi=300, bbox_inches="tight")
     print(f"Saved: {out2}")
     plt.close(fig2)
 
