@@ -78,10 +78,12 @@ def add_value_labels(ax, bar_groups):
     for bars in bar_groups:
         for bar in bars:
             top = bar.get_y() + bar.get_height()
+            mid = bar.get_y() + bar.get_height() / 2
             if not np.isnan(top):
-                ax.text(bar.get_x() + bar.get_width() / 2, top + 0.003,
-                        f"{top:.2f}", ha="center", va="bottom",
-                        fontsize=7, rotation=0)
+                ax.text(bar.get_x() + bar.get_width() / 2, mid,
+                        f"{top:.2f}", ha="center", va="center",
+                        fontsize=7, rotation=0, color="white",
+                        fontweight="bold")
 
 
 def add_separators(ax, n):
