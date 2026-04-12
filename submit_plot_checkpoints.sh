@@ -31,6 +31,7 @@ export PLOT_DATASET="bio"
 export PLOT_CYBER_SUBSET=""
 export PLOT_OUT=""
 export PLOT_CHECKPOINT_DIR="checkpoints"
+export PLOT_FIGSIZE=""
 export CONDA_ENV="htm_keyboard_1"
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
@@ -44,6 +45,7 @@ while [[ "$#" -gt 0 ]]; do
         --cyber_subset)   export PLOT_CYBER_SUBSET="$2";   shift ;;
         --out)            export PLOT_OUT="$2";            shift ;;
         --checkpoint_dir) export PLOT_CHECKPOINT_DIR="$2"; shift ;;
+        --figsize)        export PLOT_FIGSIZE="$2 $3";     shift; shift ;;
         --env)            export CONDA_ENV="$2";           shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -58,6 +60,7 @@ echo "  metric        : ${PLOT_METRIC:-all}"
 echo "  plot_type     : ${PLOT_PLOT_TYPE:-line}"
 echo "  dataset       : ${PLOT_DATASET}"
 echo "  cyber_subset  : ${PLOT_CYBER_SUBSET:-none}"
+echo "  figsize       : ${PLOT_FIGSIZE:-default}"
 echo "  out template  : ${PLOT_OUT:-auto}"
 echo "  checkpoint_dir: ${PLOT_CHECKPOINT_DIR}"
 echo "  conda env     : ${CONDA_ENV}"

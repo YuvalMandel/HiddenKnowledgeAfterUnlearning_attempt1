@@ -54,6 +54,7 @@ EXTRA_ARGS=""
 [[ -n "${PLOT_DATASET}"        ]] && EXTRA_ARGS="$EXTRA_ARGS --dataset ${PLOT_DATASET}"
 [[ -n "${PLOT_CYBER_SUBSET}"   ]] && EXTRA_ARGS="$EXTRA_ARGS --cyber_subset ${PLOT_CYBER_SUBSET}"
 [[ -n "${PLOT_CHECKPOINT_DIR}" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint_dir ${PLOT_CHECKPOINT_DIR}"
+[[ -n "${PLOT_FIGSIZE}"        ]] && EXTRA_ARGS="$EXTRA_ARGS --figsize ${PLOT_FIGSIZE}"
 
 if [[ -n "${PLOT_OUT}" ]]; then
     # User supplied a template — append method name to the stem

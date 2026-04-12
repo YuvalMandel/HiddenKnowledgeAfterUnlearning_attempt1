@@ -937,7 +937,9 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
         figsize=figsize if figsize else (max(13, 6 * n_clfs), max(5.5, 3.5 * n_rows_fig)),
         squeeze=False,
     )
-    fig.suptitle(title, fontsize=9, x=0.5, ha="center")
+    # When a single clf is used, embed it in the suptitle instead of a per-axes title
+    suptitle = f"{title} [{clfs[0]}]" if n_clfs == 1 else title
+    fig.suptitle(suptitle, fontsize=9, x=0.5, ha="center")
 
     for row_idx, metric in enumerate(metrics_to_plot):
         for ax_idx, clf_name in enumerate(clfs):
@@ -975,25 +977,26 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                 vmin=_vmin, vmax=_vmax, cmap=cmap_use,
                 interpolation="nearest",
             )
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cb.ax.tick_params(labelsize=7)
 
-            # Titles / labels
-            if row_idx == 0:
-                ax.set_title(clf_name, fontsize=11)
+            # Titles / labels — only show clf name as axis title when multiple clfs
+            if row_idx == 0 and n_clfs > 1:
+                ax.set_title(clf_name, fontsize=9)
             if ax_idx == 0:
-                ax.set_ylabel(METRIC_LABELS[metric], fontsize=9)
+                ax.set_ylabel(METRIC_LABELS[metric], fontsize=8)
             if row_idx == n_rows_fig - 1:
-                ax.set_xlabel("Layer", fontsize=10)
+                ax.set_xlabel("Layer", fontsize=8)
             tick_pos = list(range(0, N_LAYERS))
             ax.set_xticks(tick_pos)
             ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=5, rotation=90)
 
             ax.set_yticks(range(len(present)))
             display_labels = [lb.replace("Base (Instruct)", "Base") for lb in present]
-            ax.set_yticklabels(display_labels, fontsize=8)
+            ax.set_yticklabels(display_labels, fontsize=7)
 
     fig.subplots_adjust(left=0.07, right=0.97, bottom=0.10, top=0.92, hspace=0.3, wspace=0.25)
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
     print(f"\nSaved -> {out_path}")
     plt.close(fig)
 
