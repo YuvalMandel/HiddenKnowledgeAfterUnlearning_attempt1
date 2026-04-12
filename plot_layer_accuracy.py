@@ -1449,6 +1449,11 @@ def main():
         help="Figure size in inches, e.g. --figsize 5.5 3.5",
     )
     parser.add_argument(
+        "--format", default=None, choices=["png", "pdf", "svg"],
+        dest="fmt",
+        help="Output file format (default: png). Use pdf for Overleaf/LaTeX.",
+    )
+    parser.add_argument(
         "--cyber_subset", choices=CYBER_SUBSETS, default=None,
         help=(
             "Filter the cyber test set to a named subset before evaluating probes.\n"
@@ -1472,6 +1477,7 @@ def main():
     dataset        = args.dataset
     normalize      = args.relative
     cyber_subset   = args.cyber_subset if dataset == "cyber" else None
+    out_ext        = f".{args.fmt}" if args.fmt else ".png"
 
     # ── k-fold aggregate mode (bio-only, line or heatmap) ────────────────────
     if args.kfold:
@@ -1549,7 +1555,7 @@ def main():
 
         if args.plot_type == "heatmap":
             kfold_out = Path(args.out) if args.out else Path(
-                f"kfold_heatmap_methods_{metric_tag}_{clf_tag}_{models_tag}.png"
+                f"kfold_heatmap_methods_{metric_tag}_{clf_tag}_{models_tag}{out_ext}"
             )
             _render_heatmap(
                 data_means, metrics_to_plot, clfs,
@@ -1563,7 +1569,7 @@ def main():
             )
         else:
             kfold_out = Path(args.out) if args.out else Path(
-                f"kfold_line_methods_{metric_tag}_{clf_tag}_{models_tag}.png"
+                f"kfold_line_methods_{metric_tag}_{clf_tag}_{models_tag}{out_ext}"
             )
             make_plot_kfold(
                 data_dir=data_dir,
@@ -1585,7 +1591,7 @@ def main():
             args.metric, args.clf, args.probe_source, dataset,
             normalize=normalize,
             cyber_subset=cyber_subset,
-        )
+        ).with_suffix(out_ext)
 
     # ── methods mode ─────────────────────────────────────────────────────────
     if args.mode == "methods":

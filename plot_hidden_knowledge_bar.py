@@ -137,12 +137,16 @@ def main():
     ap.add_argument("--figsize", nargs=2, type=float, default=None,
                     metavar=("W", "H"),
                     help="Figure size in inches, e.g. --figsize 5.5 3.5")
+    ap.add_argument("--format", default=None, choices=["png", "pdf", "svg"],
+                    dest="fmt",
+                    help="Output file format (default: png). Use pdf for Overleaf/LaTeX.")
     args = ap.parse_args()
 
     kfold  = args.kfold
     suffix = "_kfold" if kfold else ""
-    out1   = Path(args.out_acc) if args.out_acc else Path(f"hidden_knowledge_bar_acc{suffix}.png")
-    out2   = Path(args.out_auc) if args.out_auc else Path(f"hidden_knowledge_bar_auc{suffix}.png")
+    ext    = f".{args.fmt}" if args.fmt else ".png"
+    out1   = Path(args.out_acc) if args.out_acc else Path(f"hidden_knowledge_bar_acc{suffix}{ext}")
+    out2   = Path(args.out_auc) if args.out_auc else Path(f"hidden_knowledge_bar_auc{suffix}{ext}")
 
     # ── Load surface tables (always single-fold) ──────────────────────────────
     t1 = read_csv_as_dict(DATA_DIR / "summary_table1_gen_logit.csv")
