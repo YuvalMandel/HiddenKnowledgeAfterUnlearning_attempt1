@@ -857,32 +857,37 @@ def main():
             return d
 
         if args.split_correct and args.split_gold:
+            # 2×2: correct/incorrect × gold True/False
+            # Correct + Gold True  → model predicted True,  gold True  (TP)
+            # Correct + Gold False → model predicted False, gold False (TN)
+            # Incorrect + Gold True  → model predicted False, gold True  (FN)
+            # Incorrect + Gold False → model predicted True,  gold False (FP)
             panels = [
-                ("Correct  ·  Gold True",
+                ("TP — correct\ngold=True,  model predicted True",
                  _subset(lambda l: correct_masks[l] & gold_mask)),
-                ("Correct  ·  Gold False",
+                ("TN — correct\ngold=False,  model predicted False",
                  _subset(lambda l: correct_masks[l] & ~gold_mask)),
-                ("Incorrect  ·  Gold True",
+                ("FN — incorrect\ngold=True,  model predicted False",
                  _subset(lambda l: ~correct_masks[l] & gold_mask)),
-                ("Incorrect  ·  Gold False",
+                ("FP — incorrect\ngold=False,  model predicted True",
                  _subset(lambda l: ~correct_masks[l] & ~gold_mask)),
             ]
             make_plot_grid(panels, 2, 2, args.plot_type, out_path, args.bw_adjust,
                            title, xlabel, xmin, xmax)
         elif args.split_correct:
             panels = [
-                ("Correct  (fraction varies per model)",
+                ("Correct  (model answer = gold answer)\nfraction varies per model",
                  _subset(lambda l: correct_masks[l])),
-                ("Incorrect  (fraction varies per model)",
+                ("Incorrect  (model answer \u2260 gold answer)\nfraction varies per model",
                  _subset(lambda l: ~correct_masks[l])),
             ]
             make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
                            title, xlabel, xmin, xmax)
         else:
             panels = [
-                ("Gold label: True  (50% of questions by construction)",
+                ("Gold = True  (correct answer is True)\n50% of questions by construction",
                  _subset(lambda l: gold_mask)),
-                ("Gold label: False  (50% of questions by construction)",
+                ("Gold = False  (correct answer is False)\n50% of questions by construction",
                  _subset(lambda l: ~gold_mask)),
             ]
             make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
