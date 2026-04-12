@@ -133,6 +133,9 @@ def main():
                     help="Output path for accuracy plot (default: auto)")
     ap.add_argument("--out_auc", default=None,
                     help="Output path for AUC plot (default: auto)")
+    ap.add_argument("--figsize", nargs=2, type=float, default=None,
+                    metavar=("W", "H"),
+                    help="Figure size in inches, e.g. --figsize 5.5 3.5")
     args = ap.parse_args()
 
     kfold  = args.kfold
@@ -180,12 +183,13 @@ def main():
     probe_auc_errs = np.array(probe_auc_errs)
 
     err_label = "±95 % CI (5-fold CV)" if kfold else None
+    _figsize = tuple(args.figsize) if args.figsize else (13, 5.5)
 
     # ── Plot 1: Accuracy ──────────────────────────────────────────────────────
     width  = 0.26
     offset = [-width, 0, width]
 
-    fig1, ax1 = plt.subplots(figsize=(13, 5.5))
+    fig1, ax1 = plt.subplots(figsize=_figsize)
 
     b_gen   = ax1.bar(x + offset[0], gen_accs,   width, color=COLORS["gen"],   zorder=3)
     b_logit = ax1.bar(x + offset[1], logit_accs, width, color=COLORS["logit"], zorder=3)
@@ -224,7 +228,7 @@ def main():
     width2   = 0.32
     offset2  = [-width2 / 2, width2 / 2]
 
-    fig2, ax2 = plt.subplots(figsize=(13, 5.5))
+    fig2, ax2 = plt.subplots(figsize=_figsize)
 
     b_lauc = ax2.bar(x + offset2[0], np.array(logit_aucs) - AUC_YMIN, width2,
                      bottom=AUC_YMIN, color=COLORS["logit"], zorder=3)

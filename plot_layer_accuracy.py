@@ -807,7 +807,7 @@ def _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
     last_ax.legend(
         legend_handles, legend_labels,
         loc="lower left",
-        ncol=2,
+        ncol=4,
         fontsize=9,
         framealpha=0.9,
         title="Model",
@@ -1420,6 +1420,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--figsize", nargs=2, type=float, default=None,
+        metavar=("W", "H"),
+        help="Figure size in inches, e.g. --figsize 5.5 3.5",
+    )
+    parser.add_argument(
         "--cyber_subset", choices=CYBER_SUBSETS, default=None,
         help=(
             "Filter the cyber test set to a named subset before evaluating probes.\n"
@@ -1542,6 +1547,7 @@ def main():
                 clf_filter=clf_filter,
                 metric=args.metric,
                 models_filter=models_filter,
+                figsize=tuple(args.figsize) if args.figsize else None,
             )
         return
 
@@ -1780,7 +1786,8 @@ def collect_data_kfold_sweep(data_dir: Path, method: str,
 
 def make_plot_kfold(data_dir: Path, out_path: Path,
                    clf_filter: list, metric: str | None,
-                   models_filter: list | None = None):
+                   models_filter: list | None = None,
+                   figsize: tuple | None = None):
     """
     Line plot of per-layer probe accuracy from the 5-fold aggregated data.
     Draws mean line + shaded ±CI95 band per model (bio only).
@@ -1808,7 +1815,7 @@ def make_plot_kfold(data_dir: Path, out_path: Path,
 
     fig, axes = plt.subplots(
         n_rows, n_clfs,
-        figsize=(7 * n_clfs, 4.5 * n_rows),
+        figsize=figsize if figsize else (7 * n_clfs, 4.5 * n_rows),
         sharey="row",
         squeeze=False,
     )
