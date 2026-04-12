@@ -216,7 +216,6 @@ def main():
         handles1.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
                                    marker="|", markersize=8, label=err_label))
     ax1.legend(handles=handles1, loc="upper right", fontsize=7, framealpha=0.9)
-    add_value_labels(ax1, [b_gen, b_logit, b_probe])
     add_separators(ax1, N)
 
     fig1.tight_layout()
@@ -255,7 +254,6 @@ def main():
         handles2.append(plt.Line2D([0], [0], color="black", linewidth=1.2,
                                    marker="|", markersize=8, label=err_label))
     ax2.legend(handles=handles2, loc="upper right", fontsize=7, framealpha=0.9)
-    add_value_labels(ax2, [b_lauc, b_pauc])
     add_separators(ax2, N)
 
     fig2.tight_layout()
