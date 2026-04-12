@@ -908,7 +908,8 @@ def _relative_data_range(data: dict, metrics: list, clfs: list):
 def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                     row_labels: list, out_path: Path, title: str,
                     vmin: float | None = None, vmax: float | None = None,
-                    normalize: bool = False):
+                    normalize: bool = False,
+                    figsize: tuple | None = None):
     """
     Render a heatmap figure.
 
@@ -933,10 +934,10 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
 
     fig, axes = plt.subplots(
         n_rows_fig, n_clfs,
-        figsize=(max(13, 6 * n_clfs), max(5.5, 3.5 * n_rows_fig)),
+        figsize=figsize if figsize else (max(13, 6 * n_clfs), max(5.5, 3.5 * n_rows_fig)),
         squeeze=False,
     )
-    fig.suptitle(title, fontsize=11, x=0.5, ha="center")
+    fig.suptitle(title, fontsize=9, x=0.5, ha="center")
 
     for row_idx, metric in enumerate(metrics_to_plot):
         for ax_idx, clf_name in enumerate(clfs):
@@ -1129,7 +1130,8 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
                            clf_filter: list, metric: str | None,
                            probe_source: str,
                            data_dir: Path = DATA_DIR, dataset: str = "bio",
-                           cyber_subset: str | None = None):
+                           cyber_subset: str | None = None,
+                           figsize: tuple | None = None):
 
     print(f"\n=== Checkpoints mode: {method_name} ({dataset}) ===")
     if dataset == "cyber":
@@ -1176,7 +1178,7 @@ def make_plot_checkpoints(checkpoint_dir: Path, out_path: Path,
     probe_lbl = "Method Probes" if probe_source == "method" else "Base Probes"
     fig, axes = plt.subplots(
         n_rows, n_clfs,
-        figsize=(7 * n_clfs, 4.5 * n_rows),
+        figsize=figsize if figsize else (7 * n_clfs, 4.5 * n_rows),
         sharey="row",
         squeeze=False,
     )
@@ -1243,7 +1245,8 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
                          vmin: float | None = None, vmax: float | None = None,
                          dataset: str = "bio",
                          normalize: bool = False,
-                         cyber_subset: str | None = None):
+                         cyber_subset: str | None = None,
+                         figsize: tuple | None = None):
     if dataset == "cyber":
         print("Loading cyber y_test ...")
         y_test = load_cyber_y_test_methods(checkpoint_dir)
@@ -1280,7 +1283,7 @@ def make_heatmap_methods(checkpoint_dir: Path, out_path: Path,
     if normalize:
         vmin, vmax = _relative_data_range(data, metrics_to_plot, clfs)
     _render_heatmap(data, metrics_to_plot, clfs, row_labels, out_path, title,
-                    vmin=vmin, vmax=vmax, normalize=normalize)
+                    vmin=vmin, vmax=vmax, normalize=normalize, figsize=figsize)
 
 
 # ---------------------------------------------------------------------------
@@ -1295,7 +1298,8 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
                               vmin: float | None = None, vmax: float | None = None,
                               dataset: str = "bio",
                               normalize: bool = False,
-                              cyber_subset: str | None = None):
+                              cyber_subset: str | None = None,
+                              figsize: tuple | None = None):
     print(f"\n=== Heatmap checkpoints mode: {method_name} ({dataset}) ===")
     if dataset == "cyber":
         y_test = load_cyber_y_test_sweep()
@@ -1329,7 +1333,7 @@ def make_heatmap_checkpoints(checkpoint_dir: Path, out_path: Path,
     if normalize:
         vmin, vmax = _relative_data_range(data, metrics_to_plot, clfs)
     _render_heatmap(data, metrics_to_plot, clfs, CK_LABELS, out_path, title,
-                    vmin=vmin, vmax=vmax, normalize=normalize)
+                    vmin=vmin, vmax=vmax, normalize=normalize, figsize=figsize)
 
 
 # ---------------------------------------------------------------------------
@@ -1592,6 +1596,7 @@ def main():
                 data_dir=data_dir,
                 dataset=dataset,
                 cyber_subset=cyber_subset,
+                figsize=tuple(args.figsize) if args.figsize else None,
             )
         else:
             make_plot(
@@ -1667,6 +1672,7 @@ def main():
                     all_data[method], metrics_to_plot, clfs, CK_LABELS,
                     file_out, title,
                     vmin=global_vmin, vmax=global_vmax,
+                    figsize=tuple(args.figsize) if args.figsize else None,
                 )
 
         else:
@@ -1686,6 +1692,7 @@ def main():
                     data_dir=data_dir,
                     dataset=dataset,
                     cyber_subset=cyber_subset,
+                    figsize=tuple(args.figsize) if args.figsize else None,
                 )
 
 
