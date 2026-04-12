@@ -313,15 +313,46 @@ def make_plot_grid(
     xmax: float = None,
 ):
     """Render a nrows × ncols grid of distribution panels."""
+    # Compute a shared x-range across all panels so comparisons are valid.
+    # For KDE/hist/ecdf the data lives on the x-axis; violin/boxplot use y.
+    if plot_type not in ("violin", "boxplot"):
+        g_xmin, g_xmax = xmin, xmax
+        if g_xmin is None or g_xmax is None:
+            all_vals = []
+            for _, pdata in panels:
+                for margins, *_ in pdata.values():
+                    if len(margins):
+                        all_vals.append(float(margins.min()))
+                        all_vals.append(float(margins.max()))
+            if all_vals:
+                if g_xmin is None:
+                    g_xmin = min(all_vals) - 0.5
+                if g_xmax is None:
+                    g_xmax = max(all_vals) + 0.5
+    else:
+        g_xmin, g_xmax = xmin, xmax
+
+    # Total samples across all panels (for percentage in titles).
+    total_n = sum(
+        sum(len(v[0]) for v in pdata.values())
+        for _, pdata in panels
+    )
+
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(9 * ncols, 5 * nrows),
-                             squeeze=False)
+                             squeeze=False,
+                             sharey=True)
     axes_flat = axes.flatten()
+    # sharey hides y-tick labels on all but the leftmost column by default;
+    # restore them so every panel is self-contained.
+    for ax in axes_flat:
+        ax.tick_params(labelleft=True)
 
     for ax, (panel_title, data) in zip(axes_flat, panels):
-        _draw_on_ax(ax, data, plot_type, bw_adjust, xmin, xlabel, xmax=xmax)
+        _draw_on_ax(ax, data, plot_type, bw_adjust, g_xmin, xlabel, xmax=g_xmax)
         n_pts = sum(len(v[0]) for v in data.values()) if data else 0
-        ax.set_title(f"{panel_title}  (n={n_pts:,})", fontsize=11)
+        pct = 100.0 * n_pts / total_n if total_n > 0 else 0.0
+        ax.set_title(f"{panel_title}  ({pct:.1f}% of questions)", fontsize=11)
         _add_legend(ax, n_cols=max(1, len(data) // 20))
 
     # Hide any unused axes (shouldn't happen with correct panel count, but defensive)
