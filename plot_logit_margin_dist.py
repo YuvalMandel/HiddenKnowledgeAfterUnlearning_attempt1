@@ -332,12 +332,6 @@ def make_plot_grid(
     else:
         g_xmin, g_xmax = xmin, xmax
 
-    # Total samples across all panels (for percentage in titles).
-    total_n = sum(
-        sum(len(v[0]) for v in pdata.values())
-        for _, pdata in panels
-    )
-
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(9 * ncols, 5 * nrows),
                              squeeze=False,
@@ -350,9 +344,7 @@ def make_plot_grid(
 
     for ax, (panel_title, data) in zip(axes_flat, panels):
         _draw_on_ax(ax, data, plot_type, bw_adjust, g_xmin, xlabel, xmax=g_xmax)
-        n_pts = sum(len(v[0]) for v in data.values()) if data else 0
-        pct = 100.0 * n_pts / total_n if total_n > 0 else 0.0
-        ax.set_title(f"{panel_title}  ({pct:.1f}% of questions)", fontsize=11)
+        ax.set_title(panel_title, fontsize=11)
         _add_legend(ax, n_cols=max(1, len(data) // 20))
 
     # Hide any unused axes (shouldn't happen with correct panel count, but defensive)
@@ -879,15 +871,19 @@ def main():
                            title, xlabel, xmin, xmax)
         elif args.split_correct:
             panels = [
-                ("Correct",   _subset(lambda l: correct_masks[l])),
-                ("Incorrect", _subset(lambda l: ~correct_masks[l])),
+                ("Correct  (fraction varies per model)",
+                 _subset(lambda l: correct_masks[l])),
+                ("Incorrect  (fraction varies per model)",
+                 _subset(lambda l: ~correct_masks[l])),
             ]
             make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
                            title, xlabel, xmin, xmax)
         else:
             panels = [
-                ("Gold label: True",  _subset(lambda l: gold_mask)),
-                ("Gold label: False", _subset(lambda l: ~gold_mask)),
+                ("Gold label: True  (50% of questions by construction)",
+                 _subset(lambda l: gold_mask)),
+                ("Gold label: False  (50% of questions by construction)",
+                 _subset(lambda l: ~gold_mask)),
             ]
             make_plot_grid(panels, 1, 2, args.plot_type, out_path, args.bw_adjust,
                            title, xlabel, xmin, xmax)
