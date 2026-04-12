@@ -1566,6 +1566,7 @@ def main():
                     f"Models: {', '.join(models_to_show)}"
                 ),
                 normalize=normalize,
+                figsize=tuple(args.figsize) if args.figsize else None,
             )
         else:
             kfold_out = Path(args.out) if args.out else Path(
