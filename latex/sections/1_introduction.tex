@@ -1,0 +1,45 @@
+\section{Introduction}
+\label{sec:intro}
+
+Large language models (LLMs) trained on unfiltered, internet-scale corpora inevitably acquire knowledge spanning benign and hazardous domains alike, including dangerous fields like bio-weapons or cybersecurity, and copyrighted work that should not be included.
+As these models are deployed at scale, there is growing pressure to provide reliable
+\emph{machine unlearning} mechanisms: algorithms that selectively suppress dangerous knowledge without degrading general capabilities~\citep{dorna2025openunlearning}.
+
+A natural benchmark for evaluating unlearning is WMDP~\citep{li2024wmdp}, which
+provides multiple-choice questions spanning biosecurity and cybersecurity content.
+A model is considered to have ``forgotten'' when its accuracy on WMDP drops toward the random baseline.
+However, the accuracy of WMDP benchmark measures only one dimension of knowledge, what the model outputs.
+The question of whether the underlying \emph{knowledge representations} are genuinely erased is distinct and remains largely unexplored.
+
+Probing classifiers~\citep{gekhman2025insideout} offer an internal view by training classifiers directly on hidden-state activations, so we can test whether information about a concept remains decodable from internal representations even when the model's behavioral outputs no longer reveal it. If probes trained on hidden states of an unlearned model achieve high accuracy, those representations still encode the supposedly erased knowledge.
+
+In this paper, we perform a systematic probing study across eight state-of-the-art unlearning methods applied to \textsc{Llama-3-8B-Instruct} in the GAT project~\citep{che2025model}, evaluating on both the WMDP biosecurity dataset as the forget set and the WMDP cybersecurity dataset as the retain set.
+Our evaluation protocol combines generation scoring, logit-based scoring, and three families of probes trained on hidden states.
+Critically, we perform \emph{cross-probe transfer} experiments, applying base-model probes to unlearned hidden states and vice versa, to test whether representational geometry is preserved after unlearning.
+We also perform probe analysis over 8 different checkpoints made during the unlearning process, to view the changes in internal knowledge over the unlearning phases.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item We demonstrate that all eight unlearning methods produce models whose hidden
+    states remain probe-decodable on WMDP-bio with AUC 0.58--0.65, despite generation
+    accuracy dropping to near-random (38--52\%) or collapsing to gibberish (\cref{sec:exp-results}).
+
+    \item We compare per-layer probe accuracy across all 32 transformer layers,
+    identifying mid-to-late layers (12--22) as the most informative for knowledge encoding,
+    consistent with prior mechanistic interpretability work~\citep{meng2022locating}.
+
+    \item We show via cross-probe transfer that base-model probes fail on unlearned hidden
+    states (AUC $\approx$ 0.50), while method-specific probes remain effective, indicating
+    that unlearning \emph{shifts} the knowledge-encoding subspace rather than erasing it
+    (\cref{sec:cross-probe}).
+
+    \item We evaluate on WMDP-cyber, a domain \emph{not} targeted by any unlearning method,
+    finding that cyber probe accuracy is similarly preserved after bio-targeted unlearning,
+    demonstrating that representational preservation is domain-agnostic.
+    
+\end{itemize}
+
+\paragraph{Implications.}
+Our findings reveal a critical gap between the external and internal evaluation of LLM unlearning.
+Audits based solely on benchmark accuracy may miss latent risk: an adversary could potentially recover suppressed knowledge.
+This motivates a push toward unlearning methods that target internal activations directly, rather than only observable outputs.

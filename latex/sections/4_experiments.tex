@@ -1,0 +1,180 @@
+
+\section{Experiments}
+\label{sec:experiments}
+Setup is in \cref{sec:exp-setting}, results in \cref{sec:exp-results}, with
+extended results in the appendix.
+
+\subsection{Experimental Setting}
+\label{sec:exp-setting}
+
+All experiments use a fixed random seed of 42 for dataset shuffling and classifier
+initialization.
+Hidden states are extracted with a batch size of 8 on a single GPU.
+Probes are trained on CPU using scikit-learn~\citep{sklearn2011}.
+We use the final checkpoint (checkpoint 8) for every unlearning method.
+Reported metrics are averaged over the balanced True/False test set.
+
+\subsection{Experimental Results}
+\label{sec:exp-results}
+
+\paragraph{Generation and Logit Accuracy (WMDP-bio).}
+
+\Cref{tab:gen-logit} compares generation and logit-based accuracy across all models
+on the WMDP-bio test set.
+The base \textsc{Llama-3-8B-Instruct} achieves 68.2\% generation accuracy,
+confirming it has learned biosecurity-relevant knowledge.
+The raw pretrained \textsc{Llama-3-8B} (no instruction tuning) serves as a second
+reference point.
+All eight unlearned methods substantially reduce generation accuracy: GradDiff and
+RepNoise collapse to near 0\% (99.9\% and 88.4\% gibberish, respectively), while RMU,
+RMU-LAT, and TAR approach the 50\% random baseline, consistent with the intended goal
+of behavioral forgetting.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/hidden_knowledge_bar_auc_kfold.pdf}
+    \caption{AUC of hidden-state probes on WMDP-bio for the base model and all eight unlearned variants. Despite large drops in generation accuracy, probe AUC remains high across all methods, indicating that internal knowledge representations are largely preserved after unlearning.}
+    \label{fig:bar-auc-kfold}
+\end{figure}
+
+% ── TABLE 1 ──────────────────────────────────────────────────────────────────
+% SOURCE FILE: data/summary_table1_gen_logit.csv  (from Newton server)
+% Columns: Model | GenAcc | GenTrue | GenFalse | Gibberish | LogitAcc | LogitTrue | LogitFalse | LogitF1 | LogitAUC
+\begin{table}[H]
+\centering
+\caption{Generation and logit-based accuracy on WMDP-bio test set.
+``GenAcc'' = generation accuracy (valid responses only);
+``Gib'' = gibberish rate (no parseable True/False);
+``LogitAcc'' = accuracy from logit margin; ``True/False'' = per-class accuracy.
+Top rows are reference models; bottom rows are unlearned variants.}
+\label{tab:gen-logit}
+\setlength{\tabcolsep}{5pt}
+\small
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Model} & \textbf{GenAcc} & \textbf{GenTrue} & \textbf{GenFalse} & \textbf{Gib} & \textbf{LogitAcc} & \textbf{LogitTrue} & \textbf{LogitFalse} & \textbf{LogitAUC} \\
+\midrule
+\input{tables/table1_gen_logit}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Hidden-State Probes on WMDP-bio.}
+
+\Cref{tab:probes-bio} shows probe accuracy when classifiers are trained and tested on
+each model's own hidden states.
+Despite substantial drops in generation accuracy, probe accuracy remains consistently
+high across all unlearned models and all three classifier families.
+The best per-layer probes (selected on the validation set) typically achieve accuracy
+comparable to the base model, indicating that the hidden states retain
+knowledge-discriminative structure.
+Multi-layer probes (layers 12--22 with PCA-256) generally outperform single-layer
+probes, confirming that factual knowledge is distributed across a band of mid-to-late
+layers rather than being localized to a single layer.
+
+% ── TABLE 2 ──────────────────────────────────────────────────────────────────
+% SOURCE FILES: data/summary_table2_base_probes.csv  (base probes → all models)
+%               data/summary_table3_method_probes.csv (method probes → own states)
+% Columns: Model | LR-BestLayer | LR-Acc | RF-BestLayer | RF-Acc | Ada-BestLayer | Ada-Acc | ML-LR-Acc | ML-RF-Acc | ML-Ada-Acc
+\begin{table}[H]
+\centering
+\caption{Probe accuracy on WMDP-bio test set.
+\emph{Per-layer}: best layer selected on validation for each classifier.
+\emph{Multi-layer}: concatenated layers 12--22 with PCA-256.
+Probes are trained on each model's own train hidden states.}
+\label{tab:probes-bio}
+\setlength{\tabcolsep}{4pt}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{Per-Layer Accuracy}} & \multicolumn{3}{c}{\textbf{Multi-Layer Accuracy}} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+\textbf{Model} & \textbf{LR} & \textbf{RF} & \textbf{AdaBoost} & \textbf{LR} & \textbf{RF} & \textbf{AdaBoost} \\
+\midrule
+\input{tables/table2_probes_bio}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Cross-Probe Transfer.}
+\label{sec:cross-probe-results}
+
+\Cref{tab:cross-probe} shows the results of the cross-probe transfer protocol.
+\emph{Base $\to$ Method} measures whether the base model's knowledge-encoding
+directions transfer to unlearned model hidden states.
+\emph{Method $\to$ Base} measures the reverse.
+Near-chance accuracy in either direction indicates that unlearning substantially
+shifts the representational geometry, so the two models encode knowledge along
+different linear directions---even if each model's own probe remains above chance.
+
+% ── TABLE 3 ──────────────────────────────────────────────────────────────────
+% SOURCE FILE: data/summary_table5_cross_probes.csv
+\begin{table}[H]
+\centering
+\caption{Cross-probe transfer accuracy on WMDP-bio (best-layer LR and multi-layer LR).
+\emph{Base $\to$ Method}: base-model probe evaluated on unlearned hidden states.
+\emph{Method $\to$ Base}: unlearned-model probe evaluated on base hidden states.
+Near-chance values ($\approx$50\%) indicate the two models' knowledge-encoding subspaces
+are largely disjoint.}
+\label{tab:cross-probe}
+\small
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{\textbf{Base $\to$ Method}} & \multicolumn{2}{c}{\textbf{Method $\to$ Base}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Method} & \textbf{LR Acc} & \textbf{ML-LR Acc} & \textbf{LR Acc} & \textbf{ML-LR Acc} \\
+\midrule
+\input{tables/table3_cross_probe}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{WMDP-cyber Domain.}
+
+To assess whether the behavioral-vs.-representational gap is specific to the
+primary unlearning target (biosecurity), we repeat the analysis on WMDP-cyber.
+\Cref{tab:cyber} shows generation and probe accuracy for the cybersecurity domain.
+Since cyber is not an explicit target of any unlearning method, generation accuracy
+is generally higher than on bio for most methods.
+Nevertheless, the hidden-state probes remain highly accurate---confirming that the
+representational encoding of cybersecurity knowledge is similarly untouched by
+unlearning procedures designed for a different domain.
+
+% ── TABLE 4 ──────────────────────────────────────────────────────────────────
+% SOURCE FILE: data/summary_table4_cyber_gen_logit.csv
+%              data/summary_table4b_cyber_base_probes.csv
+%              data/summary_table4c_cyber_method_probes.csv
+\begin{table}[H]
+\centering
+\caption{Generation accuracy (valid responses) and probe accuracy on WMDP-cyber.
+Cyber is \emph{not} a target of any unlearning method.
+LogitAUC uses the logit margin as confidence; LR/RF/ML-LR probes are method-specific.}
+\label{tab:cyber}
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{GenAcc} & \textbf{LogitAUC} & \textbf{LR Acc} & \textbf{RF Acc} & \textbf{ML-LR Acc} \\
+\midrule
+\input{tables/table4_cyber}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Layer-Wise Probe Accuracy.}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/kfold_line_methods_auc_lr_all.pdf}
+    \caption{Per-layer LR probe AUC on WMDP-bio (5-fold CV mean). The $x$-axis shows transformer layer index (0 = embedding, 1--32 = transformer layers); the $y$-axis shows test AUC on the bio forget set. Dashed grey line at 50\% marks the chance baseline. Mid-to-late layers (12--22) are consistently most discriminative across all models.}
+    \label{fig:layer-probe-auc-bio}
+\end{figure}
+
+\paragraph{Probe AUC Across Checkpoints.}
+Figure~\ref{fig:heatmap-elm} shows probe AUC across the eight unlearning checkpoints for ELM, illustrating how internal knowledge evolves during the unlearning process. Despite progressive training, probe AUC remains well above chance throughout, confirming that the unlearning procedure does not erase the hidden-state representation of biosecurity knowledge. Heatmaps for all other methods are provided in Appendix~\ref{app:checkpoint-heatmaps}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_ELM.pdf}
+    \caption{LR probe AUC on WMDP-bio across unlearning checkpoints (1--8) for \textbf{ELM}. Rows are transformer layers (0--32); columns are checkpoints. AUC remains high throughout the unlearning process, indicating that internal biosecurity knowledge is not erased.}
+    \label{fig:heatmap-elm}
+\end{figure}
