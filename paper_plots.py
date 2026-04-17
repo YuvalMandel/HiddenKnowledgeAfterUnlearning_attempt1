@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 """
 Generate paper-quality plots for the Hidden Knowledge After Unlearning paper.
-Run from repo root on the Newton server: python paper_plots.py
+Run from repo root on the Newton server: python3 paper_plots.py
 Output: latex/imgs/*.pdf  (and *.png for preview)
 """
 
@@ -188,7 +189,7 @@ def plot_bio_cyber_comparison():
     ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels([TEX_LABELS.get(m, m) for m in methods], rotation=30, ha="right")
-    ax.set_ylabel("Probe AUC (ML-LR, layers 12–22)")
+    ax.set_ylabel("Probe AUC (ML-LR, layers 12-22)")
     ax.set_ylim(0.45, 0.85)
     ax.set_title("Bio vs. Cyber Probe AUC After Unlearning")
     ax.legend()
@@ -285,7 +286,7 @@ def plot_per_layer_lines():
                         alpha=0.07, color=c)
 
     ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8)
-    ax.axvspan(12, 22, alpha=0.06, color="blue", label="Mid band (12–22)")
+    ax.axvspan(12, 22, alpha=0.06, color="blue", label="Mid band (12-22)")
     ax.set_xlabel("Layer")
     ax.set_ylabel("LR Probe AUC (5-fold CV)")
     ax.set_xlim(0, 32)
