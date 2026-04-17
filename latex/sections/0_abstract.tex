@@ -1,0 +1,20 @@
+\begin{abstract}
+Current LLM unlearning evaluations rely on surface behavior (typically the model’s output). Prior work shows that factual, hidden knowledge may exist in internal representations of LLMs, and can be recovered either with tailored prompts or using hidden-state probes. As a result, current LLM unlearning evaluations can falsely conclude that a model has unlearned unwanted information when, in fact, it has only suppressed its output. This hidden knowledge can be unwanted and harmful.
+We investigate this idea by probing the hidden states of
+\textsc{Llama-3-8B-Instruct} and eight unlearned variants produced by distinct
+unlearning algorithms (GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, and PB\&J).
+Across two domains---WMDP-biosecurity (the forget set) and
+WMDP-cybersecurity (the retain set)---we train per-layer and multi-layer linear
+probes (Logistic Regression, Random Forest, AdaBoost) on hidden-state representations
+extracted from a True/False claim-verification task.
+Our results show that while unlearning reduces generation accuracy to near-random
+(38--52\%) or collapses responses to gibberish, hidden-state probe AUC remains
+0.58--0.65 across all eight methods, indicating that the internal knowledge
+representations are not erased.
+Cross-probe transfer experiments reveal that base-model probes fail on unlearned
+hidden states (AUC $\approx$ 0.50), while method-specific probes remain effective,
+showing that unlearning \emph{shifts} the knowledge-encoding subspace rather than
+erasing it.
+These findings suggest that current unlearning methods primarily suppress \emph{behavioral} outputs without achieving \emph{representational} erasure, posing a latent risk when adversaries can inspect model internals.
+A reference implementation is available at \href{https://github.com/YuvalMandel/HiddenKnowledgeAfterUnlearning_attempt1}{https://github.com/YuvalMandel/HiddenKnowledgeAfterUnlearning\_attempt1\includegraphics[height=1em]{imgs/github-mark.png}}.
+\end{abstract}

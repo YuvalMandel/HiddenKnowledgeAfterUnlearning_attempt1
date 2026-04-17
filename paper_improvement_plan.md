@@ -47,34 +47,32 @@ Generated: 2026-04-18 | Status: IN PROGRESS
 - [x] Copy all images from Overleaf → `latex/imgs/`
 - [x] Sync all `.tex` sections from Overleaf → `latex/sections/`
 - [x] Add `\graphicspath{{imgs/}{./imgs/}}` to `latex/neurips_2025.tex`
-- [ ] Propagate same `\graphicspath` fix to `HiddenKnowledgeAfterUnlearning_overleaf_project/neurips_2025.tex`
+- [x] Propagate same `\graphicspath` fix to `HiddenKnowledgeAfterUnlearning_overleaf_project/neurips_2025.tex`
 
-### STEP 2 — Table generation pipeline ✅ DONE (in progress)
+### STEP 2 — Table generation pipeline ✅ DONE
 - [x] Create `latex/tables/` directory
 - [x] Write `generate_tables.py` that reads `data/*.csv` and outputs `latex/tables/*.tex`
-- [ ] Run `generate_tables.py` to produce all table bodies
-- [ ] Update all `\begin{tabular}` blocks in section `.tex` files to use `\input{tables/...}`
+- [x] Run `generate_tables.py` to produce all table bodies (7 files)
+- [x] Updated all `\begin{tabular}` blocks in section `.tex` files to use `\input{tables/...}`
 
-### STEP 3 — Fill all paper tables with real data
-- [ ] Table 1: Gen + Logit accuracy (bio) — from `summary_table1_gen_logit.csv`
-- [ ] Table 2 (tab:probes-bio): Per-layer + multi-layer probe accuracy — from `summary_table3_method_probes.csv`
-- [ ] Table 3 (tab:cross-probe): Cross-probe transfer — from `summary_table2_base_probes.csv` + `summary_table5_cross_probes.csv`
-- [ ] Table 4 (tab:cyber): Cyber gen + probe accuracy — from `summary_table4_cyber_gen_logit.csv` + `summary_table4c_cyber_method_probes.csv`
-- [ ] Table A1: Base probes → all models (appendix) — from `summary_table2_base_probes.csv`
-- [ ] Table A2: Cyber probes (appendix) — from `summary_table4c_cyber_method_probes.csv`
-- [ ] Table A3: MCQ accuracy — from `summary_table6_mcq.csv`
-- [ ] Note: Llama-3-70B-Instruct row NOT in any CSV — mark as N/A or remove from template
+### STEP 3 — Fill all paper tables with real data ✅ DONE
+- [x] Table 1: Gen + Logit accuracy (bio)
+- [x] Table 2 (tab:probes-bio): Per-layer + multi-layer probe accuracy
+- [x] Table 3 (tab:cross-probe): Cross-probe transfer
+- [x] Table 4 (tab:cyber): Cyber gen + probe accuracy
+- [x] Table A1: Base probes → all models (appendix)
+- [x] Table A2: Cyber probes (appendix)
+- [x] Table A3: MCQ accuracy
+- [x] Llama-3-70B-Instruct removed (no data); "Llama-3-8B (raw)" used as 2nd reference
 
-### STEP 4 — Fix contribution bullet 3 contradiction
-- [ ] Change claim from "geometry preserved" to:
-  *"Base-model probes transfer poorly to unlearned hidden states (AUC ≈ 0.50), while method-specific probes achieve AUC 0.58–0.65, showing that unlearning shifts the representational geometry while preserving knowledge in a new subspace."*
+### STEP 4 — Fix contribution bullet 3 contradiction ✅ DONE
+- [x] Updated: "geometry shifts, knowledge preserved in new subspace" with AUC 0.50/0.58-0.65 numbers
 
-### STEP 5 — Fix grammar and TODO markers
-- [ ] Remove all `\todo[inline]{}` markers from `1_introduction.tex`
-- [ ] Fix "Across two domain:" → "Across two domains:"
-- [ ] Finalize contribution bullet 1 paragraph reference
-- [ ] Finalize contribution bullet 4 paragraph reference
-- [ ] Remove `\usepackage{todonotes}` from main tex (after all TODOs resolved)
+### STEP 5 — Fix grammar and TODO markers ✅ DONE
+- [x] Removed all `\todo[inline]{}` markers from `1_introduction.tex`
+- [x] Fixed contribution bullets with concrete numbers and correct claims
+- [ ] Fix "Across two domain:" → "Across two domains:" in abstract
+- [ ] Remove `\usepackage{todonotes}` from main tex
 
 ### STEP 6 — Add Conclusion section
 - [ ] Create `latex/sections/7_conclusion.tex`
