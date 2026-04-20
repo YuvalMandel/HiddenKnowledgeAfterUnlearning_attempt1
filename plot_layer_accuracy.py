@@ -1125,6 +1125,180 @@ def make_plot(checkpoint_dir: Path, out_path: Path,
 
 
 # ---------------------------------------------------------------------------
+# Data collection — compare mode (base vs method, two probe sources)
+# ---------------------------------------------------------------------------
+
+def collect_data_compare(checkpoint_dir: Path, method_name: str, clfs: list,
+                          y_test: np.ndarray, metrics: list,
+                          dataset: str = "bio",
+                          mask: np.ndarray | None = None) -> dict:
+    """
+    Returns data[metric][clf][label] = (layers, values) for three labels:
+      "Base (own probe)"       — base hs  evaluated by base probe
+      "{method} (own probe)"   — method ck8 hs evaluated by method's own probe
+      "{method} (base probe)"  — method ck8 hs evaluated by base probe
+    """
+    label_base  = "Base (own probe)"
+    label_own   = f"{method_name} (own probe)"
+    label_cross = f"{method_name} (base probe)"
+
+    data = {m: {clf: {} for clf in clfs} for m in metrics}
+
+    # Load base probe set — needed for both the base curve and the cross-probe curve.
+    base_probe_set = load_probe_set("base", checkpoint_dir, dataset)
+    if base_probe_set is None:
+        probe_label = "base_cyber_probes.pkl" if dataset == "cyber" else "base_probes.pkl"
+        raise RuntimeError(f"{probe_label} not found — run --stage base first.")
+
+    # --- 1. Base model hidden states + base probe ---
+    print("  Loading Base (Instruct) ...")
+    base_hs = load_hs("base", checkpoint_dir, dataset)
+    if base_hs is not None:
+        base_y = load_cyber_y_test_methods(checkpoint_dir) if dataset == "cyber" else y_test
+        hs_eff = base_hs[mask] if mask is not None else base_hs
+        y_eff  = base_y[mask]  if mask is not None else base_y
+        for metric in metrics:
+            for clf_name in clfs:
+                pairs = per_layer_metric(base_probe_set, hs_eff, y_eff,
+                                         clf_name, metric=metric, layer_start=1)
+                if pairs:
+                    ls, vs = zip(*pairs)
+                    data[metric][clf_name][label_base] = (list(ls), list(vs))
+        del base_hs
+        gc.collect()
+
+    # --- 2 & 3. Method ck8 hidden states (own probe + base probe) ---
+    print(f"  Loading {method_name} ck8 ...")
+    method_hs = load_hs_ck(method_name, 8, checkpoint_dir, dataset)
+    if method_hs is None:
+        print(f"  [warn] ck8 hidden states for {method_name} not found — lines 2 & 3 skipped.")
+        return data
+
+    hs_eff = method_hs[mask] if mask is not None else method_hs
+    y_eff  = y_test[mask]    if mask is not None else y_test
+
+    # Line 2: method ck8 hs + method's own probe
+    method_probe_set = load_probe_set_ck(method_name, 8, checkpoint_dir, dataset)
+    if method_probe_set is not None:
+        for metric in metrics:
+            for clf_name in clfs:
+                pairs = per_layer_metric(method_probe_set, hs_eff, y_eff,
+                                         clf_name, metric=metric, layer_start=1)
+                if pairs:
+                    ls, vs = zip(*pairs)
+                    data[metric][clf_name][label_own] = (list(ls), list(vs))
+
+    # Line 3: method ck8 hs + base probe (cross-probe)
+    for metric in metrics:
+        for clf_name in clfs:
+            pairs = per_layer_metric(base_probe_set, hs_eff, y_eff,
+                                     clf_name, metric=metric, layer_start=1)
+            if pairs:
+                ls, vs = zip(*pairs)
+                data[metric][clf_name][label_cross] = (list(ls), list(vs))
+
+    del method_hs
+    gc.collect()
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Plot — compare mode
+# ---------------------------------------------------------------------------
+
+def make_plot_compare(checkpoint_dir: Path, out_path: Path,
+                       method_name: str, clf_filter: list, metric: str | None,
+                       data_dir: Path = DATA_DIR, dataset: str = "bio",
+                       figsize: tuple | None = None):
+    """
+    Plot 3 per-layer probe curves for a single method:
+      1. Base model  — own probe  (solid blue, thick)
+      2. Method ck8  — own probe  (solid, method colour)
+      3. Method ck8  — base probe (dashed, method colour)
+    This directly visualises the behavioural-vs-representational gap:
+    line 2 shows the method still encodes knowledge; line 3 shows
+    whether the geometry has shifted relative to the base model.
+    """
+    print(f"\n=== Compare mode: {method_name} ({dataset}) ===")
+    if dataset == "cyber":
+        y_test = load_cyber_y_test_sweep()
+    else:
+        csv_path = data_dir / "wmdp_tf_pairs.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"WMDP CSV not found at {csv_path}.")
+        y_test = load_y_test(csv_path)
+
+    clfs            = clf_filter if clf_filter else CLF_NAMES
+    metrics_to_plot = [metric] if metric else METRIC_NAMES
+
+    data = collect_data_compare(checkpoint_dir, method_name, clfs,
+                                 y_test, metrics_to_plot, dataset)
+
+    label_base  = "Base (own probe)"
+    label_own   = f"{method_name} (own probe)"
+    label_cross = f"{method_name} (base probe)"
+    all_labels  = [label_base, label_own, label_cross]
+
+    base_color   = MODEL_COLORS["Base (Instruct)"]
+    method_color = MODEL_COLORS.get(method_name, "#888888")
+
+    line_styles = {
+        label_base:  {"color": base_color,   "lw": 2.4, "ls": "-",  "zorder": 4},
+        label_own:   {"color": method_color,  "lw": 1.8, "ls": "-",  "zorder": 3},
+        label_cross: {"color": method_color,  "lw": 1.8, "ls": "--", "zorder": 2},
+    }
+
+    row_ymax = {}
+    for m in metrics_to_plot:
+        mx = Y_MIN
+        for clf_data in data[m].values():
+            for _, vals in clf_data.values():
+                if vals:
+                    mx = max(mx, max(vals))
+        row_ymax[m] = min(mx * (1 + Y_PAD), 1.0)
+
+    n_rows = len(metrics_to_plot)
+    n_clfs = len(clfs)
+    fig, axes = plt.subplots(
+        n_rows, n_clfs,
+        figsize=figsize if figsize else (7 * n_clfs, 4.5 * n_rows),
+        sharey="row",
+        squeeze=False,
+    )
+    fig.suptitle(
+        f"{method_name} — Per-Layer Probe: Own vs. Cross-Probe  [{dataset.upper()}]",
+        fontsize=10, x=0.5, ha="center",
+    )
+
+    for row_idx, m in enumerate(metrics_to_plot):
+        for ax_idx, clf_name in enumerate(clfs):
+            ax = axes[row_idx][ax_idx]
+            _setup_ax(ax, row_idx, ax_idx, n_rows,
+                      clf_name if n_clfs > 1 else None, m)
+            ax.set_ylim(Y_MIN, row_ymax[m])
+            clf_data = data[m].get(clf_name, {})
+            for label in all_labels:
+                if label not in clf_data:
+                    continue
+                layers, vals = clf_data[label]
+                s = line_styles[label]
+                ax.plot(layers, vals, color=s["color"], linewidth=s["lw"],
+                        linestyle=s["ls"], zorder=s["zorder"])
+
+    legend_handles = [
+        mlines.Line2D([], [], color=line_styles[l]["color"],
+                      linewidth=line_styles[l]["lw"],
+                      linestyle=line_styles[l]["ls"], label=l)
+        for l in all_labels if any(l in data[m].get(clf, {})
+                                    for m in metrics_to_plot for clf in clfs)
+    ]
+    legend_labels = [h.get_label() for h in legend_handles]
+
+    _finalize_figure(fig, axes, legend_handles, legend_labels, n_clfs, out_path)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Plot — checkpoints mode (one method across training checkpoints)
 # ---------------------------------------------------------------------------
 
@@ -1356,8 +1530,15 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--mode", choices=["methods", "checkpoints"], default="methods",
-        help="Plot mode (default: methods).",
+        "--mode", choices=["methods", "checkpoints", "compare"], default="methods",
+        help=(
+            "Plot mode (default: methods).\n"
+            "  methods      — all models at final checkpoint\n"
+            "  checkpoints  — one method across training checkpoints\n"
+            "  compare      — 3 lines: base+own-probe, method-ck8+own-probe, "
+            "method-ck8+base-probe\n"
+            "                 Requires --method METHOD."
+        ),
     )
     parser.add_argument(
         "--plot_type", choices=["line", "heatmap"], default="line",
@@ -1593,6 +1774,31 @@ def main():
             normalize=normalize,
             cyber_subset=cyber_subset,
         ).with_suffix(out_ext)
+
+    # ── compare mode ─────────────────────────────────────────────────────────
+    if args.mode == "compare":
+        if args.method is None:
+            parser.error("--mode compare requires --method METHOD.")
+        methods = SWEEP_METHODS if args.method == "all" else [args.method]
+        for method in methods:
+            if method not in SWEEP_METHODS:
+                parser.error(f"Unknown method '{method}'. "
+                             f"Choose from: {', '.join(SWEEP_METHODS)}")
+            file_out = (
+                base_out.parent / f"{base_out.stem}_{_safe_name(method)}{base_out.suffix}"
+                if len(methods) > 1 else base_out
+            )
+            make_plot_compare(
+                checkpoint_dir=checkpoint_dir,
+                out_path=file_out,
+                method_name=method,
+                clf_filter=clf_filter,
+                metric=args.metric,
+                data_dir=data_dir,
+                dataset=dataset,
+                figsize=tuple(args.figsize) if args.figsize else None,
+            )
+        return
 
     # ── methods mode ─────────────────────────────────────────────────────────
     if args.mode == "methods":
