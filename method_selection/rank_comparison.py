@@ -98,7 +98,7 @@ def print_rank_table(clf: str, counts: pd.DataFrame, rho: float, acc: float) -> 
     print(hdr)
     print(f"  {'-'*56}")
     for _, row in counts.iterrows():
-        flag = " ✓" if row["actual_rank"] == row["predicted_rank"] else ""
+        flag = " *" if row["actual_rank"] == row["predicted_rank"] else ""
         print(f"  {row['method']:<12} {int(row['actual_wins']):>8} {int(row['actual_rank']):>8}"
               f" {int(row['predicted_wins']):>9} {int(row['predicted_rank']):>9}{flag}")
     print()
