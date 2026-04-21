@@ -1,0 +1,212 @@
+{
+  "deletion_vs_suppression": {
+    "description": "deletion vs suppression preset.",
+    "weights": {
+      "RE": 1.0,
+      "FrozenRecovery": 0.0,
+      "RetrainedRecovery": 0.0,
+      "RecoveryGain": 0.0,
+      "SuppressionPenalty": -1.0
+    },
+    "tie_break": [
+      "SuppressionPenalty", 
+      "RE"
+    ]
+  },
+  "pure_RecoveryGain": {
+    "description": "pure RecoveryGain preset.",
+    "weights": {
+      "RE": 0.0,
+      "FrozenRecovery": 0.0,
+      "RetrainedRecovery": 0.0,
+      "RecoveryGain": -1.0,
+      "SuppressionPenalty": 0.0
+    },
+    "tie_break": [
+      "RE"
+    ]
+  },
+  "pure_SuppressionPenalty": {
+    "description": "pure SuppressionPenalty preset.",
+    "weights": {
+      "RE": 0.0,
+      "FrozenRecovery": 0.0,
+      "RetrainedRecovery": 0.0,
+      "RecoveryGain": 0.0,
+      "SuppressionPenalty": -1.0
+    },
+    "tie_break": [
+      "RE"
+    ]
+  },
+
+  "pure_RetrainedRecovery": {
+    "description": "pure RetrainedRecovery preset.",
+    "weights": {
+      "RE": 0.0,
+      "FrozenRecovery": 0.0,
+      "RetrainedRecovery": -1.0,
+      "RecoveryGain": 0.0,
+      "SuppressionPenalty": 0.0
+    },
+    "tie_break": [
+      "RE"
+    ]
+  },
+
+  "pure_FrozenRecovery": {
+    "description": "pure FrozenRecovery preset.",
+    "weights": {
+      "RE": 0.0,
+      "FrozenRecovery": -1.0,
+      "RetrainedRecovery": 0.0,
+      "RecoveryGain": 0.0,
+      "SuppressionPenalty": 0.0
+    },
+    "tie_break": [
+      "RE"
+    ]
+  },
+
+  "pure_RE": {
+      "description": "pure RE preset.",
+      "weights": {
+        "RE": 1.0,
+        "FrozenRecovery": 0.0,
+        "RetrainedRecovery": 0.0,
+        "RecoveryGain": 0.0,
+        "SuppressionPenalty": 0.0
+      },
+      "tie_break": [
+        "FrozenRecovery"
+      ]
+  },
+
+  "deletion_first": {
+    "description": "Current default RE/recovery-first durable deletion preset.",
+    "weights": {
+      "RE": 0.4,
+      "FrozenRecovery": -0.2,
+      "RetrainedRecovery": -0.25,
+      "RecoveryGain": -0.1,
+      "SuppressionPenalty": -0.05
+    },
+    "tie_break": [
+      "RetrainedRecovery",
+      "FrozenRecovery",
+      "method_order"
+    ]
+  },
+  "recovery_min_first": {
+    "description": "Stronger penalty on recovery terms, especially retrained recovery.",
+    "weights": {
+      "RE": 0.2,
+      "FrozenRecovery": -0.25,
+      "RetrainedRecovery": -0.35,
+      "RecoveryGain": -0.15,
+      "SuppressionPenalty": -0.05
+    },
+    "tie_break": [
+      "RetrainedRecovery",
+      "FrozenRecovery",
+      "method_order"
+    ]
+  },
+  "surface_pragmatic": {
+    "description": "Allows practical surface suppression to matter more by reducing suppression penalty magnitude.",
+    "weights": {
+      "RE": 0.45,
+      "FrozenRecovery": -0.18,
+      "RetrainedRecovery": -0.22,
+      "RecoveryGain": -0.1,
+      "SuppressionPenalty": -0.02
+    },
+    "tie_break": [
+      "RetrainedRecovery",
+      "FrozenRecovery",
+      "method_order"
+    ]
+  },
+  "retraining_averse": {
+    "description": "Penalizes retrained recovery most strongly.",
+    "weights": {
+      "RE": 0.25,
+      "FrozenRecovery": -0.15,
+      "RetrainedRecovery": -0.4,
+      "RecoveryGain": -0.15,
+      "SuppressionPenalty": -0.05
+    },
+    "tie_break": [
+      "RetrainedRecovery",
+      "FrozenRecovery",
+      "method_order"
+    ]
+  },
+  "conservative": {
+    "description": "More conservative penalty structure against recovery and gain.",
+    "weights": {
+      "RE": 0.3,
+      "FrozenRecovery": -0.2,
+      "RetrainedRecovery": -0.3,
+      "RecoveryGain": -0.15,
+      "SuppressionPenalty": -0.05
+    },
+    "tie_break": [
+      "RetrainedRecovery",
+      "FrozenRecovery",
+      "method_order"
+    ]
+  },
+  "late_band_deletion": {
+    "description": "Phase 1 experimental preset. Emphasizes late-band erasure and positive late-vs-mid deletion contrast while penalizing late-band retrained recovery.",
+    "feature_weights": {
+      "RE_auc_late": 0.45,
+      "RE_auc_mid": 0.15,
+      "RE_late_minus_mid": 0.2,
+      "RE_late_minus_early": 0.1,
+      "retrained_recovery_late": -0.1
+    },
+    "normalize": true,
+    "tie_break": [
+      "retrained_recovery_mean",
+      "frozen_recovery_mean",
+      "method_order"
+    ]
+  },
+  "band_stability_first": {
+    "description": "Phase 1 experimental preset. Rewards deletion while penalizing cross-band instability and frozen-vs-retrained disagreement.",
+    "feature_weights": {
+      "RE_signal": 0.3,
+      "frozen_recovery_mean": -0.15,
+      "retrained_recovery_mean": -0.2,
+      "recovery_gain_mean": -0.1,
+      "leakage_proxy": -0.05,
+      "RE_band_std": -0.08,
+      "retrained_band_std": -0.06,
+      "frozen_retrained_disagree_fraction": -0.06
+    },
+    "normalize": true,
+    "tie_break": [
+      "retrained_recovery_mean",
+      "frozen_recovery_mean",
+      "method_order"
+    ]
+  },
+  "disagreement_guarded": {
+    "description": "Phase 1 experimental preset. Rewards deletion but penalizes disagreement and recovery-unlock structure more strongly than the baseline presets.",
+    "feature_weights": {
+      "RE_signal": 0.3,
+      "retrained_recovery_mean": -0.22,
+      "recovery_gain_mean": -0.15,
+      "frozen_retrained_disagree_fraction": -0.18,
+      "recovery_unlock_count": -0.1,
+      "leakage_proxy": -0.05
+    },
+    "normalize": true,
+    "tie_break": [
+      "retrained_recovery_mean",
+      "frozen_recovery_mean",
+      "method_order"
+    ]
+  }
+}
