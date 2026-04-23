@@ -125,36 +125,50 @@ def main():
             f"Available columns: {list(df.columns)}"
         )
 
-    weight_path = os.path.join(
+    weight_png = os.path.join(
         args.out_dir,
         f"scatter_weightDR_{args.y_expr}_vs_{args.x_expr}_{args.re_metric}_{tag}.png",
     )
-    score_path = os.path.join(
+    score_png = os.path.join(
         args.out_dir,
         f"scatter_scoreDR_{args.y_expr}_vs_{args.x_expr}_{args.re_metric}_{tag}.png",
+    )
+    # Simplified PDF names for paper inclusion
+    weight_pdf = os.path.join(args.out_dir, "re_dr_scatter_weight.pdf")
+    score_pdf  = os.path.join(args.out_dir, "re_dr_scatter_score.pdf")
+
+    weight_title = (
+        f"Weight-space DR: {args.y_expr} vs {args.x_expr}\n"
+        f"({args.re_metric.upper()}, {tag}, n={len(df)} methods)"
+    )
+    score_title = (
+        f"Score-space DR: {args.y_expr} vs {args.x_expr}\n"
+        f"({args.re_metric.upper()}, {tag}, n={len(df)} methods)"
     )
 
     make_scatter(
         df.rename(columns={x_weight_col: args.x_expr, y_re_col: args.y_expr}),
         x_col=args.x_expr, y_col=args.y_expr,
-        out_path=weight_path,
-        title=(
-            f"Weight-space DR: {args.y_expr} vs {args.x_expr}\n"
-            f"({args.re_metric.upper()}, {tag}, n={len(df)} methods)"
-        ),
+        out_path=weight_png, title=weight_title,
+    )
+    make_scatter(
+        df.rename(columns={x_weight_col: args.x_expr, y_re_col: args.y_expr}),
+        x_col=args.x_expr, y_col=args.y_expr,
+        out_path=weight_pdf, title=weight_title,
     )
 
     make_scatter(
         df.rename(columns={x_score_col: args.x_expr, y_re_col: args.y_expr}),
         x_col=args.x_expr, y_col=args.y_expr,
-        out_path=score_path,
-        title=(
-            f"Score-space DR: {args.y_expr} vs {args.x_expr}\n"
-            f"({args.re_metric.upper()}, {tag}, n={len(df)} methods)"
-        ),
+        out_path=score_png, title=score_title,
+    )
+    make_scatter(
+        df.rename(columns={x_score_col: args.x_expr, y_re_col: args.y_expr}),
+        x_col=args.x_expr, y_col=args.y_expr,
+        out_path=score_pdf, title=score_title,
     )
 
-    print(f"\nDone. Both scatter plots saved to {args.out_dir}/")
+    print(f"\nDone. Scatter plots saved to {args.out_dir}/")
 
 
 if __name__ == "__main__":

@@ -139,9 +139,10 @@ def main():
     print(f"\nLoaded {len(df)} rows across bands: {sorted(df['band'].unique())}")
     print(df[["band", "model", "accuracy_mean", "accuracy_ci95_low", "accuracy_ci95_high"]].to_string(index=False))
 
-    out_path = os.path.join(args.out_dir, "method_identification_by_band.png")
-    make_bar_plot(df, out_path)
-    print(f"\nDone. Plot saved to {out_path}")
+    for ext in ["pdf", "png"]:
+        out_path = os.path.join(args.out_dir, f"method_identification_by_band.{ext}")
+        make_bar_plot(df, out_path)
+    print(f"\nDone. Plots saved to {args.out_dir}/method_identification_by_band.{{pdf,png}}")
 
 
 if __name__ == "__main__":
