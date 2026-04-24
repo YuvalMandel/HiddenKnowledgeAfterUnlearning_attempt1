@@ -69,7 +69,7 @@ def make_bar_plot(df: pd.DataFrame, out_path: str) -> None:
     width = 0.72 / n_models
     offsets = np.linspace(-(n_models - 1) / 2, (n_models - 1) / 2, n_models) * width
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(13, 5.5))
 
     for i, model in enumerate(models):
         sub = df[df["model"] == model].set_index("band")
@@ -78,7 +78,6 @@ def make_bar_plot(df: pd.DataFrame, out_path: str) -> None:
             if band in sub.index:
                 heights.append(float(sub.loc[band, "accuracy_mean"]))
                 ci_lo = float(sub.loc[band, "accuracy_ci95_low"])
-                ci_hi = float(sub.loc[band, "accuracy_ci95_high"])
                 errs.append(float(sub.loc[band, "accuracy_mean"]) - ci_lo)
             else:
                 heights.append(float("nan"))
@@ -86,7 +85,7 @@ def make_bar_plot(df: pd.DataFrame, out_path: str) -> None:
 
         bars = ax.bar(
             x + offsets[i], heights, width,
-            yerr=errs, capsize=4,
+            yerr=errs, capsize=3,
             color=MODEL_COLORS.get(model, "#999999"),
             label=MODEL_LABELS.get(model, model),
             alpha=0.85, edgecolor="white", linewidth=0.5,
@@ -96,31 +95,34 @@ def make_bar_plot(df: pd.DataFrame, out_path: str) -> None:
             if not np.isnan(h):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
-                    h + 0.01,
+                    h + 0.008,
                     f"{h:.2f}",
-                    ha="center", va="bottom", fontsize=8,
+                    ha="center", va="bottom", fontsize=7,
                 )
 
     ax.axhline(CHANCE, color="black", linestyle="--", linewidth=1.2,
                label=f"Chance (1/8 = {CHANCE:.2f})")
     ax.set_xticks(x)
-    ax.set_xticklabels([BAND_LABELS.get(b, b) for b in BANDS], fontsize=11)
-    ax.set_ylabel("Method Identification Accuracy", fontsize=12)
-    ax.set_xlabel("Feature Space (Hidden-State Band)", fontsize=12)
+    ax.set_xticklabels([BAND_LABELS.get(b, b) for b in BANDS], fontsize=8)
+    ax.tick_params(axis="y", labelsize=7)
+    ax.set_ylabel("Method identification accuracy", fontsize=8)
+    ax.set_xlabel("Feature space (hidden-state band)", fontsize=8)
     ax.set_title(
         "Method Identification from Raw Hidden States\n"
         "(train: 100 val rows/method, test: full test set)",
-        fontsize=12,
+        fontsize=9,
     )
-    ax.set_ylim(0, 1.08)
-    ax.legend(fontsize=9, loc="upper left")
-    ax.grid(axis="y", alpha=0.25)
+    ax.set_ylim(0, 1.10)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.legend(fontsize=7, loc="upper left")
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=220)
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved: {out_path}")
 
 

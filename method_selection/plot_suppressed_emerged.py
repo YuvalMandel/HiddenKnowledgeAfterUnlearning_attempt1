@@ -191,65 +191,73 @@ def main() -> None:
               "n_emerged", "n_consistent", "n_both_wrong"]].to_string(index=False))
 
     # ── Stacked bar plot ──────────────────────────────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
 
     methods_disp = [METHOD_DISPLAY.get(r["method"], r["method"]) for _, r in df.iterrows()]
     x = np.arange(len(df))
-    width = 0.6
+    width = 0.55
 
-    # Left: absolute counts
-    ax = axes[0]
     ns  = df["n_suppressed"].values
     ne  = df["n_emerged"].values
     nc  = df["n_consistent"].values
     nbw = df["n_both_wrong"].values
 
-    b1 = ax.bar(x, ns,  width, label="Suppressed",  color=QUAD_COLORS["Suppressed"],  alpha=0.88)
-    b2 = ax.bar(x, nbw, width, bottom=ns,         label="Both-wrong",  color=QUAD_COLORS["Both-wrong"],  alpha=0.88)
-    b3 = ax.bar(x, nc,  width, bottom=ns+nbw,     label="Consistent",  color=QUAD_COLORS["Consistent"],  alpha=0.88)
-    b4 = ax.bar(x, ne,  width, bottom=ns+nbw+nc,  label="Emerged",     color=QUAD_COLORS["Emerged"],     alpha=0.88)
+    # Left: absolute counts
+    ax = axes[0]
+    ax.bar(x, ns,             width, label="Suppressed",  color=QUAD_COLORS["Suppressed"],  alpha=0.88)
+    ax.bar(x, nbw, width, bottom=ns,         label="Both-wrong",  color=QUAD_COLORS["Both-wrong"],  alpha=0.88)
+    ax.bar(x, nc,  width, bottom=ns+nbw,     label="Consistent",  color=QUAD_COLORS["Consistent"],  alpha=0.88)
+    ax.bar(x, ne,  width, bottom=ns+nbw+nc,  label="Emerged",     color=QUAD_COLORS["Emerged"],     alpha=0.88)
 
-    ax.set_xticks(x); ax.set_xticklabels(methods_disp, fontsize=9, rotation=15, ha="right")
-    ax.set_ylabel("Question Count", fontsize=11)
-    ax.set_title("Suppressed/Emerged Breakdown\n(probe correct in both models)", fontsize=11)
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(axis="y", alpha=0.2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods_disp, fontsize=7, rotation=20, ha="right")
+    ax.tick_params(axis="y", labelsize=7)
+    ax.set_ylabel("Question count", fontsize=8)
+    ax.set_title("Absolute counts", fontsize=9)
+    ax.legend(fontsize=7, loc="upper right")
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
     # Right: percentages within doubly-correct set
     ax2 = axes[1]
     total = ns + ne + nc + nbw
-    total = np.where(total == 0, 1, total)  # avoid /0
+    total = np.where(total == 0, 1, total)
     pct_s  = 100 * ns  / total
     pct_bw = 100 * nbw / total
     pct_c  = 100 * nc  / total
     pct_e  = 100 * ne  / total
 
     ax2.bar(x, pct_s,  width, label="Suppressed",  color=QUAD_COLORS["Suppressed"],  alpha=0.88)
-    ax2.bar(x, pct_bw, width, bottom=pct_s,        label="Both-wrong",  color=QUAD_COLORS["Both-wrong"],  alpha=0.88)
-    ax2.bar(x, pct_c,  width, bottom=pct_s+pct_bw, label="Consistent",  color=QUAD_COLORS["Consistent"],  alpha=0.88)
-    ax2.bar(x, pct_e,  width, bottom=pct_s+pct_bw+pct_c, label="Emerged", color=QUAD_COLORS["Emerged"],  alpha=0.88)
+    ax2.bar(x, pct_bw, width, bottom=pct_s,              label="Both-wrong",  color=QUAD_COLORS["Both-wrong"],  alpha=0.88)
+    ax2.bar(x, pct_c,  width, bottom=pct_s+pct_bw,       label="Consistent",  color=QUAD_COLORS["Consistent"],  alpha=0.88)
+    ax2.bar(x, pct_e,  width, bottom=pct_s+pct_bw+pct_c, label="Emerged",     color=QUAD_COLORS["Emerged"],     alpha=0.88)
 
-    ax2.set_xticks(x); ax2.set_xticklabels(methods_disp, fontsize=9, rotation=15, ha="right")
-    ax2.set_ylabel("% within doubly-correct set", fontsize=11)
-    ax2.set_title("Relative Breakdown (%)", fontsize=11)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(methods_disp, fontsize=7, rotation=20, ha="right")
+    ax2.tick_params(axis="y", labelsize=7)
+    ax2.set_ylabel("% within doubly-correct set", fontsize=8)
+    ax2.set_title("Normalized (%)", fontsize=9)
     ax2.set_ylim(0, 105)
-    ax2.grid(axis="y", alpha=0.2)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax2.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+    ax2.set_axisbelow(True)
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)
 
-    plt.suptitle(
-        "Behavioral Outcomes for Questions Where Probe Succeeds in Both Base and Unlearned Model",
-        fontsize=12, y=1.01,
+    fig.suptitle(
+        "Behavioral Outcomes for Questions Where Probe Succeeds in Both Base and Unlearned Model\n"
+        "(filtered to doubly-detectable questions; logit-based generation proxy)",
+        fontsize=9,
     )
-    plt.tight_layout()
+    fig.tight_layout()
 
     for ext in ["pdf", "png"]:
         out = os.path.join(args.out_dir, f"suppressed_emerged.{ext}")
-        plt.savefig(out, dpi=220, bbox_inches="tight")
+        fig.savefig(out, dpi=300, bbox_inches="tight")
         print(f"Saved: {out}")
-    plt.close()
+    plt.close(fig)
     print("Done.")
 
 

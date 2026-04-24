@@ -121,12 +121,9 @@ def main() -> None:
     base_hs = np.load(CHECKPOINTS_DIR / "base_hs_test.npy")
     base_on_base = apply_probes_per_layer(base_probes, base_hs, y_test)
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(13, 5.5))
 
-    # Reference: base method probe AUC from kfold vs base probe on base states
-    kfold_base = kfold_aucs.get("base", {})  # might not exist
-    # Just plot the delta=0 reference
-    ax.axhline(0, color="black", linestyle="--", linewidth=1.2, label="No recovery (delta=0)")
+    ax.axhline(0, color="black", linestyle="--", linewidth=1.2, label="No recovery (Δ=0)")
 
     for method in METHODS:
         print(f"  Processing {method}...")
@@ -136,10 +133,7 @@ def main() -> None:
             continue
         method_hs = np.load(hs_path)
 
-        # Base probe applied to this method's hidden states
         base_on_method = apply_probes_per_layer(base_probes, method_hs, y_test)
-
-        # Method probe AUC from kfold (mean over folds)
         method_auc = kfold_aucs.get(method, {})
 
         delta_x, delta_y = [], []
@@ -153,26 +147,32 @@ def main() -> None:
         color = METHOD_COLORS.get(method, "#333333")
         ax.plot(delta_x, delta_y,
                 label=METHOD_DISPLAY.get(method, method),
-                color=color, linewidth=1.5, alpha=0.9)
+                color=color, linewidth=1.4, alpha=0.9)
 
-    ax.set_xlabel("Transformer Layer", fontsize=12)
-    ax.set_ylabel(r"$\Delta$ AUC (Method Probe $-$ Base Probe on Method States)", fontsize=11)
+    # shade mid band
+    ax.axvspan(12, 22, alpha=0.06, color="steelblue")
+
+    ax.set_xlabel("Transformer Layer", fontsize=8)
+    ax.set_ylabel(r"$\Delta$ AUC (method probe $-$ frozen base probe, on method states)", fontsize=8)
     ax.set_title(
-        f"Per-Layer Probe Recovery: How Much Does Re-Training the Probe Help?\n"
-        f"({args.clf}, evaluated on each method's own test hidden states)",
-        fontsize=12,
+        f"Per-Layer Probe Recovery: Method-Specific vs. Frozen Base Probe ({args.clf})\n"
+        "Positive = re-training the probe recovers AUC that the frozen base probe misses",
+        fontsize=9,
     )
-    ax.legend(fontsize=9, ncol=2, loc="upper left")
-    ax.grid(True, alpha=0.2)
+    ax.tick_params(axis="both", labelsize=7)
+    ax.legend(fontsize=7, ncol=2, loc="upper left")
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.set_xlim(0, 32)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    plt.tight_layout()
+    fig.tight_layout()
 
     for ext in ["pdf", "png"]:
         out = os.path.join(args.out_dir, f"probe_delta_per_layer.{ext}")
-        plt.savefig(out, dpi=220)
+        fig.savefig(out, dpi=300, bbox_inches="tight")
         print(f"Saved: {out}")
-    plt.close()
+    plt.close(fig)
     print("Done.")
 
 
