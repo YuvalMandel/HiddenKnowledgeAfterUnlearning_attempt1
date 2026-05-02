@@ -445,24 +445,26 @@ def _probe_one(
     do_cv: bool,
     do_cross: bool,
     hs_base, splits_base, correct_idx_base, ext_base,
+    cv_only: bool = False,
 ) -> list:
     records = []
 
-    res = _train_and_score(hs, hs, correct_idx, tr, te, lc, clf_name, va)
-    gap, p_val, is_hk = hidden_knowledge_test(res["k_internal"], k_ext)
-    for i, qi in enumerate(te):
-        records.append({
-            "model_id": model_id, "domain": domain,
-            "clf": clf_name, "layer_config": lc,
-            "probe_type": "own", "split_type": "single", "fold": -1,
-            "question_idx": int(qi),
-            "k_internal": float(res["k_internal"][i]),
-            "k_external": float(k_ext[i]),
-            "test_auc": res["test_auc"], "val_auc": res["val_auc"],
-            "ext_auc": ext_auc,
-            "hk_gap": gap, "hk_pval": p_val,
-            "is_hidden_knowledge": is_hk,
-        })
+    if not cv_only:
+        res = _train_and_score(hs, hs, correct_idx, tr, te, lc, clf_name, va)
+        gap, p_val, is_hk = hidden_knowledge_test(res["k_internal"], k_ext)
+        for i, qi in enumerate(te):
+            records.append({
+                "model_id": model_id, "domain": domain,
+                "clf": clf_name, "layer_config": lc,
+                "probe_type": "own", "split_type": "single", "fold": -1,
+                "question_idx": int(qi),
+                "k_internal": float(res["k_internal"][i]),
+                "k_external": float(k_ext[i]),
+                "test_auc": res["test_auc"], "val_auc": res["val_auc"],
+                "ext_auc": ext_auc,
+                "hk_gap": gap, "hk_pval": p_val,
+                "is_hidden_knowledge": is_hk,
+            })
 
     if do_cv:
         all_tv = np.concatenate([tr, va])
@@ -487,7 +489,7 @@ def _probe_one(
                     "is_hidden_knowledge": False,
                 })
 
-    if do_cross and hs_base is not None:
+    if do_cross and not cv_only and hs_base is not None:
         res_b2m = _train_and_score(
             hs_base, hs, correct_idx,
             splits_base["train"], te, lc, clf_name,
@@ -541,6 +543,7 @@ def stage_probe(
     do_cross: bool = True,
     n_jobs: int = 1,
     out_suffix: str = "",
+    cv_only: bool = False,
 ) -> None:
     from joblib import Parallel, delayed
 
@@ -602,6 +605,7 @@ def stage_probe(
                 hs, correct_idx, tr, va, te, k_ext,
                 ext_auc, do_cv, do_cross,
                 hs_base, splits_base, correct_idx_base, ext_base,
+                cv_only,
             )
             for clf_name in active_clfs
             for lc in active_lcs
@@ -856,6 +860,137 @@ def stage_aggregate(include_embedding: bool = False) -> None:
     )
     hk_table.to_csv(OUT_DIR / "hidden_knowledge_significance.csv", index=False)
     print(f"Saved hidden_knowledge_significance.csv.")
+
+    # ── CV Plots ──────────────────────────────────────────────────────────────
+    if not cv.empty:
+        cv_summary[["method", "checkpoint"]] = pd.DataFrame(
+            cv_summary["model_id"].map(parse_model_id).tolist(), index=cv_summary.index)
+
+        # Plot 4: Per-layer K CV mean ± std (one line per method, final checkpoint)
+        for domain in DOMAINS:
+            for clf_name in CLF_NAMES:
+                sub = cv_summary[
+                    (cv_summary["domain"] == domain) &
+                    (cv_summary["clf"] == clf_name) &
+                    (cv_summary["probe_type"] == "own") &
+                    (cv_summary["layer_config"].str.startswith("layer_"))
+                ].copy()
+                if sub.empty: continue
+                sub["layer"] = sub["layer_config"].str.replace("layer_", "").astype(int)
+                if not include_embedding:
+                    sub = sub[sub["layer"] > 0]
+                if sub.empty: continue
+
+                fig, ax = plt.subplots(figsize=(5.5, 3.5))
+                base_s = sub[sub["model_id"] == "base"].sort_values("layer")
+                ax.plot(base_s["layer"], base_s["cv_k_mean"],
+                        color="black", linewidth=2.0, label="Base", zorder=5)
+                ax.fill_between(base_s["layer"],
+                                base_s["cv_k_mean"] - base_s["cv_k_std"],
+                                base_s["cv_k_mean"] + base_s["cv_k_std"],
+                                alpha=0.15, color="black")
+
+                for method in METHODS:
+                    ms = sub[(sub["method"] == method) &
+                             (sub["checkpoint"] == N_CHECKPOINTS)].sort_values("layer")
+                    if ms.empty: continue
+                    color = METHOD_COLORS.get(method, "grey")
+                    ax.plot(ms["layer"], ms["cv_k_mean"],
+                            color=color, linewidth=1.2, label=method)
+                    ax.fill_between(ms["layer"],
+                                    ms["cv_k_mean"] - ms["cv_k_std"],
+                                    ms["cv_k_mean"] + ms["cv_k_std"],
+                                    alpha=0.12, color=color)
+
+                ax.axhline(0.5, color="black", linestyle="--", linewidth=0.8,
+                           label="Chance (0.5)")
+                ax.axvspan(12, 22, alpha=0.06, color="steelblue")
+                ax.set_xlabel("Layer", fontsize=8)
+                ax.set_ylabel("K (CV mean ± std)", fontsize=8)
+                ax.set_title(f"Per-Layer K Score (5-Fold CV) — {domain} [{clf_name}]", fontsize=9)
+                ax.tick_params(labelsize=7)
+                ax.legend(fontsize=6, ncol=2, loc="upper left")
+                x_start = 0 if include_embedding else 1
+                ax.set_xlim(x_start, N_LAYERS - 1)
+                ax.set_ylim(0.2, 1.05)
+                ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.7)
+                ax.set_axisbelow(True)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                fig.tight_layout()
+                for ext in ("pdf", "png"):
+                    fig.savefig(PLOT_DIR / f"per_layer_k_cv_{domain}_{clf_name}.{ext}",
+                                dpi=300, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  Saved per_layer_k_cv_{domain}_{clf_name}")
+
+        # Plot 5: Checkpoint heatmaps using CV mean K (X=layer, Y=checkpoint)
+        for domain in DOMAINS:
+            base_layer_cv = cv_summary[
+                (cv_summary["domain"] == domain) &
+                (cv_summary["method"] == "base") &
+                (cv_summary["clf"] == "LR") &
+                (cv_summary["probe_type"] == "own") &
+                (cv_summary["layer_config"].str.startswith("layer_"))
+            ].copy()
+            if not base_layer_cv.empty:
+                base_layer_cv["layer"] = base_layer_cv["layer_config"].str.replace("layer_", "").astype(int)
+                if not include_embedding:
+                    base_layer_cv = base_layer_cv[base_layer_cv["layer"] > 0]
+                base_layer_cv["checkpoint"] = 0
+
+            pivots_cv = {}
+            for method in METHODS:
+                sub = cv_summary[
+                    (cv_summary["domain"] == domain) &
+                    (cv_summary["method"] == method) &
+                    (cv_summary["clf"] == "LR") &
+                    (cv_summary["probe_type"] == "own") &
+                    (cv_summary["layer_config"].str.startswith("layer_"))
+                ].copy()
+                if sub.empty: continue
+                sub["layer"] = sub["layer_config"].str.replace("layer_", "").astype(int)
+                if not include_embedding:
+                    sub = sub[sub["layer"] > 0]
+                if sub.empty: continue
+                if not base_layer_cv.empty:
+                    sub = pd.concat([base_layer_cv, sub], ignore_index=True)
+                pivot = sub.pivot_table(index="checkpoint", columns="layer",
+                                        values="cv_k_mean", aggfunc="mean")
+                if not pivot.empty:
+                    pivots_cv[method] = pivot
+
+            if not pivots_cv: continue
+            all_vals_cv = np.concatenate([p.values.ravel() for p in pivots_cv.values()])
+            all_vals_cv = all_vals_cv[~np.isnan(all_vals_cv)]
+            vmin_cv = float(all_vals_cv.min())
+            vmax_cv = float(all_vals_cv.max())
+
+            for method, pivot in pivots_cv.items():
+                n_layers_plot = len(pivot.columns)
+                n_ckpts       = len(pivot.index)
+                fig, ax = plt.subplots(figsize=(max(7, n_layers_plot * 0.28), max(2.5, n_ckpts * 0.45)))
+                im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn",
+                               vmin=vmin_cv, vmax=vmax_cv, origin="lower",
+                               interpolation="nearest")
+                ax.set_xticks(range(n_layers_plot))
+                ax.set_xticklabels(pivot.columns.astype(int), fontsize=6, rotation=90)
+                ax.set_yticks(range(n_ckpts))
+                ax.set_yticklabels(
+                    ["base" if int(c) == 0 else f"ck{int(c)}" for c in pivot.index],
+                    fontsize=7)
+                ax.set_xlabel("Layer", fontsize=8)
+                ax.set_ylabel("Checkpoint", fontsize=8)
+                ax.set_title(f"K Score CV Mean (LR) — {method} {domain}", fontsize=9)
+                fig.colorbar(im, ax=ax, label="K_internal (CV mean)", shrink=0.85,
+                             format="%.2f")
+                fig.tight_layout()
+                for ext in ("pdf", "png"):
+                    fig.savefig(PLOT_DIR / f"ckpt_k_cv_{domain}_{method}.{ext}",
+                                dpi=300, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  Saved ckpt_k_cv_{domain}_{method}")
+
     print("Aggregate done.")
 
 
@@ -877,6 +1012,8 @@ def main() -> None:
                     help="Layer configs to probe (default: all)")
     ap.add_argument("--no_cv",           action="store_true",
                     help="Skip 5-fold cross-validation")
+    ap.add_argument("--cv_only",         action="store_true",
+                    help="Only save CV fold rows (skip single-split); implies do_cv=True")
     ap.add_argument("--no_cross_probe",  action="store_true",
                     help="Skip cross-probe (base↔method)")
     ap.add_argument("--n_jobs",          type=int, default=1,
@@ -904,10 +1041,11 @@ def main() -> None:
             domains=args.domains,
             clfs=args.clfs,
             lcs=lcs,
-            do_cv=not args.no_cv,
+            do_cv=not args.no_cv or args.cv_only,
             do_cross=not args.no_cross_probe,
             n_jobs=args.n_jobs,
             out_suffix=args.out_suffix,
+            cv_only=args.cv_only,
         )
     elif args.stage == "aggregate":
         stage_aggregate(include_embedding=args.include_embedding)
