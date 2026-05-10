@@ -25,5 +25,5 @@ Thumbs.db
 
 *.png
 npy_files.tar.gz
-*.npy
+# *.npy tracked via Git LFS — not ignored
 

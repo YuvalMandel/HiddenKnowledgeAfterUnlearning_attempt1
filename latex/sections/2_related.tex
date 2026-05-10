@@ -1,0 +1,67 @@
+\section{Related Work \& Background}
+\label{sec:related}
+
+\paragraph{Machine Unlearning for LLMs.}
+Machine unlearning was originally studied to remove specific training examples from
+model memory for privacy reasons~\citep{cao2015towards}.
+For LLMs, the goal has shifted toward \emph{concept-level forgetting}: suppressing
+entire knowledge domains (biosecurity, copyrighted content) rather than individual
+data points~\citep{liu2024rethinking}.
+Methods differ in their optimization objective.
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+\item\emph{Gradient Difference} (GradDiff)~\citep{yao2023large} maximizes loss on forget
+data while minimizing deviation on retain data.
+\item\emph{Representation Mismatch Unlearning} (RMU)~\citep{li2024wmdp} disrupts the
+internal representations of forget-domain inputs by steering them toward those of
+random noise.
+\item\emph{Representation Noising} (RepNoise)~\citep{rosati2024representation} injects
+structured noise into the representations of harmful content during fine-tuning.
+\item\emph{reinforcement-based forgetting} (RR)
+\item\emph{task-aware regularization} (TAR)
+\item\emph{latent-space adversarial perturbation} (RMU-LAT)
+\item\emph{ensemble lifelong management} (ELM) 
+\item\emph{preference-based forgetting} (PB\&J)
+\end{itemize}
+These eight methods are collected in the LLM-GAT evaluation suite~\citep{llmgat2024},
+which provides standardized checkpoints fine-tuned from \textsc{Llama-3-8B-Instruct}.
+
+\paragraph{The WMDP Benchmark.}
+WMDP~\citep{li2024wmdp} is a multiple-choice benchmark covering biosecurity,
+cybersecurity, and chemical weapon domains, designed to measure machine unlearning.
+Successful unlearning is indicated by accuracy falling toward the random baseline
+(25\% for 4-choice, 50\% for True/False).
+Prior work using WMDP focuses exclusively on generation-level accuracy;
+our contribution is to complement this with a hidden-state perspective.
+
+\paragraph{Probing Classifiers.}
+Probing classifiers~\citep{alain2017understanding} are shallow models---typically
+logistic regression---trained on intermediate neural representations to test whether
+a property is linearly decodable from activations.
+Probing has revealed that syntactic structure is encoded in lower
+layers~\citep{hewitt2019structural}, while factual associations are concentrated in
+mid-to-late layers~\citep{meng2022locating}.
+Most relevant to our work, \citet{levi2025jailbreak} showed that compliance-relevant
+directions extracted from jailbreak initializations are linearly decodable, and
+\citet{zou2023representation} demonstrated that safety-relevant concepts can be
+represented as linear directions in activation space.
+We apply probing to the question of whether unlearning erases or merely suppresses
+these directions.
+
+\paragraph{Representation Engineering and Activation Steering.}
+\citet{zou2023representation} introduced \emph{representation engineering}, showing
+that model behavior can be reliably modified by reading from or writing to specific
+linear directions in activation space.
+Related work on activation steering~\citep{turner2023activation} demonstrates that
+hidden-state interventions can substantially change model outputs.
+Taken together, this body of work implies that behavioral suppression via gradient
+fine-tuning may leave underlying representational geometry intact---a hypothesis our
+experiments directly test.
+
+\paragraph{Knowledge Localization and Editing.}
+A parallel line of work uses causal tracing~\citep{meng2022locating} and
+gradient-based editing~\citep{meng2022mass} to identify and modify factual
+associations within specific MLP layers.
+These findings suggest that knowledge is encoded in localized, modifiable structures.
+Unlearning methods that do not explicitly target these structures may therefore
+produce only superficial behavioral changes, leaving the encoded knowledge intact
+for a sufficiently capable readout.

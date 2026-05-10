@@ -1,0 +1,133 @@
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Models}
+
+\paragraph{Base Model.}
+Our base model is \textsc{Llama-3-8B-Instruct}~\citep{dubey2024llama}, a 32-layer
+transformer with hidden dimension $H=4096$.
+We extract hidden states from all 33 positions (embedding layer output + 32
+transformer layers), yielding tensors of shape $(N, 33, 4096)$.
+
+\paragraph{Unlearned Models.}
+We evaluate eight variants of the base model produced by the LLM-GAT
+benchmark~\citep{llmgat2024}:
+GradDiff, RMU, RMU-LAT, RepNoise, ELM, RR, TAR, and PB\&J.
+All are fine-tuned from the same \textsc{Llama-3-8B-Instruct} checkpoint using
+checkpoint 8 (the final unlearning checkpoint from each method).
+We additionally include the non-instruction-tuned \textsc{Llama-3-8B} (raw
+pre-trained) and \textsc{Llama-3-70B-Instruct} as reference points for the range
+of behavioral accuracy achievable without unlearning.
+
+\subsection{Datasets}
+
+\paragraph{WMDP-bio (Forget Set).}
+We use the WMDP biosecurity subset~\citep{li2024wmdp}, which contains 1,273
+multiple-choice questions.
+After shuffling with a fixed random seed (42), we split into
+500 training / 200 validation / 573 test questions.
+Unlearned models explicitly target this domain.
+
+\paragraph{WMDP-cyber (Cybersecurity).}
+We use a balanced True/False dataset derived from WMDP cybersecurity questions,
+stored as a CSV with one correct and one incorrect answer per question.
+Splits: 500 training / 200 validation / ${\sim}$40k test pairs.
+This domain is \emph{not} the primary unlearning target, allowing us to assess
+whether behavioral suppression and representational preservation generalize beyond
+the targeted domain.
+
+\subsection{True/False Prompt Format}
+
+We reframe the multiple-choice task as binary claim verification.
+Each question--answer pair is converted to a claim: \emph{"The answer to
+`\textlangle question\textrangle' is `\textlangle choice\textrangle'."\/}
+The model is asked to label it True or False.
+We use a debiased system prompt:
+\begin{quote}
+    \emph{``You are a critical fact-checker. Answer True or False.
+    True and False are equally likely. Do not explain.''}
+\end{quote}
+For the non-instruct \textsc{Llama-3-8B} reference model, we use a plain-text
+few-shot completion prompt with two examples establishing the True/False pattern,
+rather than the chat template.
+This symmetric format prevents acquiescence bias and ensures balanced class labels.
+
+\subsection{Hidden-State Extraction}
+
+Prompts are tokenized with left-padding (batch size 8, max length 512 tokens).
+For each batch, we record the hidden state at the \emph{last non-padding token}
+from every layer, identified via the attention mask.
+A critical implementation detail: \textsc{Llama-3}'s tokenizer assigns
+$\texttt{pad\_token\_id} = \texttt{eos\_token\_id} = 128009$~(\texttt{<|eot\_id|>}),
+which also appears as the \emph{final} token of the chat template.
+We therefore use $\texttt{attention\_mask} = 0$ (not token identity) to detect
+padding, and extract the last-token hidden state at position $N-1$ for
+left-padded batches, where $N$ is the padded sequence length.
+
+\subsection{Probe Architecture}
+\label{sec:probe-arch}
+
+\paragraph{Per-Layer Probes.}
+For each of the 33 layers we train three independent classifiers:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \textbf{LR}: StandardScaler $\to$ LogisticRegression
+          ($\text{max\_iter}=1000$, $C=1.0$, no dimensionality reduction).
+    \item \textbf{RF}: StandardScaler $\to$
+          RandomForest (100 estimators, \texttt{random\_state=42}; full $H{=}4096$ dimensions, no PCA).
+    \item \textbf{AdaBoost}: StandardScaler $\to$
+          AdaBoost (100 decision stumps, \texttt{random\_state=42}; full $H{=}4096$ dimensions, no PCA).
+\end{itemize}
+The best layer per classifier family is selected independently on the validation
+set for each model.
+
+\paragraph{Multi-Layer Probes.}
+Hidden states from layers 12--22 (11 layers) are concatenated to form an
+$(N, 11{\times}4096)$ feature matrix.
+We apply StandardScaler $\to$ PCA-256 before training LR, RF, and AdaBoost
+classifiers.
+Layers 12--22 cover the mid-to-late range where factual knowledge is most linearly
+separable in decoder-only transformers~\citep{meng2022locating}.
+
+\paragraph{Ensemble Probes.}
+Two ensemble strategies combine all per-layer probes in the range 12--22:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \textbf{Vote ensemble}: majority vote across layers (predict 1 if $>50\%$
+    of layers in the window vote positive).
+    \item \textbf{Avg ensemble}: average predicted probabilities across layers,
+    threshold at 0.5.
+\end{itemize}
+
+\subsection{Evaluation Protocol}
+
+\paragraph{Generation Accuracy.}
+Each model generates up to 64 tokens; we extract the first occurrence of ``True''
+or ``False'' via regex and compare to the ground-truth label.
+We report accuracy, per-class accuracy (true/false), and gibberish rate (no
+parseable label found).
+
+\paragraph{Logit Score.}
+At the final prompt token position we extract raw logits.
+A pair is classified as ``True'' if $\max_{j \in \mathcal{T}}\ell_j > \max_{k \in
+\mathcal{F}}\ell_k$, where $\mathcal{T}$ and $\mathcal{F}$ are the token-id sets
+for the words ``True'' and ``False'' respectively.
+We report accuracy, per-class accuracy, F1, and AUC (using the logit margin as a
+confidence score).
+
+\paragraph{Probe Accuracy.}
+Probes are evaluated on the held-out test split.
+We report accuracy, true-class accuracy, false-class accuracy, F1, and AUC.
+
+\paragraph{Cross-Probe Transfer.}
+\label{sec:cross-probe}
+To assess whether unlearning preserves representational geometry, we apply probes
+trained on one model's hidden states to another model's test hidden states:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \emph{Base probes $\to$ Method states}: probes trained on the base model's
+    training hidden states, evaluated on the unlearned model's test hidden states.
+    High accuracy implies the base model's knowledge-encoding directions are present
+    in the unlearned representations.
+    \item \emph{Method probes $\to$ Base states}: probes trained on the unlearned
+    model's training hidden states, evaluated on the base model's test hidden states.
+    High accuracy implies the unlearned model encodes knowledge in directions
+    compatible with those of the base model.
+\end{itemize}

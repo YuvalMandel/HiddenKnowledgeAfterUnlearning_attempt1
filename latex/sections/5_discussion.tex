@@ -1,0 +1,94 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Behavioral Suppression vs.\ Representational Erasure.}
+Our central finding is a consistent gap between behavioral and representational
+evidence of forgetting.
+All eight unlearned models show substantial drops in generation and logit-based
+accuracy on WMDP-bio, suggesting successful behavioral suppression.
+However, probes trained on the corresponding hidden states continue to classify
+the forget domain with high accuracy.
+This gap indicates that current gradient-based unlearning methods do not erase
+knowledge representations---they primarily modify the model's \emph{output mapping}
+from those representations to generated text.
+Concretely, the model still encodes ``which answer is biologically correct'' in
+mid-to-late layer activations, but suppresses this information before it reaches
+the output layer.
+
+\paragraph{Method Differences.}
+Not all methods are equally effective at behavioral suppression, nor do they
+differ uniformly in their representational impact.
+Some methods (e.g., RMU, RMU-LAT) are specifically designed to disrupt internal
+representations by steering them toward noise, and may therefore show slightly
+lower probe accuracy than methods based purely on output-level gradient differences
+(e.g., GradDiff).
+Full rankings are reported in \cref{tab:probes-bio}.
+Even the most representation-targeted method, however, does not close the gap to
+random chance for probes, suggesting that current representation-disruption
+objectives are insufficient to fully erase knowledge.
+
+\paragraph{Cross-Probe Transfer.}
+The high cross-probe accuracy in both directions (\emph{Base $\to$ Method} and
+\emph{Method $\to$ Base}) provides strong evidence that unlearning does not
+substantially alter the linear geometry of knowledge-encoding directions.
+A probe trained entirely on base model hidden states transfers to unlearned model
+hidden states with minimal accuracy drop, meaning the same linear subspace that
+discriminates biosecurity knowledge in the base model remains discriminative after
+unlearning.
+This is consistent with the view that gradient-based unlearning fine-tunes the
+logit-generation pathway (later MLP weights and the unembedding matrix) while
+leaving earlier representational layers relatively intact.
+
+\paragraph{Domain Generalization.}
+The WMDP-cyber results reveal that representational preservation is not confined to
+the explicit unlearning target.
+Cybersecurity knowledge, which is not a target of any of the eight methods, shows a
+similar pattern: generation accuracy is largely preserved (as expected), and so is
+probe accuracy.
+This confirms that the phenomenon is not an artifact of the specific forget domain.
+
+\paragraph{Implications for Safety Evaluation.}
+Current safety evaluations of unlearned LLMs rely almost entirely on behavioral
+benchmarks such as WMDP accuracy.
+Our results demonstrate that such evaluations can be misleading: a model may appear
+to have forgotten on behavioral metrics while retaining the knowledge in its internal
+representations.
+An adversary with white-box access (e.g., a researcher testing a shared model
+checkpoint, or an insider with API access to activations) could potentially build
+a probe on a small set of labeled examples and use it to extract suppressed knowledge.
+This motivates the development of \emph{representational} unlearning methods and
+corresponding representational auditing protocols as a complement to behavioral
+benchmarks.
+
+\paragraph{Limitations.}
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \emph{Model family.} We study a single model family (Llama-3-8B-Instruct)
+    and a single set of unlearning checkpoints.
+    Whether the findings generalize to other architectures (e.g., Mistral, Gemma)
+    or unlearning implementations remains open.
+
+    \item \emph{Probe complexity.} Our probes are shallow (logistic regression,
+    random forest, AdaBoost).
+    The fact that such simple probes already achieve high accuracy suggests the
+    knowledge is linearly decodable; more complex probes could only do better.
+
+    \item \emph{True/False framing.} We evaluate on a claim-verification
+    reformulation of WMDP rather than the original multiple-choice format.
+    Generation accuracy on this framing may differ from the standard MCQ
+    accuracy reported in the original WMDP leaderboard.
+
+    \item \emph{No adaptive adversary.} We consider a non-adaptive probe---one
+    trained on a fixed small labeled set.
+    An adaptive adversary with access to more resources or knowledge of the model
+    internals might achieve even higher accuracy.
+\end{itemize}
+
+\paragraph{Future Work.}
+Future work should develop unlearning objectives that explicitly minimize probe
+accuracy (not just generation accuracy), e.g., by adversarially training a probe
+simultaneously with the unlearning optimizer.
+Mechanistic studies of \emph{which} weight structures encode the forget-domain
+knowledge---using causal tracing~\citep{meng2022locating} applied to the unlearning
+setting---could guide more targeted erasure.
+Finally, representational auditing protocols analogous to behavioral benchmarks
+would provide a more complete picture of unlearning effectiveness.
