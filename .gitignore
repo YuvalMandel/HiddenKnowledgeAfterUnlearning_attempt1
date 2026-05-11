@@ -24,6 +24,7 @@ monitor.sh
 Thumbs.db
 
 *.png
+!plots/ckpt_k_subset_heatmap/*.png
 npy_files.tar.gz
 # *.npy tracked via Git LFS — not ignored
 
