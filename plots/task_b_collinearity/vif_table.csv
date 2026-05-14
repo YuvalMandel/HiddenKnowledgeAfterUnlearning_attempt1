@@ -1,0 +1,9 @@
+feature,R2,VIF
+min_probe_probability_margin,0.8162,5.44
+correct_option_confidence,0.7092,3.44
+mean_kint_layers,0.6384,2.77
+min_pairwise_sigmoid_margin,0.6367,2.75
+std_kint_layers,0.6053,2.53
+max_distractor_confidence,0.5003,2.0
+earliest_layer_kint1,0.3331,1.5
+rank_alignment,0.0196,1.02
