@@ -27,3 +27,28 @@ Thumbs.db
 npy_files.tar.gz
 *.npy
 
+
+# Large HPC output directories
+checkpoints/
+inside_out_out/
+inside_out_logs/
+pca_output/
+pca_viz*/
+re_dr_outputs*/
+dr_scale_outputs/
+dual_confidence_outputs/
+dual_confidence_inputs/
+method_selection_out/
+stats/
+
+# Root-level generated PDFs and logs
+/*.pdf
+zip_*.log
+
+# Scratch/temp scripts
+download_missing*.py
+make_scatter.py
+run_redr.sh
+zip_npy.sh
+inside_out_kext_quick.py
+inside_out_kint_quick.py
