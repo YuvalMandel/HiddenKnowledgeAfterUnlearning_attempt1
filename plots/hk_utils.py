@@ -46,7 +46,7 @@ def compute_prefilter_mask(te, orig_to_pos, df):
     base_single = df[
         (df["model_id"] == "base")
         & (df["split_type"] == "single")
-        & (df["layer_config"] == "multi")
+        & (df["layer_config"] == "full")
         & (df["clf"] == "LR")
         & (df["domain"] == "bio")
     ][["question_idx", "k_internal", "k_external"]]
@@ -77,16 +77,33 @@ def compute_k_int_from_proba(proba_arr, correct_idx, qidx):
     return k
 
 
-def get_parquet_multi_single(df):
+def get_parquet_full_single(df):
     return df[
         (df["domain"] == "bio")
         & (df["clf"] == "LR")
-        & (df["layer_config"] == "multi")
+        & (df["layer_config"] == "full")
         & (df["split_type"] == "single")
     ][["model_id", "question_idx", "k_internal", "k_external"]]
 
 
+def get_parquet_multi_single(df):
+    """Kept for backward compatibility — prefer get_parquet_full_single."""
+    return get_parquet_full_single(df)
+
+
+def get_cv_full_df(df):
+    """CV folds for the full-layer (all-33-layer) probe — primary K_int source."""
+    return df[
+        (df["split_type"] == "cv")
+        & (df["domain"] == "bio")
+        & (df["clf"] == "LR")
+        & (df["probe_type"] == "own")
+        & (df["layer_config"] == "full")
+    ].copy()
+
+
 def get_cv_layer_df(df):
+    """Per-layer CV data (kept for reference; use get_cv_full_df for K_int)."""
     sub = df[
         (df["split_type"] == "cv")
         & (df["domain"] == "bio")
@@ -98,7 +115,7 @@ def get_cv_layer_df(df):
     return sub
 
 
-def get_method_ck8_labels(method, correct_idx, filt_te, filt_orig_to_pos, parquet_multi_single):
+def get_method_ck8_labels(method, correct_idx, filt_te, filt_orig_to_pos, parquet_full_single):
     fname = method_fname(method)
     ext_path = EXT_DIR / f"{fname}_ck8_bio_ext.npy"
     if not ext_path.exists():
@@ -106,7 +123,7 @@ def get_method_ck8_labels(method, correct_idx, filt_te, filt_orig_to_pos, parque
     mk_ext = compute_k_ext(np.load(ext_path), correct_idx, filt_te)
 
     model_id = f"{fname}_ck8"
-    mk_int_rows = parquet_multi_single[parquet_multi_single["model_id"] == model_id][
+    mk_int_rows = parquet_full_single[parquet_full_single["model_id"] == model_id][
         ["question_idx", "k_internal"]
     ]
     if not mk_int_rows.empty:
@@ -115,7 +132,7 @@ def get_method_ck8_labels(method, correct_idx, filt_te, filt_orig_to_pos, parque
             pos = filt_orig_to_pos.get(int(row["question_idx"]))
             if pos is not None:
                 mk_int[pos] = float(row["k_internal"])
-        k_int_source = "multi-LR"
+        k_int_source = "full-LR"
     else:
         proba_path = EXT_DIR / f"{fname}_ck8_bio_int_proba.npy"
         if not proba_path.exists():
