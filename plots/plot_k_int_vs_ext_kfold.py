@@ -152,6 +152,43 @@ base_out = os.path.join(os.path.dirname(__file__), "k_int_vs_ext_kfold")
 fig.savefig(base_out + ".pdf", bbox_inches="tight")
 fig.savefig(base_out + ".png", dpi=150, bbox_inches="tight")
 print(f"\nSaved: {base_out}.pdf / .png")
+plt.close(fig)
+
+# Single-panel version (Mean K only) for paper Figure 1
+col_i, col_e, title, ylabel = PANELS[0]
+vi   = data[col_i].values * 100
+ve   = data[col_e].values * 100
+vi_e = data[f"{col_i}_std"].values * 100
+ve_e = data[f"{col_e}_std"].values * 100
+
+fig1, ax1 = plt.subplots(figsize=(7, 4.2))
+ax1.bar(x - w/2, vi, width=w, color=INT_COLOR, alpha=0.88,
+        label=r"$K_\mathrm{int}$ (probe, best layer)", zorder=3,
+        yerr=vi_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
+ax1.bar(x + w/2, ve, width=w, color=EXT_COLOR, alpha=0.88,
+        label=r"$K_\mathrm{ext}$ (logit margin)", zorder=3,
+        yerr=ve_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
+ax1.axhline(50, color="black", linestyle="--", linewidth=0.9, alpha=0.45, zorder=2)
+ax1.set_xticks(x)
+ax1.set_xticklabels(labels, rotation=38, ha="right", fontsize=9)
+ax1.set_ylabel(r"Mean pairwise $K$ score (%)", fontsize=9)
+ax1.set_ylim(0, 110)
+ax1.tick_params(labelsize=8.5)
+ax1.spines["top"].set_visible(False)
+ax1.spines["right"].set_visible(False)
+ax1.grid(axis="y", linestyle=":", linewidth=0.6, alpha=0.55, zorder=0)
+ax1.set_axisbelow(True)
+ax1.legend(fontsize=8.5, loc="upper right")
+for xi, v, se in zip(x - w/2, vi, vi_e):
+    ax1.text(xi, v + se + 1.5, f"{v:.1f}", ha="center", va="bottom", fontsize=6.5, color=INT_COLOR)
+for xi, v, se in zip(x + w/2, ve, ve_e):
+    ax1.text(xi, v + se + 1.5, f"{v:.1f}", ha="center", va="bottom", fontsize=6.5, color=EXT_COLOR)
+fig1.tight_layout()
+single_out = os.path.join(os.path.dirname(__file__), "k_int_vs_ext_kfold_single")
+fig1.savefig(single_out + ".pdf", bbox_inches="tight")
+fig1.savefig(single_out + ".png", dpi=150, bbox_inches="tight")
+print(f"Saved: {single_out}.pdf / .png")
+plt.close(fig1)
 
 # Summary table
 print(f"\n{'Model':<12} {'Layer':<10} {'K_int':>10} {'K_ext':>10}  {'Acc_int':>10} {'Acc_ext':>10}  {'AUC_int':>10} {'AUC_ext':>10}")
