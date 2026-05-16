@@ -42,18 +42,18 @@ Standard behavioural benchmarks report only K_ext and cannot detect these questi
 
 **Four-subset counts at ck8 (312 pre-filtered questions):**
 
-| Method   | Retained | Suppressed | Forgotten | Lucky | %Supp |
-|----------|:--------:|:----------:|:---------:|:-----:|------:|
-| GradDiff |   215    |     71     |    16     |  10   | 23.1% |
-| RMU      |   146    |     54     |    54     |  58   | 17.6% |
-| RMU-LAT  |   170    |     53     |    41     |  48   | 17.3% |
-| RepNoise |   118    |    107     |    49     |  38   | 34.9% |
-| ELM      |   169    |     82     |    26     |  35   | 26.7% |
-| RR       |   171    |     62     |    31     |  48   | 20.2% |
-| TAR      |   163    |     79     |    42     |  28   | 25.7% |
-| PB&J     |   142    |     71     |    48     |  51   | 23.1% |
+| Method   | Retained | Suppressed | Forgotten | Lucky |
+|----------|:--------:|:----------:|:---------:|:-----:|
+| GradDiff | 68.9%(215) | 22.8%(71) | 5.1%(16) | 3.2%(10) |
+| RMU      | 46.8%(146) | 17.3%(54) | 17.3%(54) | 18.6%(58) |
+| RMU-LAT  | 54.5%(170) | 17.0%(53) | 13.1%(41) | 15.4%(48) |
+| RepNoise | 37.8%(118) | 34.3%(107) | 15.7%(49) | 12.2%(38) |
+| ELM      | 54.2%(169) | 26.3%(82) | 8.3%(26)  | 11.2%(35) |
+| RR       | 54.8%(171) | 19.9%(62) | 9.9%(31)  | 15.4%(48) |
+| TAR      | 52.2%(163) | 25.3%(79) | 13.5%(42) | 9.0%(28)  |
+| PB&J     | 45.5%(142) | 22.8%(71) | 15.4%(48) | 16.3%(51) |
 
-GradDiff produces 99.9% gibberish output yet still leaves 23% suppressed — K_ext
+GradDiff produces 99.9% gibberish output yet still leaves 22.8% suppressed — K_ext
 collapse alone does not guarantee K_int erasure.
 
 ---
@@ -64,9 +64,22 @@ collapse alone does not guarantee K_int erasure.
 trajectory (AUC over ck1–ck8) than forgotten questions for all eight methods,
 with large effect sizes (Cohen's d = 0.66–1.67, all q < 0.001).
 
-![Forest plot: suppressed − forgotten K_int trajectory gap, all 8 methods](plots/ckpt_layer_trajectory_metrics/suppressed_vs_forgotten_forest_plot.png)
+The four subsets show distinct K_int trajectory patterns across checkpoints and layers.
+Below is GradDiff as a representative example:
 
-**Full table (full-layer probe, BH-corrected Mann-Whitney U):**
+- **Retained** (top-left): K_int stays high (green) across all layers and all ck1–ck8.
+- **Suppressed** (top-right): K_int also stays high throughout — these questions are
+  internally stable from the start and never decay.
+- **Forgotten** (bottom-left): K_int is high at base but collapses by ck3–ck8,
+  especially in early/middle layers.
+- **Lucky** (bottom-right): K_int is low throughout (the base model did not know these
+  internally) yet K_ext happens to be recoverable at ck8.
+
+![All 4 subset K_int trajectories — GradDiff](plots/ckpt_k_subset_heatmap/ckpt_k_subset_GradDiff.png)
+
+**Forest plot — suppressed − forgotten K_int trajectory gap, all 8 methods:**
+
+![Forest plot](plots/ckpt_layer_trajectory_metrics/suppressed_vs_forgotten_forest_plot.png)
 
 | Method   |    Δ   | 95% CI          |   q    | Sig | Cohen d | Cliff δ |
 |----------|-------:|-----------------|-------:|-----|--------:|--------:|
@@ -93,9 +106,9 @@ The K_int − K_ext gap at ck8 is ~+0.61 for suppressed vs ~+0.17 for forgotten.
 *Left panel (blue, leftward):* suppressed questions have slightly lower K_int
 trajectory than retained — showing they are not simply the same as retained.
 *Middle panel (red, rightward):* all methods show large K_ext drop for suppressed
-(~0.70–0.80 units, all ***), nearly matching the forgotten subset's drop.
+(~0.70–0.80 units, all \*\*\*), nearly matching the forgotten subset's drop.
 *Right panel (red, rightward):* all methods show a large K_int − K_ext gap for
-suppressed (~0.60–0.75 units, all ***), confirming internal knowledge survives
+suppressed (~0.60–0.75 units, all \*\*\*), confirming internal knowledge survives
 even as external access collapses.
 
 **Averaged across methods:**
@@ -110,12 +123,14 @@ even as external access collapses.
 
 ## 5. Base-model features predict K_int trajectory but not the suppression split
 
-**Claim.** Whether a question's internal representation survives unlearning is
-partially determined by pre-existing base-model representational strength (K_int
-trajectory AUC predictable at ρ = 0.58). However, which questions become suppressed
-vs. forgotten is essentially unpredictable from base-model features (R² ≈ 0.01),
-confirming the suppression/forgetting split is driven by the unlearning process
-itself.
+**Claim.** Questions with stronger base-model representational structure tend, across
+the population, to have higher K_int trajectories after unlearning (ρ = 0.58 at
+the question×method level). This is a distributional regularity — it does not mean
+we can predict for a specific question whether it will become suppressed or forgotten.
+If that were possible, the K_int − K_ext gap would be predictable from base features,
+but it is essentially not (R² ≈ 0.01). The suppression/forgetting split is driven by
+the unlearning algorithm applied to each question, not by the question's pre-existing
+structure.
 
 ![Predicted vs actual K_int trajectory AUC (HGB, ρ = 0.583)](plots/trajectory_regression/predicted_vs_actual_k_int_traj_auc.png)
 
@@ -128,6 +143,8 @@ itself.
 | K_ext drop @ ck8          | RF   | 0.129 | 0.032 | 0.380 |
 | K_int − K_ext gap @ ck8   | RF   | 0.014 | 0.028 | 0.210 |
 
-The near-zero R² for the int–ext gap confirms that whether a question ends up
-suppressed or forgotten is a property of the unlearning algorithm applied to each
-question, not of the question's initial structure in the base model.
+The near-zero R² for the int–ext gap is the key result: even though K_int trajectory
+is moderately predictable (ρ = 0.58), the gap that defines suppressed vs. forgotten
+is not. A question with high base-model K_int may end up retained, suppressed, or
+forgotten depending on how the unlearning algorithm interacts with it — the outcome
+cannot be read off from the base model alone.
