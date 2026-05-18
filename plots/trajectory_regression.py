@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO / "plots"))
 from hk_utils import (
     METHODS, load_correct_idx, load_split_indices, load_scores_df,
     compute_prefilter_mask, get_parquet_full_single, get_method_ck8_labels,
-    method_fname,
+    method_fname, compute_k_ext, EXT_DIR,
 )
 
 POOLED_FEATURES = REPO / "plots" / "base_feature_prediction" / "pooled_features.csv"
@@ -105,11 +105,16 @@ def load_targets():
 
     ext_rows = []
     for method in METHODS:
-        labels, k_ext_ck8_arr, _ = get_method_ck8_labels(
+        labels, _, _ = get_method_ck8_labels(
             method, correct_idx, filt_te, filt_o2p, parquet_full)
         if labels is None:
             continue
-        for qi, kext in zip(filt_te, k_ext_ck8_arr):
+        fname = method_fname(method)
+        ext_path = EXT_DIR / f"{fname}_ck8_bio_ext.npy"
+        if not ext_path.exists():
+            continue
+        mk_ext = compute_k_ext(np.load(ext_path), correct_idx, filt_te)
+        for qi, kext in zip(filt_te, mk_ext):
             ext_rows.append({"method": method, "question_idx": int(qi), "k_ext_ck8": float(kext)})
 
     ext = pd.DataFrame(ext_rows).merge(base_ext, on="question_idx", how="left")
