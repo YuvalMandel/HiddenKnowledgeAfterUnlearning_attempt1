@@ -182,11 +182,11 @@ def main():
     print("Loading parquet ...")
     df = pd.read_parquet(REPO / "plots" / "all_k_scores.parquet")
     parquet_multi = df[
-        (df["layer_config"] == "multi") & (df["clf"] == "LR") &
+        (df["layer_config"] == "full") & (df["clf"] == "LR") &
         (df["split_type"]   == "single") & (df["domain"] == "bio")
     ]
 
-    # Pre-filter mask: base K_int_multi=1 AND K_ext=1 (te-position indexed)
+    # Pre-filter mask: base K_int_full=1 AND K_ext=1 (te-position indexed)
     base_multi = parquet_multi[parquet_multi["model_id"] == "base"][
         ["question_idx", "k_internal", "k_external"]
     ]

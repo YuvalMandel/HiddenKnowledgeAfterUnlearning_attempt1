@@ -59,11 +59,11 @@ KNOWS_THRESHOLD = 0.5
 
 df_all = pd.read_parquet(PARQUET)
 
-# ── Pre-filter: base K_int_multi=1 AND K_ext=1 ────────────────────────────────
+# ── Pre-filter: base K_int_full=1 AND K_ext=1 ────────────────────────────────
 base_single = df_all[
     (df_all["model_id"]    == "base") &
     (df_all["split_type"]  == "single") &
-    (df_all["layer_config"]== "multi") &
+    (df_all["layer_config"]== "full") &
     (df_all["clf"]         == "LR") &
     (df_all["domain"]      == "bio")
 ][["question_idx", "k_internal", "k_external"]].set_index("question_idx")
@@ -169,7 +169,7 @@ for method_id, method_label in METHODS:
     method_ki_single = df_all[
         (df_all["model_id"]    == method_id) &
         (df_all["split_type"]  == "single") &
-        (df_all["layer_config"]== "multi") &
+        (df_all["layer_config"]== "full") &
         (df_all["clf"]         == "LR") &
         (df_all["domain"]      == "bio") &
         df_all["question_idx"].isin(perfect_qidx)

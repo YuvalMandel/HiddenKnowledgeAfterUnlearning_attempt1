@@ -3,7 +3,7 @@
 Plot base-feature distributions by subset for each unlearning method.
 
 For each method at ck8:
-  - classify filtered questions (n=307) into retained/suppressed/forgotten/lucky
+  - classify filtered questions (n=312) into retained/suppressed/forgotten/lucky
   - plot per-feature distributions across subsets (box + jitter)
   - save both PNG and PDF
 
@@ -277,7 +277,7 @@ def main():
     parquet_multi = df[
         (df["domain"] == "bio")
         & (df["clf"] == "LR")
-        & (df["layer_config"] == "multi")
+        & (df["layer_config"] == "full")
         & (df["split_type"] == "single")
     ]
 

@@ -4,7 +4,7 @@ ckpt_k_subset_heatmap.py
 
 For each unlearning method: 2x2 heatmap grid, one subplot per post-unlearning subset.
 
-Pre-filter: questions where base K_int_multi=1 AND K_ext=1 (307/573).
+Pre-filter: questions where base K_int_full=1 AND K_ext=1 (312/573).
 Subsets (defined at ck8, fixed for all checkpoints):
   retained   (int K>0.5, ext K>0.5)   -- top-left,  green
   suppressed (int K>0.5, ext K<=0.5)  -- top-right, red
@@ -74,7 +74,7 @@ print("Loading parquet ...")
 df = pd.read_parquet(REPO / "plots" / "all_k_scores.parquet")
 
 parquet_multi = df[
-    (df["layer_config"] == "multi") & (df["clf"] == "LR") &
+    (df["layer_config"] == "full") & (df["clf"] == "LR") &
     (df["split_type"]   == "single") & (df["domain"] == "bio")
 ]
 
@@ -89,11 +89,11 @@ cv_all = df[
 cv_all["layer_idx"] = cv_all["layer_config"].str.extract(r"layer_(\d+)").astype(int)
 cv_all = cv_all[cv_all["layer_idx"] > 0]  # skip embedding layer
 
-# ── Pre-filter: base K_int_multi=1 AND K_ext=1 ───────────────────────────────
+# ── Pre-filter: base K_int_full=1 AND K_ext=1 ───────────────────────────────
 base_single = df[
     (df["model_id"]     == "base") &
     (df["split_type"]   == "single") &
-    (df["layer_config"] == "multi") &
+    (df["layer_config"] == "full") &
     (df["clf"]          == "LR") &
     (df["domain"]       == "bio")
 ][["question_idx", "k_internal", "k_external"]]

@@ -2,7 +2,7 @@
 """
 confidence_hist_filtered.py
 
-Pre-filter: only questions where base model K_int_multi=1 AND K_ext=1 (307/573).
+Pre-filter: only questions where base model K_int_full=1 AND K_ext=1 (312/573).
 
 For each unlearning method, 2x2 grid of histograms (one subplot per post-unlearning subset):
   retained   (int K>0.5, ext K>0.5)   -- top-left,  green
@@ -71,14 +71,14 @@ orig_to_pos = {int(qi): i for i, qi in enumerate(te)}
 print("Loading parquet ...")
 df = pd.read_parquet(REPO / "plots" / "all_k_scores.parquet")
 parquet_multi = df[
-    (df["layer_config"] == "multi") & (df["clf"] == "LR") &
+    (df["layer_config"] == "full") & (df["clf"] == "LR") &
     (df["split_type"]   == "single") & (df["domain"] == "bio")
 ]
 
 base_single = df[
     (df["model_id"]     == "base") &
     (df["split_type"]   == "single") &
-    (df["layer_config"] == "multi") &
+    (df["layer_config"] == "full") &
     (df["clf"]          == "LR") &
     (df["domain"]       == "bio")
 ][["question_idx", "k_internal", "k_external"]]

@@ -28,12 +28,12 @@ def main():
     filt_mask = compute_prefilter_mask(te, orig_to_pos, df)
     filt_te = set(te[filt_mask].astype(int).tolist())
 
-    single_multi = df[(df['domain'] == 'bio') & (df['clf'] == 'LR') & (df['split_type'] == 'single') & (df['layer_config'] == 'multi')].copy()
+    single_full = df[(df['domain'] == 'bio') & (df['clf'] == 'LR') & (df['split_type'] == 'single') & (df['layer_config'] == 'full')].drop_duplicates('question_idx').copy()
 
     all_rows = []
     for method in METHODS:
         mf = method_fname(method)
-        mk = single_multi[single_multi['model_id'] == f'{mf}_ck8'][['question_idx', 'k_internal', 'k_external']].copy()
+        mk = single_full[single_full['model_id'] == f'{mf}_ck8'][['question_idx', 'k_internal', 'k_external']].copy()
         if mk.empty:
             continue
         mk = mk[mk['question_idx'].isin(filt_te)].copy()

@@ -31,7 +31,7 @@ MECH_TABLE  = REPO / "plots" / "retained_vs_suppressed_mechanism" / "retained_vs
 BIN_METRICS = REPO / "plots" / "base_feature_prediction" / "binary_metrics.csv"
 
 METHOD_ORDER = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
-N_FILTERED   = 307
+N_FILTERED   = 312
 
 
 def build_summary():

@@ -181,7 +181,7 @@ def main():
     print("Loading parquet multi-layer K_internal ...")
     df = pd.read_parquet(REPO / "plots" / "all_k_scores.parquet")
     parquet_multi = df[
-        (df["layer_config"] == "multi") &
+        (df["layer_config"] == "full") &
         (df["clf"]          == "LR")    &
         (df["split_type"]   == "single")&
         (df["domain"]       == "bio")

@@ -43,7 +43,7 @@ def quadrant(frozen, retrained):
 def main():
     correct_idx = load_correct_idx()
     df = load_scores_df()
-    single_multi = df[(df['domain'] == 'bio') & (df['clf'] == 'LR') & (df['split_type'] == 'single') & (df['layer_config'] == 'multi')]
+    single_full = df[(df['domain'] == 'bio') & (df['clf'] == 'LR') & (df['split_type'] == 'single') & (df['layer_config'] == 'full')].drop_duplicates('question_idx')
 
     rows = []
     for method in METHODS:
@@ -52,7 +52,7 @@ def main():
         if not int_path.exists():
             continue
 
-        mk = single_multi[single_multi['model_id'] == f'{mf}_ck8'][['question_idx', 'k_internal', 'k_external']].copy()
+        mk = single_full[single_full['model_id'] == f'{mf}_ck8'][['question_idx', 'k_internal', 'k_external']].copy()
         if mk.empty:
             continue
         mk['subset'] = 'forgotten'
