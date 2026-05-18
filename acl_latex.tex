@@ -1,0 +1,835 @@
+\documentclass[11pt]{article}
+
+\usepackage[review]{acl}
+
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{url}
+
+\title{Hidden Knowledge After Unlearning}
+
+\author{Yuval Mandel \\
+  The Andrew and Erna Viterbi Faculty of Electrical \& Computer Engineering, \\
+  Technion -- Israel Institute of Technology \\
+  \texttt{yuval.mandel@campus.technion.ac.il} \\\And
+  Ziv Even-Zur \\
+  Department of Computer Science, Technion -- Israel Institute of Technology \\
+  \texttt{author2@cs.technion.ac.il} \\}
+
+\begin{document}
+\maketitle
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Current LLM unlearning evaluations rely on surface behavior---typically benchmark
+accuracy on the forget set---to declare success.
+We show this is insufficient: eight state-of-the-art unlearning algorithms applied
+to \textsc{Llama-3-8B-Instruct} on WMDP-biosecurity produce models whose hidden
+states still encode the targeted knowledge.
+Adapting the inside-out framework of \citet{gekhman2025insideout} to the unlearning
+setting, we track two orthogonal per-question axes at each of eight unlearning
+checkpoints: external knowledge ($K_\text{ext}$), measured by the logit margin on
+a True/False claim-verification task, and internal knowledge ($K_\text{int}$),
+measured by cross-validated linear-probe accuracy on hidden states.
+This decomposition reveals that 17--34\% of pre-filtered questions are
+\emph{suppressed}---the model's output is silenced, yet its hidden-state
+representations retain discriminative biosecurity knowledge.
+Trajectory analysis shows that suppressed questions maintain significantly higher
+$K_\text{int}$ trajectory AUC (full-layer probe) than forgotten questions throughout training
+(BH-corrected $q < 0.001$ for all eight methods; Cohen's $d$ up to 1.67).
+Mechanistic analysis reveals the key asymmetry: suppressed questions lose
+$K_\text{ext}$ while retaining $K_\text{int}$ at levels identical to retained
+questions, whereas forgotten questions lose both.
+Regression experiments show that base-model features predict $K_\text{int}$
+trajectory with $R^2 = 0.35$ ($\rho = 0.58$), but the $K_\text{int}$--$K_\text{ext}$
+gap is nearly unpredictable ($R^2 \approx 0$), indicating suppression is driven
+by the unlearning process, not pre-existing structure.
+These findings expose a fundamental gap between behavioral and representational
+unlearning, with direct implications for white-box safety auditing.
+\end{abstract}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+Large language models (LLMs) trained on internet-scale corpora acquire knowledge
+spanning benign and hazardous domains, including biosecurity and cybersecurity
+content.
+As these models are deployed at scale, there is growing pressure to provide
+reliable \emph{machine unlearning} mechanisms---algorithms that selectively
+suppress dangerous knowledge without degrading general
+capabilities~\citep{dorna2025openunlearning}.
+
+A natural benchmark is WMDP~\citep{li2024wmdp}, which provides multiple-choice
+questions spanning biosecurity and cybersecurity.
+A model is considered to have ``forgotten'' when its accuracy drops toward the
+random baseline.
+However, benchmark accuracy measures only one dimension of knowledge: what the
+model \emph{outputs}.
+Whether the underlying knowledge \emph{representations} are genuinely erased is
+a distinct question that remains largely unexplored.
+
+\citet{gekhman2025insideout} formalized this distinction via an \emph{inside-out}
+framework that decomposes model knowledge into an \emph{external} axis
+($K_\text{ext}$, what the model expresses in outputs) and an \emph{internal}
+axis ($K_\text{int}$, what a probe can decode from hidden states).
+We adapt and extend this framework specifically for the unlearning setting,
+introducing per-question, per-checkpoint tracking with symmetric prompting
+(Section~\ref{sec:background}), and apply it across eight unlearning algorithms
+on \textsc{Llama-3-8B-Instruct} via the LLM-GAT
+benchmark~\citep{che2025model,llmgat2024}.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item We adapt the inside-out $K_\text{ext}$/$K_\text{int}$ framework to the
+    unlearning setting with three targeted modifications motivated by the
+    unlearning context (\S\ref{sec:background}).
+    \item We identify a \textbf{suppressed} category (17--34\% of questions per
+    method) where $K_\text{ext}$ collapses to chance but $K_\text{int}$ remains
+    above chance (\S\ref{sec:subset-counts}).
+    \item Trajectory analysis shows suppressed questions maintain significantly
+    higher $K_\text{int}$ trajectory AUC (full-layer probe) than forgotten questions
+    across all checkpoints (Cohen's $d$ up to 1.67; BH-corrected $q < 0.001$ for
+    all eight methods; \S\ref{sec:trajectory}).
+    \item Mechanistic comparison shows suppressed and retained questions have
+    nearly identical $K_\text{int}$ profiles; they diverge only on $K_\text{ext}$
+    drop (\S\ref{sec:mechanism}).
+    \item Base-model features predict $K_\text{int}$ trajectory
+    ($R^2 = 0.35$, $\rho = 0.58$) but not the $K_\text{int}$--$K_\text{ext}$ gap
+    ($R^2\approx 0$), showing the suppression/forgetting split is driven by the
+    unlearning process (\S\ref{sec:regression}).
+\end{itemize}
+
+\paragraph{Implications.}
+A model that passes behavioral benchmarks may retain targeted knowledge in
+mid-layer representations, accessible to a white-box probe trained on fewer
+than 500 examples.
+This motivates joint reporting of $K_\text{ext}$ and $K_\text{int}$ reductions
+as a standard component of unlearning evaluation.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Background: The Inside-Out Framework}
+\label{sec:background}
+
+\subsection{Original Definitions}
+\label{sec:original-defs}
+
+\citet{gekhman2025insideout} quantify how much a model $M$ ``knows'' about a
+question $q$ with correct answer $a^*$ and wrong answers
+$\mathcal{W} = \{w_1,\ldots,w_{N-1}\}$ via a \emph{pairwise ranking score}:
+\begin{equation}
+K(q;\,S) \;=\; \frac{1}{|\mathcal{W}|}\sum_{w\in\mathcal{W}}
+\mathbf{1}\!\left[S(q,a^*) > S(q,w)\right],
+\label{eq:kscore}
+\end{equation}
+where $S$ is a scoring function.
+$K = 1$ means the correct answer ranks above all wrong answers;
+$K = 0.5$ is the chance level for binary problems.
+
+\paragraph{External knowledge ($K_\text{ext}$).}
+Any scoring function restricted to the model's observable, token-level output
+probabilities is \emph{external}.
+Gekhman et al.\ implement three variants: generation likelihood $P(a|q)$,
+its length-normalised form $P_\text{norm}(a|q)$, and a \emph{verification logit}
+$P(\text{True})(q,a)$ which scores how strongly the model agrees that $a$ is
+correct given a structured prompt.
+The model \emph{expresses} knowledge of $q$ when its best external $K$ score
+exceeds chance.
+
+\paragraph{Internal knowledge ($K_\text{int}$).}
+A logistic-regression probe is trained on hidden states $h_M(q,a)$ extracted at
+the last token of a generation-style forward pass; its predicted probability
+serves as the \emph{internal} scoring function $T_M$.
+A model has \emph{hidden knowledge} of dataset $\mathcal{D}$ if
+\begin{equation}
+\bar{K}(T_M) \;>\; \max_{S \in \mathcal{S}^E_M}\bar{K}(S) \;+\; \Delta,
+\label{eq:hkdef}
+\end{equation}
+where $\mathcal{S}^E_M$ is the set of external scoring functions and $\Delta$
+is a significance margin confirmed by a paired statistical test.
+This dataset-level definition asks: does the probe beat the best external
+scorer overall?
+
+\subsection{Our Adaptations for the Unlearning Setting}
+\label{sec:adaptations}
+
+We retain the pairwise-ranking structure (Eq.~\ref{eq:kscore}) and the
+internal--external decomposition, but make three modifications required by
+the unlearning context.
+
+\paragraph{Adaptation 1: True/False logit margin as $K_\text{ext}$.}
+WMDP questions are reformulated as True/False claim-verification tasks
+throughout our pipeline (Section~\ref{sec:tf-format}).
+The original generation-style external scoring ($P(a|q)$, $P_\text{norm}$) is
+not applicable because we do not score answer options by generation likelihood;
+instead, we classify a \emph{claim} about each option as True or False.
+We therefore use a single external function analogous to Gekhman et al.'s
+verification logit, but over True/False tokens:
+\begin{equation}
+K_\text{ext}(q,a) \;=\; \ell_\text{True}(q,a) \;-\; \ell_\text{False}(q,a),
+\label{eq:kext}
+\end{equation}
+where $\ell_\text{True}$ and $\ell_\text{False}$ are the logits for ``True'' and
+``False'' at the final position of the claim prompt.
+$K_\text{ext}(q,a^*) > K_\text{ext}(q,w)$ then serves as the pairwise indicator
+in Eq.~\ref{eq:kscore}.
+
+\paragraph{Adaptation 2: Symmetric prompting.}
+In the original framework, $K_\text{int}$ hidden states are extracted from a
+\emph{generation-style} prompt while $K_\text{ext}$ is scored from a
+\emph{verification-style} prompt---an asymmetry in which the two axes measure
+responses to structurally different questions.
+We extract both $K_\text{ext}$ and $K_\text{int}$ from the \emph{same}
+True/False verification forward pass: the same input, the same final token.
+$K_\text{ext}$ reads from the output logit layer; $K_\text{int}$ reads from
+intermediate hidden-state layers.
+
+This symmetry serves two purposes.
+First, any gap between $K_\text{int}$ and $K_\text{ext}$ now reflects genuine
+representational retention, not a prompt-distribution artifact.
+Second, post-unlearning models frequently produce gibberish outputs
+(Table~\ref{tab:gen-logit}); extracting hidden states from generation-style
+prompts for such models would conflate representational erasure with output
+collapse, making $K_\text{int}$ unreliable.
+The verification prompt is unaffected by gibberish because we read only the
+logit of a single token, not a generated sequence.
+
+\paragraph{Adaptation 3: Per-question, per-checkpoint tracking.}
+Gekhman et al.\ define hidden knowledge at the \emph{dataset level}
+(Eq.~\ref{eq:hkdef}): does the probe's average score exceed the average external
+score?
+In the unlearning setting this aggregation obscures a critical phenomenon: a
+dataset-level test can declare success while a substantial fraction of questions
+still carry decodable internal knowledge.
+We therefore track $K_\text{ext}$ and $K_\text{int}$ \emph{per question} at
+each of eight unlearning checkpoints (ck1--ck8).
+This granularity allows us to classify each question's knowledge fate over
+training---Retained, Suppressed, Forgotten, or Lucky
+(Section~\ref{sec:subsets-def})---and to measure how the internal--external gap
+evolves as unlearning progresses.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Inside-Out Framework and Probing.}
+\citet{gekhman2025insideout} introduced the $K_\text{ext}$/$K_\text{int}$
+decomposition showing that LLMs retain hidden factual knowledge for facts they
+do not express---the framework we extend in Section~\ref{sec:background}.
+Probing classifiers~\citep{alain2017understanding} more broadly have revealed
+factual associations in mid-to-late layers~\citep{meng2022locating}, compliance
+directions from jailbreaks~\citep{levi2025jailbreak}, and safety-relevant linear
+directions~\citep{zou2023representation}.
+
+\paragraph{Machine Unlearning for LLMs.}
+Machine unlearning was originally studied for privacy-driven data
+deletion~\citep{cao2015towards}.
+For LLMs, the goal is concept-level suppression~\citep{liu2024rethinking,eldan2023whos}.
+\emph{GradDiff}~\citep{yao2023large} maximises forget-set loss;
+\emph{RMU}~\citep{li2024wmdp} disrupts internal representations;
+\emph{RepNoise}~\citep{rosati2024representation} injects noise into activations.
+Five additional methods are provided by LLM-GAT~\citep{llmgat2024}.
+\citet{lynch2024eight} evaluate robustness criteria but do not consider
+$K_\text{int}$ probing.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Models and Datasets}
+
+\paragraph{Base Model.}
+\textsc{Llama-3-8B-Instruct}~\citep{dubey2024llama}, a 32-layer decoder-only
+transformer ($H=4096$), serving as the starting point for all unlearning runs.
+
+\paragraph{Unlearned Models.}
+Eight variants from LLM-GAT~\citep{llmgat2024,che2025model}: GradDiff, RMU,
+RMU-LAT, RepNoise, ELM, RR, TAR, and PB\&J.
+Each provides eight intermediate checkpoints (ck1--ck8); ck8 is the final
+checkpoint.
+
+\paragraph{WMDP-bio (Forget Set).}
+1,273 biosecurity multiple-choice questions; split 500/200/573 (train/val/test).
+
+\subsection{True/False Prompt Format}
+\label{sec:tf-format}
+
+Each question--answer pair is converted to a claim:
+\textit{``The answer to `\textlangle question\textrangle' is `\textlangle
+choice\textrangle'.''}
+The model labels it True or False via a debiased system prompt specifying equal
+base rates and no explanation.
+One forward pass per (question, answer option) pair serves for both $K_\text{ext}$
+(output logit, Eq.~\ref{eq:kext}) and $K_\text{int}$ (hidden states), as
+described in Section~\ref{sec:adaptations}.
+
+\subsection{Hidden-State Extraction and Probes}
+\label{sec:hs-extract}
+
+Hidden states are extracted at the last non-padding token, identified via the
+attention mask rather than token identity, to handle the \textsc{Llama-3} quirk
+where $\texttt{pad\_token\_id} = \texttt{eos\_token\_id}$.
+
+\paragraph{Per-Layer Probes.}
+For each of 33 layers: StandardScaler + LogisticRegression ($C=1.0$), 5-fold CV.
+Random Forest and AdaBoost probes are also trained for comparison.
+
+\paragraph{Full-Layer Probe.}
+All 33 layers concatenated $\to$ PCA-256 $\to$ LR, 5-fold CV.
+The per-question cross-validated $K_\text{int}$ score from this probe is our
+primary internal-knowledge signal, used for both 4-subset classification and
+trajectory analysis.
+
+\subsection{4-Subset Classification}
+\label{sec:subsets-def}
+
+We pre-filter to 312 of 573 test questions showing genuine knowledge signal in
+the base model ($K_\text{int} > 0.5$ and $K_\text{ext} > 0$ at the base
+checkpoint).
+At ck8 we apply the full-layer probe to assign each question to one of four
+subsets based on its $K_\text{int}$ and $K_\text{ext}$:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \textbf{Retained}: $K_\text{int}{>}0.5$, $K_\text{ext}{>}0.5$ --- both axes preserved.
+    \item \textbf{Suppressed}: $K_\text{int}{>}0.5$, $K_\text{ext}{\leq}0.5$ --- internal knowledge retained, external expression removed.
+    \item \textbf{Forgotten}: $K_\text{int}{\leq}0.5$, $K_\text{ext}{\leq}0.5$ --- both axes erased.
+    \item \textbf{Lucky}: $K_\text{int}{\leq}0.5$, $K_\text{ext}{>}0.5$ --- external expression survives without internal support.
+\end{itemize}
+The \emph{suppressed} category is the direct operationalisation of hidden
+knowledge after unlearning: $K_\text{ext}$ collapse without $K_\text{int}$
+erasure.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+All experiments use random seed 42.
+Probes are trained with scikit-learn~\citep{sklearn2011} on CPU.
+
+\subsection{$K_\text{ext}$ After Unlearning}
+\label{sec:behavioral}
+
+Table~\ref{tab:gen-logit} establishes that all eight unlearning methods
+successfully suppress $K_\text{ext}$.
+The base \textsc{Llama-3-8B-Instruct} achieves 67.3\% logit accuracy and
+LogitAUC of 75.5, confirming strong external knowledge expression.
+After unlearning, LogitAUC drops to 51.1--58.5 across all methods---near the
+50\% chance baseline.
+
+The generation columns in Table~\ref{tab:gen-logit} are provided as context:
+several methods produce unreliable generation outputs (GradDiff: 99.9\% gibberish;
+RepNoise: 88.4\%), making generation accuracy a poor $K_\text{ext}$ signal for
+those models.
+The logit margin (Eq.~\ref{eq:kext}) is robust to output collapse because it
+reads a single token logit rather than a generated sequence, and is our primary
+$K_\text{ext}$ measure throughout.
+
+\begin{table*}[t]
+\centering
+\caption{$K_\text{ext}$ after unlearning on WMDP-bio test set.
+GenAcc = generation accuracy; Gib = gibberish rate (no parseable answer);
+LogitAcc = logit-margin accuracy ($K_\text{ext} > 0$); LogitAUC = ranking AUC
+using $K_\text{ext}$ score. Dashed rule separates reference models from
+unlearned variants.}
+\label{tab:gen-logit}
+\small
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Gen} & \textbf{True} & \textbf{False} & \textbf{Gib}
+               & \textbf{LogitAcc} & \textbf{LogitAUC} \\
+\midrule
+Base (8B-Inst.)  & 68.2 & 61.4 & 74.9 &  0.1 & 67.3 & 75.5 \\
+Llama-3-8B       & 55.9 & 99.0 & 12.7 &  0.0 & 57.2 & 75.7 \\
+\midrule
+GradDiff  &  0.1 &  0.2 &  0.0 & 99.9 & 50.4 & 54.6 \\
+RMU       & 45.8 & 43.6 & 48.0 & 13.6 & 52.6 & 53.9 \\
+RMU-LAT   & 46.3 & 40.3 & 52.2 & 13.7 & 53.1 & 54.6 \\
+RepNoise  &  6.0 &  4.4 &  7.7 & 88.4 & 50.4 & 51.1 \\
+ELM       & 52.3 & 80.5 & 24.1 &  0.0 & 51.7 & 53.2 \\
+RR        & 38.5 & 14.1 & 62.8 & 32.0 & 52.8 & 58.5 \\
+TAR       & 50.0 &  0.0 &100.0 &  0.0 & 50.0 & 53.6 \\
+PB\&J     & 42.8 & 35.4 & 50.1 & 22.9 & 52.6 & 55.1 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{$K_\text{int}$ Remains Above Chance}
+\label{sec:probe-global}
+
+Figure~\ref{fig:kfold-overview} shows mean pairwise $K$ scores (and probe
+accuracy / AUC) across all eight methods at ck8, using the best per-layer LR
+probe selected by 5-fold CV.
+All eight unlearned models show $K_\text{int}$ (blue) clearly exceeding
+$K_\text{ext}$ (red) on every metric, despite behavioural benchmarks indicating
+near-chance external performance.
+The hidden-knowledge gap is $11$--$24$ percentage points across methods.
+Output-targeting methods (GradDiff, RepNoise, ELM, TAR, PB\&J) show larger gaps;
+representation-targeting methods (RMU, RMU-LAT) show smaller but still
+positive gaps (8--12\,pp), consistent with their direct latent-space intervention
+partially eroding the probe signal alongside the output signal.
+Table~\ref{tab:probes-bio} reports full per-layer and multi-layer accuracy.
+
+Figure~\ref{fig:kint-kext-gap} provides a deeper view using the full-layer probe
+(all 33 layers concatenated, PCA-256) restricted to 312 pre-filtered questions
+where the base model achieves $K_\text{int} = K_\text{ext} = 1$.
+Here the gap is even more pronounced for output-targeting methods, while
+representation-targeting methods (RMU, RMU-LAT) show near-zero gap under the
+full-layer probe---suggesting these methods more effectively disrupt the
+global hidden-state structure captured by PCA across all layers, even while
+a per-layer probe still finds a residual gap.
+
+Per-checkpoint $K_\text{int}$ heatmaps for all eight methods are shown in
+Appendix~\ref{app:checkpoint-heatmaps}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/k_int_vs_ext_kfold_single.pdf}
+    \caption{Mean pairwise $K_\text{int}$ (best per-layer LR probe, 5-fold CV)
+    vs.\ $K_\text{ext}$ (logit margin) on WMDP-bio at ck8.
+    All eight unlearned models show $K_\text{int}$ (blue) above $K_\text{ext}$
+    (red); the hidden-knowledge gap is 8--18 percentage points.
+    Error bars: fold standard deviation. Dashed line: chance (50\%).}
+    \label{fig:kfold-overview}
+\end{figure}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/kint_kext_gap.pdf}
+    \caption{Mean pairwise $K_\text{int}$ (full-layer probe: all 33 layers,
+    PCA-256) vs.\ $K_\text{ext}$ (logit margin) at ck8, restricted to 312
+    pre-filtered questions where the base model achieves $K_\text{int} = K_\text{ext} = 1$.
+    Output-targeting methods show a large gap; representation-targeting methods
+    (RMU, RMU-LAT) show near-zero gap under the full-layer probe,
+    consistent with broader disruption of global hidden-state geometry.
+    Dashed line: chance (0.5).}
+    \label{fig:kint-kext-gap}
+\end{figure*}
+
+\begin{table*}[t]
+\centering
+\caption{$K_\text{int}$ probe accuracy on WMDP-bio test set (probes trained on
+each model's own hidden states). \emph{PL-LR}: per-layer LR, best layer (L\#)
+selected on validation. \emph{ML-LR}: multi-layer LR (layers 12--22, PCA-256).}
+\label{tab:probes-bio}
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lrrrrrrr}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \multicolumn{3}{c}{\textbf{Per-Layer $K_\text{int}$ Acc.}} &
+\multicolumn{3}{c}{\textbf{Multi-Layer $K_\text{int}$ Acc.}} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+ & \textbf{LR} & \textbf{RF} & \textbf{Ada} & \textbf{LR} & \textbf{RF} & \textbf{Ada} \\
+\midrule
+Base (8B-Inst.)  & 64.4 & 63.4 & 63.4 & 68.9 & 62.7 & 62.6 \\
+\midrule
+GradDiff  & 57.4 & 55.8 & 56.5 & 61.3 & 55.5 & 56.7 \\
+RMU       & 57.4 & 56.7 & 54.4 & 55.7 & 53.6 & 51.4 \\
+RMU-LAT   & 56.6 & 55.9 & 54.4 & 56.1 & 53.8 & 53.3 \\
+RepNoise  & 57.8 & 54.0 & 52.9 & 58.7 & 54.5 & 53.0 \\
+ELM       & 54.9 & 55.1 & 51.8 & 59.3 & 54.4 & 54.2 \\
+RR        & 58.2 & 54.0 & 55.2 & 58.1 & 52.4 & 54.8 \\
+TAR       & 58.0 & 56.0 & 56.0 & 58.6 & 55.0 & 55.7 \\
+PB\&J     & 55.3 & 53.0 & 56.2 & 57.2 & 55.5 & 53.1 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{4-Subset Classification at ck8}
+\label{sec:subset-counts}
+
+Table~\ref{tab:subsets} shows the four-subset breakdown at ck8.
+Across all methods, 17--34\% of pre-filtered questions fall in the
+\emph{suppressed} category: $K_\text{ext}$ has collapsed to chance but
+$K_\text{int}$ remains above chance.
+RepNoise has the highest suppression proportion (34.3\%), followed by ELM
+(26.3\%) and TAR (25.3\%).
+GradDiff---despite producing near-total generation collapse
+(Table~\ref{tab:gen-logit})---still yields 22.8\% suppressed questions,
+confirming that $K_\text{ext}$ collapse does not guarantee $K_\text{int}$ erasure.
+
+\begin{table}[t]
+\centering
+\caption{Four-subset $K_\text{int}$/$K_\text{ext}$ classification at ck8 over
+312 pre-filtered questions. Each cell: \% (count).
+\textbf{Supp} = suppressed ($K_\text{int}{>}0.5$, $K_\text{ext}{\leq}0.5$).}
+\label{tab:subsets}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{Ret} & \textbf{Supp} & \textbf{Forg} & \textbf{Lucky} \\
+\midrule
+GradDiff  & 68.9 (215) & 22.8 (71)  &  5.1 (16) &  3.2 (10) \\
+RMU       & 46.8 (146) & 17.3 (54)  & 17.3 (54) & 18.6 (58) \\
+RMU-LAT   & 54.5 (170) & 17.0 (53)  & 13.1 (41) & 15.4 (48) \\
+RepNoise  & 37.8 (118) & 34.3 (107) & 15.7 (49) & 12.2 (38) \\
+ELM       & 54.2 (169) & 26.3 (82)  &  8.3 (26) & 11.2 (35) \\
+RR        & 54.8 (171) & 19.9 (62)  &  9.9 (31) & 15.4 (48) \\
+TAR       & 52.2 (163) & 25.3 (79)  & 13.5 (42) &  9.0 (28) \\
+PB\&J     & 45.5 (142) & 22.8 (71)  & 15.4 (48) & 16.3 (51) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Trajectory Analysis: $K_\text{int}$ Diverges from $K_\text{ext}$}
+\label{sec:trajectory}
+
+We track $K_\text{int}^{(c)}$ (full-layer probe, 5-fold CV) for suppressed
+and forgotten questions across checkpoints ck1--ck8.
+\emph{$K_\text{int}$ trajectory AUC} is the area under the ck1--ck8
+curve, summarising persistence of internal knowledge throughout unlearning.
+
+Table~\ref{tab:sf-gap} shows the suppressed-minus-forgotten $K_\text{int}$ gap
+with 95\% bootstrap CIs, BH-corrected $q$-values, Cohen's $d$, and Cliff's
+$\delta$.
+All eight methods show significant gaps ($q < 0.001$) with moderate-to-large
+effect sizes (Cohen's $d = 0.66$--$1.67$).
+The gap confirms that $K_\text{int}$ divergence between suppressed and forgotten
+questions is not a measurement artifact: it persists across all methods,
+checkpoints, and statistical correction.
+Figure~\ref{fig:forest} visualises the effect sizes as a forest plot.
+
+\begin{table*}[t]
+\centering
+\caption{Suppressed vs.\ forgotten $K_\text{int}$ trajectory AUC gap (full-layer probe).
+$\Delta = \bar{K}_\text{int}^\text{supp} - \bar{K}_\text{int}^\text{forg}$;
+95\% CI from 5000 bootstrap resamples;
+$q$ = Benjamini--Hochberg corrected $p$-value.}
+\label{tab:sf-gap}
+\small
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & $\Delta$ & \textbf{95\% CI} & $q$ & \textbf{Sig} & $d$ & $\delta$ \\
+\midrule
+GradDiff  & 0.275 & [0.167, 0.381] & ${<}0.001$ & *** & 1.67 & 0.70 \\
+RMU       & 0.118 & [0.052, 0.186] & ${<}0.001$ & *** & 0.66 & 0.37 \\
+RMU-LAT   & 0.175 & [0.101, 0.247] & ${<}0.001$ & *** & 0.96 & 0.49 \\
+RepNoise  & 0.178 & [0.129, 0.226] & ${<}0.001$ & *** & 1.33 & 0.65 \\
+ELM       & 0.207 & [0.110, 0.305] & ${<}0.001$ & *** & 1.07 & 0.57 \\
+RR        & 0.128 & [0.056, 0.204] & ${<}0.001$ & *** & 0.77 & 0.43 \\
+TAR       & 0.320 & [0.247, 0.392] & ${<}0.001$ & *** & 1.63 & 0.74 \\
+PB\&J     & 0.136 & [0.092, 0.182] & ${<}0.001$ & *** & 1.10 & 0.58 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/suppressed_vs_forgotten_forest_plot.pdf}
+    \caption{Forest plot of suppressed-minus-forgotten $K_\text{int}$ trajectory AUC
+    (full-layer probe) with 95\% bootstrap CI. All eight methods significant
+    ($q{<}0.001$, BH-corrected). Cohen's $d$ annotations confirm moderate-to-large
+    effect sizes ($d = 0.66$--$1.67$).}
+    \label{fig:forest}
+\end{figure*}
+
+\subsection{Mechanism: $K_\text{int}$ and $K_\text{ext}$ Across Subsets}
+\label{sec:mechanism}
+
+Table~\ref{tab:mechanism} compares Retained, Suppressed, and Forgotten questions
+on three $K_\text{int}$/$K_\text{ext}$ metrics, aggregated across all methods.
+A striking pattern emerges: both suppressed and forgotten questions experience
+near-complete $K_\text{ext}$ collapse (external drop $\approx 0.82$--$0.83$,
+relative to a base-model value of 1.0 for all pre-filtered questions), while
+retained questions preserve $K_\text{ext}$ (external drop $\approx 0.10$).
+
+The critical difference between suppressed and forgotten lies in $K_\text{int}$:
+suppressed questions retain a high $K_\text{int}$ trajectory (0.79) comparable
+to retained questions (0.84), whereas forgotten questions show a substantially
+lower trajectory (0.58).
+This divergence is captured by the \emph{internal--external gap}
+($K_\text{int} - K_\text{ext}$): suppressed questions have a gap of $+0.61$
+because $K_\text{int}$ stays high while $K_\text{ext}$ collapses, compared to
+$+0.17$ for forgotten questions (both erased, but $K_\text{int}$ drops further)
+and $-0.04$ for retained (both axes preserved).
+
+\begin{table*}[t]
+\centering
+\caption{$K_\text{int}$ and $K_\text{ext}$ mechanism comparison, aggregated
+means across all eight methods.
+$K_\text{int}$ traj.\ = full-layer probe trajectory AUC (ck1--ck8).
+Ext.\ Drop $= K_\text{ext,base} - K_\text{ext,ck8}$ (base $K_\text{ext}=1$ for
+all pre-filtered questions).
+Int--Ext Gap $= K_\text{int,ck8} - K_\text{ext,ck8}$.}
+\label{tab:mechanism}
+\small
+\setlength{\tabcolsep}{16pt}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Subset} & \textbf{$K_\text{int}$ traj.}
+                & \textbf{Ext Drop} & \textbf{Int--Ext Gap} \\
+\midrule
+Retained   & 0.84 & 0.10 & $-$0.04 \\
+Suppressed & 0.79 & 0.82 & $+$0.61 \\
+Forgotten  & 0.58 & 0.83 & $+$0.17 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+These results reveal a cleaner picture than previously reported: unlearning
+\emph{uniformly} collapses $K_\text{ext}$ for both suppressed and forgotten
+questions, but differs in whether $K_\text{int}$ is also erased.
+Suppressed questions are those where the output pathway was severed but internal
+representations survived; forgotten questions lost both.
+
+\subsection{Base Features Predict $K_\text{int}$ Trajectory}
+\label{sec:regression}
+
+Table~\ref{tab:regression} reports regression of eight base-model features onto
+four trajectory targets, using RepeatedKFold($5{\times}10$) CV.
+$K_\text{int}$ trajectory AUC (full-layer probe) is moderately predictable
+(RF $R^2 = 0.34$, $\rho = 0.58$): the base model's representational strength
+partially determines how much $K_\text{int}$ persists throughout unlearning.
+The $K_\text{ext}$ drop ($\rho = 0.38$) and $K_\text{int}$--$K_\text{ext}$ gap ($\rho = 0.21$)
+are less predictable, consistent with the finding
+that both suppressed and forgotten questions experience similar $K_\text{ext}$
+collapse---the distinction between them is $K_\text{int}$ retention, not $K_\text{ext}$
+behavior, and whether a question ends up suppressed vs.\ forgotten is largely
+determined during training, not by pre-existing base-model features.
+
+\begin{table}[t]
+\centering
+\caption{Base-feature regression onto $K_\text{int}$/$K_\text{ext}$ trajectory
+targets (full-layer probe). Best model per target shown; RF = Random Forest,
+HGB = HistGradientBoosting. CV: RepeatedKFold (5 splits, 10 repeats).}
+\label{tab:regression}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Target} & \textbf{Best} & $R^2$ & $\sigma_{R^2}$ & $\rho$ \\
+\midrule
+$K_\text{int}$ traj.\ AUC     & HGB   & 0.345 & 0.030 & 0.583 \\
+$K_\text{int}$ @ ck8          & HGB   & 0.140 & 0.029 & 0.385 \\
+$K_\text{ext}$ drop @ ck8     & RF    & 0.129 & 0.032 & 0.380 \\
+$K_\text{int}$--$K_\text{ext}$ gap @ ck8 & RF & 0.014 & 0.028 & 0.210 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{$K_\text{ext}$ suppression without $K_\text{int}$ erasure.}
+All eight methods achieve $K_\text{ext}$ suppression per WMDP accuracy, but
+17--34\% of questions retain $K_\text{int} > 0.5$ at ck8
+(Table~\ref{tab:subsets}).
+Mechanistically, unlearning collapses $K_\text{ext}$ equally for both suppressed
+and forgotten questions (external drop $\approx 0.82$); the difference is
+whether $K_\text{int}$ is also erased.
+
+\paragraph{Suppression as a stable attractor.}
+Suppressed questions maintain high $K_\text{int}$ trajectory (0.79) from ck1
+through ck8 (Table~\ref{tab:sf-gap}), compared to 0.58 for forgotten questions.
+They do not start intermediate and drift toward forgetting.
+Combined with the regression result ($\rho = 0.58$ for $K_\text{int}$
+trajectory), this suggests that questions with stronger base-model representations
+are the hardest to erase representationally.
+
+\paragraph{Method comparison.}
+GradDiff and TAR show the largest suppressed-forgotten $K_\text{int}$ gaps
+(Cohen's $d = 1.67$ and $1.63$), consistent with output-only modification that
+leaves $K_\text{int}$ intact.
+All eight methods are significant at $q < 0.001$, including RMU-LAT which
+explicitly perturbs latent representations---yet still produces 17.3\%
+suppressed questions, confirming that $K_\text{int}$ erasure remains partial
+even for representation-targeting methods.
+
+\paragraph{Implications for unlearning evaluation.}
+WMDP-style $K_\text{ext}$ accuracy is insufficient to certify knowledge erasure.
+A white-box auditor with 500 labeled examples can train a probe achieving
+${>}55$\% $K_\text{int}$ accuracy on any of the eight methods.
+We recommend that unlearning evaluations report both $K_\text{ext}$ reductions
+(behavioral) and $K_\text{int}$ reductions (representational) as standard metrics.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section*{Limitations}
+
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \emph{Model family.}
+    We study a single model family (\textsc{Llama-3-8B-Instruct}) and the
+    LLM-GAT checkpoint set. Generalisation to other architectures remains open.
+
+    \item \emph{Probe complexity.}
+    Our probes are shallow (logistic regression, $C=1.0$).
+    Simple probes already achieve ${>}55$\% $K_\text{int}$ AUC, setting a lower
+    bound; more expressive readouts could only perform better.
+
+    \item \emph{True/False framing.}
+    We use a claim-verification reformulation of WMDP rather than the original
+    multiple-choice format, which may affect generation accuracy figures.
+
+    \item \emph{Pre-filtering.}
+    The inside-out analysis is restricted to 312 of 573 test questions showing
+    genuine base-model knowledge. Full-set results may differ quantitatively.
+
+    \item \emph{No adaptive adversary.}
+    We consider a fixed non-adaptive probe; an adversary with more resources
+    could achieve higher $K_\text{int}$ accuracy.
+\end{itemize}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section*{Acknowledgments}
+
+We thank the LLM-GAT team for standardised unlearning checkpoints, and
+\citet{gekhman2025insideout} for the inside-out framework this work builds on.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\bibliography{custom}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\appendix
+
+\section{Cross-Probe Transfer}
+\label{app:cross-probe}
+
+Table~\ref{tab:cross-probe} reports cross-probe transfer accuracy.
+\emph{Base $\to$ Method}: base model's probes applied to unlearned hidden states.
+\emph{Method $\to$ Base}: each method's probes applied to base hidden states.
+High cross-probe accuracy would indicate that unlearning leaves the
+$K_\text{int}$-encoding geometry intact.
+
+Cross-probe accuracy is generally low (48--59\%), indicating that unlearning
+shifts the $K_\text{int}$-encoding directions enough that base probes no longer
+transfer.
+RR and PB\&J show the highest transfer (up to 64.2\% ML-LR), consistent with
+these methods producing less severe representational disruption.
+GradDiff shows below-chance Base$\to$Method accuracy (48.9\%), reflecting the
+extreme activation collapse that produces near-total generation gibberish.
+
+\begin{table}[h]
+\centering
+\caption{Cross-probe transfer accuracy on WMDP-bio.
+\emph{Base$\to$M}: base LR probe applied to method's test hidden states.
+\emph{M$\to$Base}: method's LR probe applied to base test hidden states.
+PL = per-layer best $K_\text{int}$; ML = multi-layer (PCA-256).}
+\label{tab:cross-probe}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{\textbf{Base$\to$Method}} & \multicolumn{2}{c}{\textbf{Method$\to$Base}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Method} & \textbf{PL-LR} & \textbf{ML-LR} & \textbf{PL-LR} & \textbf{ML-LR} \\
+\midrule
+GradDiff  & 48.9 & 50.4 & 49.8 & 52.7 \\
+RMU       & 50.8 & 50.1 & 54.8 & 50.4 \\
+RMU-LAT   & 50.3 & 51.2 & 51.1 & 51.3 \\
+RepNoise  & 50.0 & 50.2 & 50.0 & 50.2 \\
+ELM       & 53.0 & 53.2 & 53.0 & 53.2 \\
+RR        & 56.5 & 64.2 & 56.5 & 64.2 \\
+TAR       & 52.4 & 50.0 & 52.4 & 50.0 \\
+PB\&J     & 59.3 & 63.1 & 59.3 & 63.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Cyber Domain Transfer}
+\label{app:cyber}
+
+Table~\ref{tab:cyber} reports $K_\text{ext}$ and $K_\text{int}$ on the
+held-out WMDP-cyber domain (not targeted by any unlearning method).
+$K_\text{int}$ probe accuracy on cyber hidden states is 55.6--58.2\% for
+unlearned models, comparable to bio probe accuracy, confirming that
+$K_\text{int}$ retention is not specific to the unlearning target domain.
+
+\begin{table}[h]
+\centering
+\caption{WMDP-cyber domain (not targeted by unlearning).
+GenAcc = generation accuracy; LogitAUC = $K_\text{ext}$ AUC;
+LR = per-layer $K_\text{int}$ best accuracy; ML-LR = multi-layer $K_\text{int}$
+(PCA-256). All values in percent.}
+\label{tab:cyber}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{GenAcc} & \textbf{LogitAUC}
+               & \textbf{LR} & \textbf{ML-LR} \\
+\midrule
+Base (8B-Inst.)  & 44.3 & 60.7 & 58.3 & 57.6 \\
+\midrule
+GradDiff  &  6.1 & 57.0 & 58.2 & 56.2 \\
+RMU       & 44.1 & 61.2 & 57.5 & 57.8 \\
+RMU-LAT   & 43.2 & 60.8 & 57.2 & 57.3 \\
+RepNoise  & 34.5 & 58.0 & 57.9 & 57.0 \\
+ELM       & 39.0 & 52.2 & 55.6 & 53.3 \\
+RR        & 43.8 & 60.6 & 57.0 & 58.5 \\
+TAR       & 37.5 & 56.4 & 55.6 & 55.9 \\
+PB\&J     & 44.3 & 60.8 & 56.9 & 58.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Checkpoint Heatmaps for All Methods}
+\label{app:checkpoint-heatmaps}
+
+Per-layer $K_\text{int}$ (LR probe AUC) across eight unlearning checkpoints.
+Rows = layers 0--32; columns = checkpoints 1--8. Mid-layer $K_\text{int}$
+(rows 8--24) remains consistently high throughout training for all methods,
+while late-layer AUC shows modest decline.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_ELM.pdf}
+    \caption{ELM: per-layer $K_\text{int}$ across checkpoints.}
+    \label{fig:heatmap}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_GradDiff.pdf}
+    \caption{GradDiff: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_RMU.pdf}
+    \caption{RMU: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_RMU-LAT.pdf}
+    \caption{RMU-LAT: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_RepNoise.pdf}
+    \caption{RepNoise: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_TAR.pdf}
+    \caption{TAR: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_RR.pdf}
+    \caption{RR: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/heatmap_checkpoints_auc_lr_method_bio_PB_J.pdf}
+    \caption{PB\&J: per-layer $K_\text{int}$ across checkpoints.}
+\end{figure}
+
+\section{Regression Feature Importance}
+\label{app:regression}
+
+Feature importance plots for the full-layer $K_\text{int}$ trajectory regression
+show that \texttt{mean\_kint\_layers} (mean per-layer $K_\text{int}$ in the
+base model) and \texttt{correct\_conf} (base-model confidence on the correct
+answer) are the most predictive features, consistent with the view that stronger
+initial $K_\text{int}$ survives unlearning better.
+
+\end{document}
