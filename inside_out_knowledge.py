@@ -375,6 +375,121 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STAGE 1b — Generate (GPU)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def stage_gen(model_id: str, domains: "list[str] | None" = None,
+              max_new_tokens: int = 64) -> None:
+    """Generate text for every (question, option) in the test split and save to JSON.
+
+    Output: inside_out_out/{model_id}/{domain}_gen_test.json
+    Format: list of {"question_idx": int, "option_idx": int, "text": str}
+    """
+    import json
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    active_domains = domains or DOMAINS
+    m_dir = OUT_DIR / model_id
+    m_dir.mkdir(parents=True, exist_ok=True)
+
+    if all((m_dir / f"{d}_gen_test.json").exists() for d in active_domains):
+        print(f"[gen] {model_id}: already done."); return
+
+    mp     = model_path(model_id)
+    cached = _is_cached(mp)
+    lfo    = {"local_files_only": True} if cached else {}
+    print(f"[gen] {model_id}: loading from {mp} (local_files_only={cached})")
+    tok = AutoTokenizer.from_pretrained(mp, use_fast=True, **lfo)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.padding_side = "left"
+
+    model = AutoModelForCausalLM.from_pretrained(
+        mp, torch_dtype=torch.float16, device_map="auto", **lfo)
+    model.eval()
+
+    for domain in active_domains:
+        out_path  = m_dir / f"{domain}_gen_test.json"
+        part_path = m_dir / f"{domain}_gen_test_partial.json"
+        if out_path.exists():
+            print(f"  [{domain}] already done."); continue
+
+        data     = load_wmdp(domain)
+        n_q      = len(data)
+        q_test   = get_splits(n_q, domain)["test"]
+
+        prompts, meta = [], []
+        for qi in q_test:
+            item = data[qi]
+            for oi, ch in enumerate(item["choices"]):
+                msgs   = make_verify_prompt(item["question"], ch)
+                prompt = tok.apply_chat_template(msgs, tokenize=False,
+                                                 add_generation_prompt=True)
+                prompts.append(prompt)
+                meta.append({"question_idx": int(qi), "option_idx": oi})
+
+        if part_path.exists():
+            with open(part_path) as f:
+                results = json.load(f)
+            resume_from = len(results)
+            print(f"  [{domain}] resuming from {resume_from}/{len(prompts)}")
+        else:
+            results, resume_from = [], 0
+
+        SAVE_EVERY = 200
+        n_total    = len(prompts)
+
+        for start in range(resume_from, n_total, BATCH_SIZE):
+            batch_p = prompts[start:start + BATCH_SIZE]
+            batch_m = meta[start:start + BATCH_SIZE]
+            if start % (BATCH_SIZE * 25) == 0:
+                print(f"  [{domain}] {start}/{n_total}", flush=True)
+
+            enc = tok(batch_p, return_tensors="pt", padding=True,
+                      truncation=True, max_length=512)
+            enc = {k: v.to(model.device) for k, v in enc.items()}
+            N   = enc["input_ids"].shape[1]   # padded sequence length
+
+            with torch.no_grad():
+                gen_ids = model.generate(
+                    **enc,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tok.pad_token_id,
+                )
+
+            for bi in range(len(batch_p)):
+                text = tok.decode(gen_ids[bi][N:], skip_special_tokens=True).strip()
+                results.append({**batch_m[bi], "text": text})
+
+            next_start = start + BATCH_SIZE
+            if next_start % SAVE_EVERY < BATCH_SIZE and next_start < n_total:
+                with open(part_path, "w") as f:
+                    json.dump(results, f)
+
+        with open(out_path, "w") as f:
+            json.dump(results, f)
+        if part_path.exists():
+            part_path.unlink()
+        print(f"  [{domain}] saved {len(results)} records → {out_path}")
+
+    del model
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    if model_id != "base":
+        import shutil
+        cache_path = _hf_cache_path(mp)
+        if cache_path.exists():
+            shutil.rmtree(cache_path)
+            print(f"  [cleanup] Deleted cache: {cache_path.name}")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Probe train+score helper
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1000,7 +1115,7 @@ def stage_aggregate(include_embedding: bool = False) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["extract", "probe", "aggregate"])
+    ap.add_argument("--stage", choices=["extract", "gen", "probe", "aggregate"])
     ap.add_argument("--model_id", default="base")
     ap.add_argument("--list_models", action="store_true",
                     help="Print all model IDs (one per line) and exit.")
@@ -1022,6 +1137,8 @@ def main() -> None:
                     help="Suffix for output parquet (e.g. 'layer' → k_scores_layer.parquet)")
     ap.add_argument("--include_embedding", action="store_true",
                     help="Include layer 0 (embedding) in per-layer plots (default: excluded)")
+    ap.add_argument("--max_new_tokens",   type=int, default=64,
+                    help="Max tokens to generate in the gen stage (default: 64)")
     args = ap.parse_args()
 
     if args.list_models:
@@ -1031,6 +1148,9 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     if args.stage == "extract":
         stage_extract(args.model_id, domains=args.domains)
+    elif args.stage == "gen":
+        stage_gen(args.model_id, domains=args.domains,
+                  max_new_tokens=args.max_new_tokens)
     elif args.stage == "probe":
         lcs = args.lcs
         if lcs and "layer" in lcs:
