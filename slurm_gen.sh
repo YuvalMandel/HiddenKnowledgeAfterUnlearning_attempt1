@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:L40:1
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
-#SBATCH --array=0-64
+#SBATCH --array=0-64%8
 
 echo "Job started at $(date)"
 echo "Running on node: $(hostname)"
