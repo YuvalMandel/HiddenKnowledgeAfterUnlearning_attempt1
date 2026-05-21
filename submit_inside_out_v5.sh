@@ -18,7 +18,7 @@ mkdir -p "$LOGS"
 
 PROBE_FLAGS="--domains bio --clfs LR --lcs full --no_cross_probe --n_jobs 8"
 METHODS=("GradDiff" "RMU" "RMU-LAT" "RepNoise" "ELM" "RR" "TAR" "PB_J")
-CONDA_SETUP="source /home/yuval.mandel/miniconda3/etc/profile.d/conda.sh && conda activate unlearning"
+CONDA_SETUP=". /home/yuval.mandel/miniconda3/etc/profile.d/conda.sh && conda activate unlearning"
 
 needs_hs()    { [[ ! -f "${OUT}/$1/bio_hs.npy" ]]; }
 needs_probe() { [[ ! -f "${OUT}/$1/k_scores.parquet" ]]; }
