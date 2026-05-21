@@ -1,7 +1,7 @@
 """
 K-internal vs K-external with 5-fold CV variance bars.
-Reads plots/all_k_scores.parquet (all models, cv split_type rows).
-For each model uses the layer with the highest mean CV K_internal as probe layer.
+Reads inside_out_out/*/k_scores.parquet (all models, full-layer probe).
+Concatenates on the fly; no pre-built all_k_scores.parquet needed.
 """
 import os
 import numpy as np
@@ -9,8 +9,9 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from pathlib import Path
 
-PARQUET = os.path.join(os.path.dirname(__file__), "all_k_scores.parquet")
+OUT_DIR = Path(__file__).parent.parent / "inside_out_out"
 
 MODELS = [
     ("base",          "Base"),
@@ -33,34 +34,29 @@ PANELS = [
     ("auc_int", "auc_ext", "AUC  (option-level, probe vs logit)", "AUC (%)"),
 ]
 
-df_all = pd.read_parquet(PARQUET)
+# Load only the models we need
+frames = []
+for model_id, _ in MODELS:
+    p = OUT_DIR / model_id / "k_scores.parquet"
+    if p.exists():
+        frames.append(pd.read_parquet(p))
+    else:
+        print(f"  Missing: {p}")
+df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 cv = df_all[
     (df_all["split_type"] == "cv") &
     (df_all["domain"] == "bio") &
     (df_all["clf"] == "LR") &
     (df_all["probe_type"] == "own") &
-    (df_all["layer_config"].str.startswith("layer_"))
+    (df_all["layer_config"] == "full")
 ].copy()
-
-# Per-model best layer by CV mean K_internal
-best_layer = (
-    cv.groupby(["model_id", "layer_config"])["k_internal"]
-    .mean()
-    .reset_index()
-    .sort_values("k_internal", ascending=False)
-    .groupby("model_id")
-    .first()["layer_config"]
-)
 
 rows = []
 for model_id, label in MODELS:
-    if model_id not in best_layer.index:
-        print(f"  Missing CV data for {model_id}, skipping.")
-        continue
-    lc = best_layer[model_id]
-
-    sub = cv[(cv["model_id"] == model_id) & (cv["layer_config"] == lc)]
+    sub = cv[cv["model_id"] == model_id]
     if sub.empty:
+        print(f"  Missing CV data for {model_id}, skipping.")
         continue
 
     fold_stats = (
@@ -70,8 +66,8 @@ for model_id, label in MODELS:
             fold_k_ext   = ("k_external", "mean"),
             fold_acc_int = ("k_internal", lambda x: (x > 0.5).mean()),
             fold_acc_ext = ("k_external", lambda x: (x > 0.5).mean()),
-            fold_auc_int = ("test_auc",   "first"),
-            fold_auc_ext = ("ext_auc",    "first"),
+            fold_auc_int = ("test_auc",   "mean"),
+            fold_auc_ext = ("ext_auc",    "mean"),
         )
         .reset_index()
     )
@@ -90,7 +86,6 @@ for model_id, label in MODELS:
 
     rows.append({
         "label":    label,
-        "best_lc":  lc,
         "n_folds":  n_folds,
         "k_int":    ki_m,  "k_int_std":    ki_s,
         "k_ext":    ke_m,  "k_ext_std":    ke_s,
@@ -191,10 +186,10 @@ print(f"Saved: {single_out}.pdf / .png")
 plt.close(fig1)
 
 # Summary table
-print(f"\n{'Model':<12} {'Layer':<10} {'K_int':>10} {'K_ext':>10}  {'Acc_int':>10} {'Acc_ext':>10}  {'AUC_int':>10} {'AUC_ext':>10}")
-print("-" * 82)
+print(f"\n{'Model':<12} {'K_int':>10} {'K_ext':>10}  {'Acc_int':>10} {'Acc_ext':>10}  {'AUC_int':>10} {'AUC_ext':>10}")
+print("-" * 72)
 for _, r in data.iterrows():
-    print(f"{r['label']:<12} {r['best_lc']:<10} "
+    print(f"{r['label']:<12} "
           f"{r['k_int']*100:6.1f}±{r['k_int_std']*100:4.1f} "
           f"{r['k_ext']*100:6.1f}±{r['k_ext_std']*100:4.1f}  "
           f"{r['acc_int']*100:6.1f}±{r['acc_int_std']*100:4.1f} "
