@@ -94,7 +94,7 @@ for model_id, label in MODELS:
         "auc_int":  ui_m,  "auc_int_std":  ui_s,
         "auc_ext":  ue_m,  "auc_ext_std":  ue_s,
     })
-    print(f"  {label:<12}  best_layer={lc}  K_int={ki_m*100:.1f}±{ki_s*100:.1f}  K_ext={ke_m*100:.1f}±{ke_s*100:.1f}")
+    print(f"  {label:<12}  K_int={ki_m*100:.1f}±{ki_s*100:.1f}  K_ext={ke_m*100:.1f}±{ke_s*100:.1f}")
 
 data = pd.DataFrame(rows)
 labels = data["label"].tolist()
