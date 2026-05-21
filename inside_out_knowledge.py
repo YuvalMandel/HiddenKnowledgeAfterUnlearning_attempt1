@@ -28,7 +28,7 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import ShuffleSplit
+from sklearn.model_selection import KFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -66,7 +66,10 @@ N_FOLDS    = 5
 SEED       = 42
 BATCH_SIZE = 8   # prompts per GPU forward pass
 
-CV_TEST_FRAC = 0.4
+TRAIN_FRAC = 0.65
+VAL_FRAC   = 0.15
+TEST_FRAC  = 0.20   # = 1/N_FOLDS; non-overlapping via KFold
+C_CANDIDATES = [0.01, 0.1, 1.0, 10.0, 100.0]
 
 ML_LAYERS = list(range(12, 23))
 BANDS = {
@@ -181,10 +184,26 @@ def make_verify_prompt(question: str, choice: str) -> list:
         )},
     ]
 
-def get_cv_splits(n: int) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Return N_FOLDS (train_idx, test_idx) pairs with 60/40 ratio over all n questions."""
-    ss = ShuffleSplit(n_splits=N_FOLDS, test_size=CV_TEST_FRAC, random_state=SEED)
-    return list(ss.split(np.arange(n)))
+def get_cv_splits(n: int) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return N_FOLDS (train_idx, val_idx, test_idx) tuples.
+
+    Questions are shuffled once with SEED before KFold to eliminate WMDP block bias.
+    Test sets are non-overlapping (each question appears in exactly one test fold).
+    Split ratios: TRAIN_FRAC / VAL_FRAC / TEST_FRAC = 65 / 15 / 20.
+    """
+    rng = np.random.default_rng(SEED)
+    shuffled = rng.permutation(n)
+
+    kf = KFold(n_splits=N_FOLDS, shuffle=False)
+    splits = []
+    for trainval_pos, test_pos in kf.split(shuffled):
+        test_idx     = shuffled[test_pos]
+        trainval_idx = shuffled[trainval_pos]
+        n_train      = int(round(len(trainval_idx) * TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)))
+        train_idx    = trainval_idx[:n_train]
+        val_idx      = trainval_idx[n_train:]
+        splits.append((train_idx, val_idx, test_idx))
+    return splits
 
 def build_labels(correct_idx: np.ndarray, q_indices: np.ndarray) -> np.ndarray:
     """Binary label: 1 = correct answer option, 0 = wrong."""
@@ -200,7 +219,7 @@ def build_labels(correct_idx: np.ndarray, q_indices: np.ndarray) -> np.ndarray:
 
 def _all_layer_configs() -> list[str]:
     return ([f"layer_{l}" for l in range(N_LAYERS)]
-            + ["multi", "full"]
+            + ["multi", "full", "best_layer"]
             + list(BANDS.keys()))
 
 def _needs_pca(lc: str) -> bool:
@@ -498,30 +517,130 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
 def _train_and_score(
     hs_train: np.ndarray, hs_test: np.ndarray,
     correct_idx: np.ndarray,
-    tr_idx: np.ndarray, te_idx: np.ndarray,
+    tr_idx: np.ndarray, va_idx: "np.ndarray | None", te_idx: np.ndarray,
     lc: str, clf_name: str,
 ) -> dict:
     """
-    Train probe on hs_train[tr_idx], score hs_test[te_idx].
-    Returns k_internal (n_te,), test_auc.
+    Train probe on hs_train[tr_idx], score on hs_test[te_idx].
+
+    Own-probe hyperparameter selection (va_idx provided, same hs_train/hs_test object,
+    clf_name=="LR", lc in {"full","best_layer"}):
+      - "full":       sweep C_CANDIDATES on val; retrain PCA+LR on tr+va.
+      - "best_layer": sweep (layer, C) on val; retrain single-layer LR on tr+va.
+    All other cases: fixed C=1.0, final model trained on tr_idx only.
+
+    Returns: k_internal (n_te,), test_auc, best_C, best_layer.
     """
-    X_tr = extract_features(hs_train, tr_idx, lc)
-    X_te = extract_features(hs_test,  te_idx, lc)
-    y_tr = build_labels(correct_idx, tr_idx)
     y_te = build_labels(correct_idx, te_idx)
+    best_C_out     = float("nan")
+    best_layer_out = float("nan")
 
-    pca = None
-    if _needs_pca(lc):
-        n_comp = min(PCA_DIM, X_tr.shape[1], X_tr.shape[0] - 1)
-        pca = PCA(n_components=n_comp, random_state=SEED)
-        X_tr = pca.fit_transform(X_tr)
-        X_te = pca.transform(X_te)
+    own_probe  = (hs_train is hs_test)
+    do_hparam  = (va_idx is not None and own_probe
+                  and clf_name == "LR" and lc in {"full", "best_layer"})
 
-    clf = make_clf(clf_name)
-    clf.fit(X_tr, y_tr)
+    # ── best_layer: sweep all (layer, C) on val ───────────────────────────────
+    if lc == "best_layer":
+        y_tr = build_labels(correct_idx, tr_idx)
+        best_layer_i = N_LAYERS // 2
+        best_C       = 1.0
 
-    te_proba = clf.predict_proba(X_te)[:, 1].reshape(len(te_idx), N_OPTIONS)
+        if do_hparam:
+            y_va        = build_labels(correct_idx, va_idx)
+            best_va_auc = -1.0
+            for layer_i in range(N_LAYERS):
+                X_tr_l = extract_features(hs_train, tr_idx, f"layer_{layer_i}")
+                X_va_l = extract_features(hs_train, va_idx, f"layer_{layer_i}")
+                for C in C_CANDIDATES:
+                    pipe = Pipeline([
+                        ("sc",  StandardScaler()),
+                        ("clf", LogisticRegression(C=C, max_iter=1000, random_state=SEED)),
+                    ])
+                    pipe.fit(X_tr_l, y_tr)
+                    try:
+                        va_auc = roc_auc_score(y_va, pipe.predict_proba(X_va_l)[:, 1])
+                    except Exception:
+                        va_auc = 0.0
+                    if va_auc > best_va_auc:
+                        best_va_auc  = va_auc
+                        best_layer_i = layer_i
+                        best_C       = C
+            best_C_out     = best_C
+            best_layer_out = float(best_layer_i)
 
+        trva_idx = np.concatenate([tr_idx, va_idx]) if va_idx is not None else tr_idx
+        lc_use   = f"layer_{best_layer_i}"
+        X_trva   = extract_features(hs_train, trva_idx, lc_use)
+        X_te     = extract_features(hs_test,  te_idx,   lc_use)
+        y_trva   = build_labels(correct_idx, trva_idx)
+
+        pipe_f = Pipeline([
+            ("sc",  StandardScaler()),
+            ("clf", LogisticRegression(C=best_C, max_iter=1000, random_state=SEED)),
+        ])
+        pipe_f.fit(X_trva, y_trva)
+        te_proba = pipe_f.predict_proba(X_te)[:, 1].reshape(len(te_idx), N_OPTIONS)
+
+    # ── full / per-layer / multi / band ───────────────────────────────────────
+    else:
+        X_tr_raw = extract_features(hs_train, tr_idx, lc)
+        y_tr     = build_labels(correct_idx, tr_idx)
+
+        pca_val = None
+        if _needs_pca(lc):
+            n_comp  = min(PCA_DIM, X_tr_raw.shape[1], X_tr_raw.shape[0] - 1)
+            pca_val = PCA(n_components=n_comp, random_state=SEED)
+            X_tr    = pca_val.fit_transform(X_tr_raw)
+        else:
+            X_tr = X_tr_raw
+
+        best_C = 1.0
+        if do_hparam:
+            X_va_raw    = extract_features(hs_train, va_idx, lc)
+            X_va        = pca_val.transform(X_va_raw) if pca_val is not None else X_va_raw
+            y_va        = build_labels(correct_idx, va_idx)
+            best_va_auc = -1.0
+            for C in C_CANDIDATES:
+                pipe = Pipeline([
+                    ("sc",  StandardScaler()),
+                    ("clf", LogisticRegression(C=C, max_iter=1000, random_state=SEED)),
+                ])
+                pipe.fit(X_tr, y_tr)
+                try:
+                    va_auc = roc_auc_score(y_va, pipe.predict_proba(X_va)[:, 1])
+                except Exception:
+                    va_auc = 0.0
+                if va_auc > best_va_auc:
+                    best_va_auc = va_auc
+                    best_C      = C
+            best_C_out = best_C
+
+        # retrain on tr+va (or tr only for cross-probe where va_idx is None)
+        trva_idx   = np.concatenate([tr_idx, va_idx]) if va_idx is not None else tr_idx
+        X_trva_raw = extract_features(hs_train, trva_idx, lc)
+        X_te_raw   = extract_features(hs_test,  te_idx,   lc)
+        y_trva     = build_labels(correct_idx, trva_idx)
+
+        if _needs_pca(lc):
+            n_comp_f = min(PCA_DIM, X_trva_raw.shape[1], X_trva_raw.shape[0] - 1)
+            pca_f    = PCA(n_components=n_comp_f, random_state=SEED)
+            X_trva   = pca_f.fit_transform(X_trva_raw)
+            X_te     = pca_f.transform(X_te_raw)
+        else:
+            X_trva = X_trva_raw
+            X_te   = X_te_raw
+
+        if clf_name == "LR":
+            clf_f = Pipeline([
+                ("sc",  StandardScaler()),
+                ("clf", LogisticRegression(C=best_C, max_iter=1000, random_state=SEED)),
+            ])
+        else:
+            clf_f = make_clf(clf_name)
+        clf_f.fit(X_trva, y_trva)
+        te_proba = clf_f.predict_proba(X_te)[:, 1].reshape(len(te_idx), N_OPTIONS)
+
+    # ── score ─────────────────────────────────────────────────────────────────
     try:
         te_auc = roc_auc_score(y_te, te_proba.ravel())
     except Exception:
@@ -534,7 +653,12 @@ def _train_and_score(
         ws = [te_proba[i, j] for j in range(N_OPTIONS) if j != c]
         k_int[i] = sum(float(cs > w) for w in ws) / len(ws)
 
-    return {"k_internal": k_int, "test_auc": te_auc}
+    return {
+        "k_internal": k_int,
+        "test_auc":   te_auc,
+        "best_C":     best_C_out,
+        "best_layer": best_layer_out,
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -544,22 +668,22 @@ def _train_and_score(
 def _probe_one(
     model_id: str, domain: str, clf_name: str, lc: str,
     hs: np.ndarray, correct_idx: np.ndarray, ext: np.ndarray,
-    fold_i: int, tr_idx: np.ndarray, te_idx: np.ndarray,
+    fold_i: int, tr_idx: np.ndarray, va_idx: np.ndarray, te_idx: np.ndarray,
     do_cross: bool,
     hs_base: np.ndarray | None, correct_idx_base: np.ndarray | None,
     ext_base: np.ndarray | None,
 ) -> list:
     records = []
 
-    k_ext = compute_k(ext, correct_idx, te_idx)
+    k_ext    = compute_k(ext, correct_idx, te_idx)
     ext_flat = ext[te_idx].reshape(-1)
-    y_ext = build_labels(correct_idx, te_idx)
+    y_ext    = build_labels(correct_idx, te_idx)
     try:
         ext_auc = float(roc_auc_score(y_ext, ext_flat))
     except Exception:
         ext_auc = float("nan")
 
-    res = _train_and_score(hs, hs, correct_idx, tr_idx, te_idx, lc, clf_name)
+    res = _train_and_score(hs, hs, correct_idx, tr_idx, va_idx, te_idx, lc, clf_name)
     gap, p_val, is_hk = hidden_knowledge_test(res["k_internal"], k_ext)
     for i, qi in enumerate(te_idx):
         records.append({
@@ -569,15 +693,16 @@ def _probe_one(
             "question_idx": int(qi),
             "k_internal": float(res["k_internal"][i]),
             "k_external": float(k_ext[i]),
-            "test_auc": res["test_auc"],
-            "ext_auc": ext_auc,
-            "hk_gap": gap, "hk_pval": p_val,
-            "is_hidden_knowledge": is_hk,
+            "test_auc":   res["test_auc"],
+            "ext_auc":    ext_auc,
+            "hk_gap": gap, "hk_pval": p_val, "is_hidden_knowledge": is_hk,
+            "best_C":     res["best_C"],
+            "best_layer": res["best_layer"],
         })
 
     if do_cross and hs_base is not None:
         res_b2m = _train_and_score(
-            hs_base, hs, correct_idx, tr_idx, te_idx, lc, clf_name)
+            hs_base, hs, correct_idx, tr_idx, None, te_idx, lc, clf_name)
         gap_b, p_b, hk_b = hidden_knowledge_test(res_b2m["k_internal"], k_ext)
         for i, qi in enumerate(te_idx):
             records.append({
@@ -588,15 +713,16 @@ def _probe_one(
                 "question_idx": int(qi),
                 "k_internal": float(res_b2m["k_internal"][i]),
                 "k_external": float(k_ext[i]),
-                "test_auc": res_b2m["test_auc"],
-                "ext_auc": ext_auc,
-                "hk_gap": gap_b, "hk_pval": p_b,
-                "is_hidden_knowledge": hk_b,
+                "test_auc":   res_b2m["test_auc"],
+                "ext_auc":    ext_auc,
+                "hk_gap": gap_b, "hk_pval": p_b, "is_hidden_knowledge": hk_b,
+                "best_C":     float("nan"),
+                "best_layer": float("nan"),
             })
 
         k_ext_base = compute_k(ext_base, correct_idx_base, te_idx)
         res_m2b = _train_and_score(
-            hs, hs_base, correct_idx_base, tr_idx, te_idx, lc, clf_name)
+            hs, hs_base, correct_idx_base, tr_idx, None, te_idx, lc, clf_name)
         gap_m, p_m, hk_m = hidden_knowledge_test(res_m2b["k_internal"], k_ext_base)
         for i, qi in enumerate(te_idx):
             records.append({
@@ -607,10 +733,11 @@ def _probe_one(
                 "question_idx": int(qi),
                 "k_internal": float(res_m2b["k_internal"][i]),
                 "k_external": float(k_ext_base[i]),
-                "test_auc": res_m2b["test_auc"],
-                "ext_auc": float("nan"),
-                "hk_gap": gap_m, "hk_pval": p_m,
-                "is_hidden_knowledge": hk_m,
+                "test_auc":   res_m2b["test_auc"],
+                "ext_auc":    float("nan"),
+                "hk_gap": gap_m, "hk_pval": p_m, "is_hidden_knowledge": hk_m,
+                "best_C":     float("nan"),
+                "best_layer": float("nan"),
             })
 
     return records
@@ -678,12 +805,12 @@ def stage_probe(
             delayed(_probe_one)(
                 model_id, domain, clf_name, lc,
                 hs, correct_idx, ext,
-                fold_i, tr_idx, te_idx,
+                fold_i, tr_idx, va_idx, te_idx,
                 do_cross, hs_base, correct_idx_base, ext_base,
             )
             for clf_name in active_clfs
             for lc in active_lcs
-            for fold_i, (tr_idx, te_idx) in enumerate(cv_splits)
+            for fold_i, (tr_idx, va_idx, te_idx) in enumerate(cv_splits)
         )
         for recs in all_records:
             records.extend(recs)
