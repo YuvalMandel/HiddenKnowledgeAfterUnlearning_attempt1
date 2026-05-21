@@ -28,7 +28,7 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import ShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -66,8 +66,7 @@ N_FOLDS    = 5
 SEED       = 42
 BATCH_SIZE = 8   # prompts per GPU forward pass
 
-TRAIN_SIZE = {"bio": 500, "cyber": 500}
-VAL_SIZE   = {"bio": 200, "cyber": 200}
+CV_TEST_FRAC = 0.4
 
 ML_LAYERS = list(range(12, 23))
 BANDS = {
@@ -182,11 +181,10 @@ def make_verify_prompt(question: str, choice: str) -> list:
         )},
     ]
 
-def get_splits(n: int, domain: str) -> dict[str, np.ndarray]:
-    rng = np.random.default_rng(SEED)
-    idx = rng.permutation(n)
-    tr = TRAIN_SIZE[domain]; va = VAL_SIZE[domain]
-    return {"train": idx[:tr], "val": idx[tr:tr + va], "test": idx[tr + va:]}
+def get_cv_splits(n: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return N_FOLDS (train_idx, test_idx) pairs with 60/40 ratio over all n questions."""
+    ss = ShuffleSplit(n_splits=N_FOLDS, test_size=CV_TEST_FRAC, random_state=SEED)
+    return list(ss.split(np.arange(n)))
 
 def build_labels(correct_idx: np.ndarray, q_indices: np.ndarray) -> np.ndarray:
     """Binary label: 1 = correct answer option, 0 = wrong."""
@@ -417,10 +415,9 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
 
         data     = load_wmdp(domain)
         n_q      = len(data)
-        q_test   = get_splits(n_q, domain)["test"]
 
         prompts, meta = [], []
-        for qi in q_test:
+        for qi in range(n_q):
             item = data[qi]
             for oi, ch in enumerate(item["choices"]):
                 msgs   = make_verify_prompt(item["question"], ch)
@@ -498,11 +495,10 @@ def _train_and_score(
     correct_idx: np.ndarray,
     tr_idx: np.ndarray, te_idx: np.ndarray,
     lc: str, clf_name: str,
-    va_idx: np.ndarray | None = None,
 ) -> dict:
     """
     Train probe on hs_train[tr_idx], score hs_test[te_idx].
-    Returns k_internal (n_te,), test_auc, val_auc.
+    Returns k_internal (n_te,), test_auc.
     """
     X_tr = extract_features(hs_train, tr_idx, lc)
     X_te = extract_features(hs_test,  te_idx, lc)
@@ -533,18 +529,7 @@ def _train_and_score(
         ws = [te_proba[i, j] for j in range(N_OPTIONS) if j != c]
         k_int[i] = sum(float(cs > w) for w in ws) / len(ws)
 
-    val_auc = float("nan")
-    if va_idx is not None:
-        X_va = extract_features(hs_train, va_idx, lc)
-        y_va = build_labels(correct_idx, va_idx)
-        if pca is not None:
-            X_va = pca.transform(X_va)
-        try:
-            val_auc = roc_auc_score(y_va, clf.predict_proba(X_va)[:, 1])
-        except Exception:
-            pass
-
-    return {"k_internal": k_int, "test_auc": te_auc, "val_auc": val_auc}
+    return {"k_internal": k_int, "test_auc": te_auc}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -553,95 +538,72 @@ def _train_and_score(
 
 def _probe_one(
     model_id: str, domain: str, clf_name: str, lc: str,
-    hs: np.ndarray, correct_idx: np.ndarray,
-    tr: np.ndarray, va: np.ndarray, te: np.ndarray,
-    k_ext: np.ndarray,
-    ext_auc: float,
-    do_cv: bool,
+    hs: np.ndarray, correct_idx: np.ndarray, ext: np.ndarray,
+    fold_i: int, tr_idx: np.ndarray, te_idx: np.ndarray,
     do_cross: bool,
-    hs_base, splits_base, correct_idx_base, ext_base,
-    cv_only: bool = False,
+    hs_base: np.ndarray | None, correct_idx_base: np.ndarray | None,
+    ext_base: np.ndarray | None,
 ) -> list:
     records = []
 
-    if not cv_only:
-        res = _train_and_score(hs, hs, correct_idx, tr, te, lc, clf_name, va)
-        gap, p_val, is_hk = hidden_knowledge_test(res["k_internal"], k_ext)
-        for i, qi in enumerate(te):
-            records.append({
-                "model_id": model_id, "domain": domain,
-                "clf": clf_name, "layer_config": lc,
-                "probe_type": "own", "split_type": "single", "fold": -1,
-                "question_idx": int(qi),
-                "k_internal": float(res["k_internal"][i]),
-                "k_external": float(k_ext[i]),
-                "test_auc": res["test_auc"], "val_auc": res["val_auc"],
-                "ext_auc": ext_auc,
-                "hk_gap": gap, "hk_pval": p_val,
-                "is_hidden_knowledge": is_hk,
-            })
+    k_ext = compute_k(ext, correct_idx, te_idx)
+    ext_flat = ext[te_idx].reshape(-1)
+    y_ext = build_labels(correct_idx, te_idx)
+    try:
+        ext_auc = float(roc_auc_score(y_ext, ext_flat))
+    except Exception:
+        ext_auc = float("nan")
 
-    if do_cv:
-        all_tv = np.concatenate([tr, va])
-        skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=SEED)
-        for fold_i, (f_tr_rel, f_va_rel) in enumerate(
-                skf.split(all_tv, np.zeros(len(all_tv)))):
-            f_tr = all_tv[f_tr_rel]; f_va = all_tv[f_va_rel]
-            res_f = _train_and_score(hs, hs, correct_idx,
-                                     f_tr, te, lc, clf_name, f_va)
-            for i, qi in enumerate(te):
-                records.append({
-                    "model_id": model_id, "domain": domain,
-                    "clf": clf_name, "layer_config": lc,
-                    "probe_type": "own", "split_type": "cv",
-                    "fold": fold_i, "question_idx": int(qi),
-                    "k_internal": float(res_f["k_internal"][i]),
-                    "k_external": float(k_ext[i]),
-                    "test_auc": res_f["test_auc"],
-                    "val_auc":  res_f["val_auc"],
-                    "ext_auc": ext_auc,
-                    "hk_gap": float("nan"), "hk_pval": float("nan"),
-                    "is_hidden_knowledge": False,
-                })
+    res = _train_and_score(hs, hs, correct_idx, tr_idx, te_idx, lc, clf_name)
+    gap, p_val, is_hk = hidden_knowledge_test(res["k_internal"], k_ext)
+    for i, qi in enumerate(te_idx):
+        records.append({
+            "model_id": model_id, "domain": domain,
+            "clf": clf_name, "layer_config": lc,
+            "probe_type": "own", "split_type": "cv", "fold": fold_i,
+            "question_idx": int(qi),
+            "k_internal": float(res["k_internal"][i]),
+            "k_external": float(k_ext[i]),
+            "test_auc": res["test_auc"],
+            "ext_auc": ext_auc,
+            "hk_gap": gap, "hk_pval": p_val,
+            "is_hidden_knowledge": is_hk,
+        })
 
-    if do_cross and not cv_only and hs_base is not None:
+    if do_cross and hs_base is not None:
         res_b2m = _train_and_score(
-            hs_base, hs, correct_idx,
-            splits_base["train"], te, lc, clf_name,
-            splits_base["val"])
+            hs_base, hs, correct_idx, tr_idx, te_idx, lc, clf_name)
         gap_b, p_b, hk_b = hidden_knowledge_test(res_b2m["k_internal"], k_ext)
-        for i, qi in enumerate(te):
+        for i, qi in enumerate(te_idx):
             records.append({
                 "model_id": model_id, "domain": domain,
                 "clf": clf_name, "layer_config": lc,
                 "probe_type": "base_to_method",
-                "split_type": "single", "fold": -1,
+                "split_type": "cv", "fold": fold_i,
                 "question_idx": int(qi),
                 "k_internal": float(res_b2m["k_internal"][i]),
                 "k_external": float(k_ext[i]),
                 "test_auc": res_b2m["test_auc"],
-                "val_auc":  res_b2m["val_auc"],
+                "ext_auc": ext_auc,
                 "hk_gap": gap_b, "hk_pval": p_b,
                 "is_hidden_knowledge": hk_b,
             })
 
-        k_ext_base = compute_k(ext_base, correct_idx_base, splits_base["test"])
+        k_ext_base = compute_k(ext_base, correct_idx_base, te_idx)
         res_m2b = _train_and_score(
-            hs, hs_base, correct_idx,
-            tr, splits_base["test"], lc, clf_name, va)
-        gap_m, p_m, hk_m = hidden_knowledge_test(
-            res_m2b["k_internal"], k_ext_base)
-        for i, qi in enumerate(splits_base["test"]):
+            hs, hs_base, correct_idx_base, tr_idx, te_idx, lc, clf_name)
+        gap_m, p_m, hk_m = hidden_knowledge_test(res_m2b["k_internal"], k_ext_base)
+        for i, qi in enumerate(te_idx):
             records.append({
                 "model_id": model_id, "domain": domain,
                 "clf": clf_name, "layer_config": lc,
                 "probe_type": "method_to_base",
-                "split_type": "single", "fold": -1,
+                "split_type": "cv", "fold": fold_i,
                 "question_idx": int(qi),
                 "k_internal": float(res_m2b["k_internal"][i]),
                 "k_external": float(k_ext_base[i]),
                 "test_auc": res_m2b["test_auc"],
-                "val_auc":  res_m2b["val_auc"],
+                "ext_auc": float("nan"),
                 "hk_gap": gap_m, "hk_pval": p_m,
                 "is_hidden_knowledge": hk_m,
             })
@@ -654,11 +616,9 @@ def stage_probe(
     domains: "list[str] | None" = None,
     clfs: "list[str] | None" = None,
     lcs: "list[str] | None" = None,
-    do_cv: bool = True,
     do_cross: bool = True,
     n_jobs: int = 1,
     out_suffix: str = "",
-    cv_only: bool = False,
 ) -> None:
     from joblib import Parallel, delayed
 
@@ -687,18 +647,10 @@ def stage_probe(
         data        = load_wmdp(domain)
         n_q         = hs.shape[0]
         correct_idx = np.array([it["answer"] for it in data])
-        splits      = get_splits(n_q, domain)
-        tr, va, te  = splits["train"], splits["val"], splits["test"]
-
-        k_ext = compute_k(ext, correct_idx, te)
-
-        ext_flat = ext[te].reshape(-1)
-        y_ext    = build_labels(correct_idx, te)
-        ext_auc  = float(roc_auc_score(y_ext, ext_flat))
+        cv_splits   = get_cv_splits(n_q)
 
         is_method = model_id != "base"
         hs_base: np.ndarray | None = None
-        splits_base = None
         correct_idx_base: np.ndarray | None = None
         ext_base: np.ndarray | None = None
 
@@ -707,23 +659,21 @@ def stage_probe(
             if bhs_path.exists():
                 hs_base          = np.load(bhs_path)
                 ext_base         = np.load(base_dir / f"{domain}_ext.npy")
-                n_q_base         = hs_base.shape[0]
-                splits_base      = get_splits(n_q_base, domain)
                 correct_idx_base = correct_idx
 
-        total_configs = len(active_clfs) * len(active_lcs)
-        print(f"  [{domain}] {total_configs} configs, n_jobs={n_jobs}", flush=True)
+        total_configs = len(active_clfs) * len(active_lcs) * N_FOLDS
+        print(f"  [{domain}] {total_configs} configs×folds, n_jobs={n_jobs}", flush=True)
 
         all_records = Parallel(n_jobs=n_jobs, prefer="threads")(
             delayed(_probe_one)(
                 model_id, domain, clf_name, lc,
-                hs, correct_idx, tr, va, te, k_ext,
-                ext_auc, do_cv, do_cross,
-                hs_base, splits_base, correct_idx_base, ext_base,
-                cv_only,
+                hs, correct_idx, ext,
+                fold_i, tr_idx, te_idx,
+                do_cross, hs_base, correct_idx_base, ext_base,
             )
             for clf_name in active_clfs
             for lc in active_lcs
+            for fold_i, (tr_idx, te_idx) in enumerate(cv_splits)
         )
         for recs in all_records:
             records.extend(recs)
@@ -773,11 +723,10 @@ def stage_aggregate(include_embedding: bool = False) -> None:
             std_k_int           = ("k_internal", "std"),
             mean_k_ext          = ("k_external", "mean"),
             k_star              = ("k_internal", lambda x: (x == 1.0).mean()),
-            mean_test_auc       = ("test_auc", "first"),
-            mean_val_auc        = ("val_auc",  "first"),
-            hk_gap              = ("hk_gap",   "first"),
-            hk_pval             = ("hk_pval",  "first"),
-            is_hidden_knowledge = ("is_hidden_knowledge", "first"),
+            mean_test_auc       = ("test_auc", "mean"),
+            hk_gap              = ("hk_gap",   "mean"),
+            hk_pval             = ("hk_pval",  "mean"),
+            is_hidden_knowledge = ("is_hidden_knowledge", "mean"),
         )
         .reset_index()
     )
@@ -1125,10 +1074,6 @@ def main() -> None:
                     help="Classifiers to probe (default: all)")
     ap.add_argument("--lcs",             nargs="+", default=None,
                     help="Layer configs to probe (default: all)")
-    ap.add_argument("--no_cv",           action="store_true",
-                    help="Skip 5-fold cross-validation")
-    ap.add_argument("--cv_only",         action="store_true",
-                    help="Only save CV fold rows (skip single-split); implies do_cv=True")
     ap.add_argument("--no_cross_probe",  action="store_true",
                     help="Skip cross-probe (base↔method)")
     ap.add_argument("--n_jobs",          type=int, default=1,
@@ -1161,11 +1106,9 @@ def main() -> None:
             domains=args.domains,
             clfs=args.clfs,
             lcs=lcs,
-            do_cv=not args.no_cv or args.cv_only,
             do_cross=not args.no_cross_probe,
             n_jobs=args.n_jobs,
             out_suffix=args.out_suffix,
-            cv_only=args.cv_only,
         )
     elif args.stage == "aggregate":
         stage_aggregate(include_embedding=args.include_embedding)
