@@ -351,6 +351,11 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         all_ext = all_ext.reshape(n_q, N_OPTIONS)
         np.save(hs_path,  all_hs)
         np.save(ext_path, all_ext)
+        correct_idx_path = OUT_DIR / f"{domain}_correct_idx.npy"
+        if not correct_idx_path.exists():
+            correct_idx = np.array([it["answer"] for it in data], dtype=np.int8)
+            np.save(correct_idx_path, correct_idx)
+            print(f"  [{domain}] saved correct_idx ({len(correct_idx)} questions)")
         if part_path.exists():
             part_path.unlink()
         print(f"  [{domain}] saved hs {all_hs.shape}, ext {all_ext.shape}")
@@ -644,9 +649,14 @@ def stage_probe(
         hs  = np.load(hs_path)
         ext = np.load(ext_path)
 
-        data        = load_wmdp(domain)
         n_q         = hs.shape[0]
-        correct_idx = np.array([it["answer"] for it in data])
+        cidx_path   = OUT_DIR / f"{domain}_correct_idx.npy"
+        if cidx_path.exists():
+            correct_idx = np.load(cidx_path).astype(int)
+        else:
+            data        = load_wmdp(domain)
+            correct_idx = np.array([it["answer"] for it in data], dtype=int)
+            np.save(cidx_path, correct_idx.astype(np.int8))
         cv_splits   = get_cv_splits(n_q)
 
         is_method = model_id != "base"
