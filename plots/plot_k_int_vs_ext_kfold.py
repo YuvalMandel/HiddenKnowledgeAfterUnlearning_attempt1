@@ -104,7 +104,7 @@ w = 0.35
 
 fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
 fig.suptitle(
-    "Internal (probe, best layer) vs External (logit) — Bio · LR · 5-Fold CV",
+    "Internal (probe, all layers) vs External (logit) — Bio · LR · 5-Fold CV",
     fontsize=11, fontweight="bold", y=1.02
 )
 
@@ -115,7 +115,7 @@ for ax, (col_i, col_e, title, ylabel) in zip(axes, PANELS):
     ve_e  = data[f"{col_e}_std"].values * 100
 
     ax.bar(x - w/2, vi, width=w, color=INT_COLOR, alpha=0.88,
-           label="Internal (probe)", zorder=3,
+           label="Internal (probe, all layers)", zorder=3,
            yerr=vi_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
     ax.bar(x + w/2, ve, width=w, color=EXT_COLOR, alpha=0.88,
            label="External (logit)", zorder=3,
@@ -158,7 +158,7 @@ ve_e = data[f"{col_e}_std"].values * 100
 
 fig1, ax1 = plt.subplots(figsize=(7, 4.2))
 ax1.bar(x - w/2, vi, width=w, color=INT_COLOR, alpha=0.88,
-        label=r"$K_\mathrm{int}$ (probe, best layer)", zorder=3,
+        label=r"$K_\mathrm{int}$ (probe, all layers)", zorder=3,
         yerr=vi_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
 ax1.bar(x + w/2, ve, width=w, color=EXT_COLOR, alpha=0.88,
         label=r"$K_\mathrm{ext}$ (logit margin)", zorder=3,
