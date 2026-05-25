@@ -30,7 +30,7 @@ submit_probe() {
       --job-name="io_prb_v6_${nm}" \
       --output="${LOGS}/prb_v6_${nm}_%j.out" \
       --error="${LOGS}/prb_v6_${nm}_%j.err" \
-      --time=03:00:00 --mem=48G --cpus-per-task=8 \
+      --time=24:00:00 --mem=48G --cpus-per-task=8 \
       --partition=public \
       --wrap="set -e
 ${CONDA_SETUP}
