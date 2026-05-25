@@ -2,105 +2,91 @@
 """
 Categorize WMDP-bio questions using the base model (Llama-3-8B-Instruct).
 
-Greedy-generates 1 token per question. Tokens A-F map to a category;
-anything else is recorded as gibberish (actual token string saved).
-
-Prompt: few-shot MCQ style with one demo per letter so no category is primed.
+Logit scoring (no generation): forward pass, take argmax over logits of A-F
+tokens at the final position. Categories are shuffled per question (fixed seed)
+so letter-position bias (e.g. model preference for "A") averages out.
 
 Output: data/wmdp_bio_categories.csv
 """
-import os
 import torch
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID   = "meta-llama/Meta-Llama-3-8B-Instruct"
-BATCH_SIZE = 32
+BATCH_SIZE = 16
+SEED       = 42
 REPO       = Path(__file__).parent
 DATA_DIR   = REPO / "data"
 OUT_CSV    = DATA_DIR / "wmdp_bio_categories.csv"
 
-CATEGORIES = {
-    "A": "Dual-use Virology",
-    "B": "Bioweapons & Bioterrorism",
-    "C": "Reverse Genetics & Easy Editing",
-    "D": "Bio Enhanced Potential Pandemic Pathogens",
-    "E": "Viral Vector Research",
-    "F": "Expanding Access",
-}
-LETTERS = list(CATEGORIES.keys())
-
-# One demo per letter, interleaved order — no positional bias toward any category.
-FEW_SHOT_HEADER = """Classify each biosecurity question into exactly one of the six categories below.
-Reply with only the letter (A-F). All six categories are equally common.
-
-A) Dual-use Virology
-B) Bioweapons & Bioterrorism
-C) Reverse Genetics & Easy Editing
-D) Bio Enhanced Potential Pandemic Pathogens
-E) Viral Vector Research
-F) Expanding Access
-
-Question: Which herpesviruses are most commonly associated with encephalitis in immunocompromised patients?
-Answer: A
-
-Question: What regulatory frameworks govern the export of select biological agents across international borders?
-Answer: F
-
-Question: How can reverse genetics systems be used to recover infectious virus from cloned cDNA?
-Answer: C
-
-Question: What properties of a pathogen are assessed when determining pandemic potential under the NSABB framework?
-Answer: D
-
-Question: Which adeno-associated virus serotypes show highest tropism for neurons in vivo?
-Answer: E
-
-Question: What historical programs weaponized anthrax spores for large-scale aerosol dispersal?
-Answer: B
-
-"""
+CATEGORIES = [
+    "Dual-use Virology",
+    "Bioweapons & Bioterrorism",
+    "Reverse Genetics & Easy Editing",
+    "Bio Enhanced Potential Pandemic Pathogens",
+    "Viral Vector Research",
+    "Expanding Access",
+]
+LETTERS = ["A", "B", "C", "D", "E", "F"]
 
 
-def make_prompt(question: str) -> str:
-    return FEW_SHOT_HEADER + f"Question: {question}\nAnswer:"
-
-
-def get_valid_letter_ids(tokenizer):
-    """Return set of token IDs that decode to a bare letter A-F."""
-    valid = {}
+def get_letter_tok_ids(tokenizer):
+    """For each letter A-F, collect all single-token IDs (with/without space prefix)."""
+    result = {L: [] for L in LETTERS}
     for letter in LETTERS:
         for candidate in [letter, " " + letter, letter.lower(), " " + letter.lower()]:
             toks = tokenizer.encode(candidate, add_special_tokens=False)
             if len(toks) == 1:
-                valid[toks[0]] = letter.upper()
-    return valid   # tok_id -> canonical letter
+                result[letter].append(toks[0])
+    return result  # letter -> list[int]
+
+
+def make_prompt(tokenizer, question: str, perm: np.ndarray) -> str:
+    shuffled = [CATEGORIES[i] for i in perm]
+    lines = "\n".join(f"{L}) {c}" for L, c in zip(LETTERS, shuffled))
+    msg = (
+        "Classify this biosecurity question into exactly one of the six categories "
+        "below. Reply with only the letter (A–F).\n\n"
+        f"{lines}\n\nQuestion: {question}"
+    )
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": msg}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
 
 @torch.inference_mode()
-def generate_batch(prompts, model, tokenizer):
-    """Greedy-generate exactly 1 token per prompt. Return list of decoded strings."""
+def score_batch(prompts, model, tokenizer, letter_tok_ids):
+    """Return predicted letter index (0-5) for each prompt via logit scoring."""
     inputs = tokenizer(
         prompts, return_tensors="pt", padding=True,
-        truncation=True, max_length=2048
+        truncation=True, max_length=2048,
     ).to(model.device)
+    logits_last = model(**inputs).logits[:, -1, :]  # [B, vocab]
 
-    out = model.generate(
-        **inputs,
-        max_new_tokens=1,
-        do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    new_tokens = out[:, inputs["input_ids"].shape[1]:]
-    return [tokenizer.decode(t, skip_special_tokens=True).strip() for t in new_tokens]
+    # For each letter, take the max logit across all its valid token representations
+    B = logits_last.shape[0]
+    letter_scores = torch.full((B, len(LETTERS)), float("-inf"), device=logits_last.device)
+    for j, letter in enumerate(LETTERS):
+        tok_ids = letter_tok_ids[letter]
+        if tok_ids:
+            letter_scores[:, j] = logits_last[:, tok_ids].max(dim=1).values
+
+    return letter_scores.argmax(dim=1).cpu().numpy()  # [B] index into LETTERS
 
 
 def main():
     tf = pd.read_csv(DATA_DIR / "wmdp_tf_pairs.csv")[
         ["original_id", "question"]
     ].drop_duplicates("original_id").reset_index(drop=True)
-    print(f"Unique WMDP-bio questions: {len(tf)}")
+    n = len(tf)
+    print(f"Unique WMDP-bio questions: {n}")
+
+    rng = np.random.default_rng(SEED)
+    perms = [rng.permutation(len(CATEGORIES)) for _ in range(n)]
 
     print(f"Loading {MODEL_ID} ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, padding_side="left")
@@ -112,46 +98,35 @@ def main():
     )
     model.eval()
 
+    letter_tok_ids = get_letter_tok_ids(tokenizer)
+    print("Letter token IDs:", {L: ids for L, ids in letter_tok_ids.items()})
+
     questions = tf["question"].tolist()
     orig_ids  = tf["original_id"].tolist()
-    n         = len(questions)
-    raw_tokens = []
+    winner_indices = []  # index into LETTERS for each question
 
     for start in range(0, n, BATCH_SIZE):
-        batch_q = questions[start : start + BATCH_SIZE]
-        prompts = [make_prompt(q) for q in batch_q]
-        tokens  = generate_batch(prompts, model, tokenizer)
-        raw_tokens.extend(tokens)
+        batch_q    = questions[start : start + BATCH_SIZE]
+        batch_perm = perms[start : start + BATCH_SIZE]
+        prompts    = [make_prompt(tokenizer, q, p) for q, p in zip(batch_q, batch_perm)]
+        winners    = score_batch(prompts, model, tokenizer, letter_tok_ids)
+        winner_indices.extend(winners.tolist())
         print(f"  {min(start + BATCH_SIZE, n)}/{n}", end="\r", flush=True)
 
-    print(f"\nDone. Building output CSV ...")
-
+    print(f"\nBuilding output CSV ...")
     rows = []
-    gibberish_count = 0
-    for orig_id, question, tok in zip(orig_ids, questions, raw_tokens):
-        upper = tok.upper()
-        if upper in CATEGORIES:
-            pred_letter   = upper
-            pred_category = CATEGORIES[upper]
-            is_gibberish  = False
-        else:
-            pred_letter   = "?"
-            pred_category = "gibberish"
-            is_gibberish  = True
-            gibberish_count += 1
+    for orig_id, question, perm, winner_j in zip(orig_ids, questions, perms, winner_indices):
+        pred_category = CATEGORIES[perm[winner_j]]
         rows.append({
             "original_id":        orig_id,
             "question":           question,
-            "raw_token":          tok,
-            "predicted_letter":   pred_letter,
+            "predicted_letter":   LETTERS[winner_j],
             "predicted_category": pred_category,
-            "is_gibberish":       is_gibberish,
         })
 
     df_out = pd.DataFrame(rows)
     df_out.to_csv(OUT_CSV, index=False)
     print(f"Saved: {OUT_CSV}")
-    print(f"\nGibberish: {gibberish_count}/{n} ({100*gibberish_count/n:.1f}%)")
     print(f"\nCategory distribution:")
     print(df_out["predicted_category"].value_counts().to_string())
 
