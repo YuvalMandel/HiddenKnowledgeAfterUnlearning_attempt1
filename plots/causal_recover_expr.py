@@ -9,7 +9,7 @@ SLUGS={"GradDiff":"graddiff","RMU":"rmu","RMU-LAT":"rmu-lat","RepNoise":"repnois
 METHOD=sys.argv[1] if len(sys.argv)>1 else "RepNoise"
 SLUG=SLUGS[METHOD]; CKPT=METHOD+"_ck8"; CK8_REPO="LLM-GAT/llama-3-8b-instruct-%s-checkpoint-8"%SLUG
 REPO=Path("."); OUT=REPO/"inside_out_out"; SAVE=REPO/"plots"/"activation_vectors"; SAVE.mkdir(parents=True,exist_ok=True)
-L_STEER=[3,6,9,12,15]; ALPHAS=[-1.0,0.0,0.5,1.0,2.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
+L_STEER=[3,6,9,12,15]; ALPHAS=[-4.0,-2.0,-1.0,0.0,0.5,1.0,2.0,4.0,8.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
 print("=== METHOD",METHOD,"===",flush=True)
 VSYS="You are a critical fact-checker. Answer True or False. True and False are equally likely. Do not explain."
 def vprompt(q,ch):
@@ -91,7 +91,7 @@ res=pd.DataFrame(res); res.to_csv(SAVE/("causal_recover_expr_%s.csv"%METHOD),ind
 fig,ax=plt.subplots(figsize=(8,5))
 for name,col in [("supp_expr","#d62728"),("supp_dS","#1f77b4"),("forg_expr","#7b3294"),("supp_random","#888888")]:
     s=res[res.condition==name].sort_values("alpha"); ax.plot(s.alpha,s.kext,"-o",color=col,label=name)
-ax.axhline(0.5,color="k",lw=.5,ls=":"); ax.axvline(1,color="g",lw=.9,ls="--",label="alpha=1")
+ax.axhline(0.5,color="k",lw=.5,ls=":"); ax.axvline(1,color="g",lw=.9,ls="--",label="alpha=1"); ax.set_ylim(0,1)
 ax.set_xlabel("alpha"); ax.set_ylabel("K_ext (held-out test)")
 ax.set_title("%s: within-model expression dir (retained-suppressed) vs cross-model d_S"%METHOD)
 ax.legend(); ax.grid(alpha=.3); fig.tight_layout(); fig.savefig(SAVE/("causal_recover_expr_%s.png"%METHOD),dpi=150,bbox_inches="tight")
