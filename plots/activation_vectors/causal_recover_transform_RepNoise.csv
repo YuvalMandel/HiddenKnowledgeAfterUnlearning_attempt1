@@ -1,0 +1,9 @@
+condition,beta,kext
+A_ridge_base,0.0,0.129
+A_ridge_base,0.5,0.639
+A_ridge_base,1.0,0.565
+B_coral_retained,0.0,0.129
+B_coral_retained,0.5,0.303
+B_coral_retained,1.0,0.469
+B_coral_forgotten(ctrl),1.0,0.408
+forgottenQ_under_Bret(ctrl),1.0,0.345
