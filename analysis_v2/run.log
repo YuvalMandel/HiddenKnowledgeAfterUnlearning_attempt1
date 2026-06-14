@@ -1,0 +1,8 @@
+[2026-06-11T16:25:57.829051+00:00] Starting v2 pipeline.
+[2026-06-11T16:25:57.982455+00:00] Eligible rows prepared: 771 rows.
+[2026-06-11T21:14:50.023979+00:00] Balanced clustered bootstrap complete.
+[2026-06-12T18:27:51.813837+00:00] Intrinsic method-centered effects complete.
+[2026-06-12T18:28:46.368847+00:00] Repeated grouped CV complete.
+[2026-06-14T04:10:50.363466+00:00] Sensitivity analyses complete.
+[2026-06-14T04:10:50.379266+00:00] Unclear proxy audit complete.
+[2026-06-14T04:10:55.123369+00:00] Figures complete.

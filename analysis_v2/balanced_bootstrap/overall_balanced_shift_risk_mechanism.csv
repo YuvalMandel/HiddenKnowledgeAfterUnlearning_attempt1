@@ -1,0 +1,4 @@
+axis,label,n_rows_total,n_unique_questions,n_suppressed_rows,n_forgotten_rows,mean_balanced_shift,median_balanced_shift,ci95_low,ci95_high,sign_probability_positive,sign_probability_negative,bootstrap_repetitions,bootstrap_seed
+risk_mechanism,cross_cutting_or_unclear,771,280,526,245,-0.011723168677238638,-0.011904761904761862,-0.1093161736457933,0.08511286974571865,0.397,0.5738,5000,42
+risk_mechanism,expanding_access,771,280,526,245,0.004557721231545392,0.0040983606557377025,-0.03448607427055703,0.04444857496902101,0.5392,0.3754,5000,42
+risk_mechanism,unlocking_new_biology,771,280,526,245,0.007165447445693245,0.007874015748031482,-0.09012963484134243,0.10684156378600818,0.54,0.4226,5000,42

@@ -1,0 +1,79 @@
+{
+  "duplicate_question_method_rows": 0,
+  "forgotten_count": 245,
+  "ideation_eligible_rows": 0,
+  "ideation_present_in_label_file": 73,
+  "low_confidence_rate": 0.5525291828793775,
+  "method_audit": {
+    "expected_methods": [
+      "ELM",
+      "GradDiff",
+      "PB_J",
+      "RMU",
+      "RMU-LAT",
+      "RR",
+      "RepNoise",
+      "TAR"
+    ],
+    "missing_methods": [
+      "RMU"
+    ],
+    "note": "Plain RMU is unavailable in the current eligible suppressed-vs-forgotten subset.",
+    "present_methods": [
+      "ELM",
+      "GradDiff",
+      "PB_J",
+      "RMU-LAT",
+      "RR",
+      "RepNoise",
+      "TAR"
+    ],
+    "rmu_alias_hits": [],
+    "rmu_present": false
+  },
+  "missing_values_per_column": {
+    "checkpoint": 0,
+    "choices": 0,
+    "judge_model": 0,
+    "judge_prompt_version": 0,
+    "method": 0,
+    "needs_review": 0,
+    "outcome": 0,
+    "proxy_relation_confidence": 0,
+    "proxy_relation_final": 0,
+    "question": 0,
+    "question_hash": 0,
+    "question_id": 0,
+    "rationale_short": 0,
+    "risk_mechanism_confidence": 0,
+    "risk_mechanism_final": 0,
+    "risk_stage_analysis_final": 0,
+    "risk_stage_confidence": 0,
+    "risk_stage_final": 0,
+    "topic_category_inferred": 0
+  },
+  "review_queue_rate": 0.556420233463035,
+  "rows_per_method": {
+    "ELM": 105,
+    "GradDiff": 86,
+    "PB_J": 117,
+    "RMU-LAT": 97,
+    "RR": 95,
+    "RepNoise": 150,
+    "TAR": 121
+  },
+  "suppressed_count": 526,
+  "suppressed_rate": 0.682230869001297,
+  "total_rows": 771,
+  "unique_methods": 7,
+  "unique_question_ids": 280,
+  "unique_questions_per_method": {
+    "ELM": 105,
+    "GradDiff": 86,
+    "PB_J": 117,
+    "RMU-LAT": 97,
+    "RR": 95,
+    "RepNoise": 150,
+    "TAR": 121
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "eligible_rows": 771,
+  "eligible_unique_questions": 280,
+  "questions_flagged_needs_review": 232,
+  "questions_marked_background_knowledge": 409,
+  "questions_marked_cannot_determine": 42,
+  "questions_with_multiple_operational_stage_labels": 412,
+  "questions_with_zero_operational_stage_labels": 323
+}
