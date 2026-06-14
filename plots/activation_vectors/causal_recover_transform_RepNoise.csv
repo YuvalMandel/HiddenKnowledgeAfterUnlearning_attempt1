@@ -1,0 +1,11 @@
+condition,beta,kext
+A_ridge_base,0.0,0.1292517006802721
+B_coral_retained,0.0,0.1292517006802721
+A_ridge_base,0.5,0.6394557823129251
+B_coral_retained,0.5,0.3027210884353742
+A_ridge_base,1.0,0.5646258503401361
+B_coral_retained,1.0,0.46938775510204084
+A_translation_dS,1.0,0.7448979591836733
+B_translation_r,1.0,0.5680272108843538
+B_coral_forgotten(ctrl),1.0,0.4081632653061225
+forgottenQ_under_Bret(ctrl),1.0,0.34523809523809523
