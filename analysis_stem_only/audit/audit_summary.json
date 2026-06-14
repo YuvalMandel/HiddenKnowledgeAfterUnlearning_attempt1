@@ -1,0 +1,9 @@
+{
+  "background_only_rows": 328,
+  "eligible_rows": 771,
+  "mean_choice_added_stage_count": 0.5106048703849175,
+  "mean_stage_set_jaccard": 0.5815784760408484,
+  "needs_review_rows": 296,
+  "primary_rows_excluding_sterile": 771,
+  "sterile_rows": 0
+}

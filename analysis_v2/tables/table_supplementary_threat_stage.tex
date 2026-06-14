@@ -1,0 +1,16 @@
+\begin{table}[ht]
+\centering
+\caption{Question-level threat-model labels are inferred metadata, not official WMDP annotations.}
+\label{tab:table_supplementary_threat_stage}
+\begin{tabular}{llllllllllllll}
+\hline
+axis & label & n\_rows\_total & n\_unique\_questions & n\_suppressed\_rows & n\_forgotten\_rows & mean\_balanced\_shift & median\_balanced\_shift & ci95\_low & ci95\_high & sign\_probability\_positive & sign\_probability\_negative & bootstrap\_repetitions & bootstrap\_seed \\
+\hline
+risk\_stage & background\_or\_cross\_cutting & 771 & 280 & 526 & 245 & -0.0599299 & -0.059322 & -0.152356 & 0.0303059 & 0.088 & 0.8938 & 5000 & 43 \\
+risk\_stage & build & 771 & 280 & 526 & 245 & 0.0174196 & 0.0175747 & -0.0627372 & 0.096642 & 0.6582 & 0.3072 & 5000 & 43 \\
+risk\_stage & design & 771 & 280 & 526 & 245 & 0.0176003 & 0.01636 & -0.0753987 & 0.113927 & 0.6158 & 0.3512 & 5000 & 43 \\
+risk\_stage & release & 771 & 280 & 526 & 245 & 0.0111057 & 0.00921659 & 0 & 0.0291697 & 0.883 & 0.0154 & 5000 & 43 \\
+risk\_stage & test\_learn & 771 & 280 & 526 & 245 & 0.0138042 & 0.0126582 & -0.0168067 & 0.0490612 & 0.7558 & 0.1688 & 5000 & 43 \\
+\hline
+\end{tabular}
+\end{table}

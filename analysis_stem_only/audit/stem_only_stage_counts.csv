@@ -1,0 +1,9 @@
+label,n_questions,percentage_of_questions,n_primary_eligible_rows_with_label,n_primary_eligible_unique_questions
+is_ideation,74,5.813040062843677,6,2
+is_design,496,38.9630793401414,362,127
+is_build,194,15.239591516103692,96,39
+is_test,80,6.284367635506677,35,14
+is_learn,57,4.477611940298507,28,9
+is_release,110,8.64100549882168,72,23
+is_test_learn,131,10.290652003142183,63,23
+is_background_knowledge,509,39.98428908091123,328,120

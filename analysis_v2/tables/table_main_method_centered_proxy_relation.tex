@@ -1,0 +1,46 @@
+\begin{table}[ht]
+\centering
+\caption{Question-level threat-model labels are inferred metadata, not official WMDP annotations.}
+\label{tab:table_main_method_centered_proxy_relation}
+\begin{tabular}{llllllllllll}
+\hline
+method & axis & label & n\_rows & n\_unique\_questions & suppressed\_count & forgotten\_count & suppressed\_rate\_for\_label & suppressed\_rate\_for\_method & method\_centered\_effect & ci95\_low & ci95\_high \\
+\hline
+ELM & proxy\_relation & component & 39 & 39 & 26 & 13 & 0.666667 & 0.752381 & -0.0857143 & -0.202241 & 0.0253179 \\
+ELM & proxy\_relation & general\_proxy & 10 & 10 & 6 & 4 & 0.6 & 0.752381 & -0.152381 & -0.483333 & 0.142857 \\
+ELM & proxy\_relation & neighbor & 6 & 6 & 6 & 0 & 1 & 0.752381 & 0.247619 & 0.171429 & 0.333333 \\
+ELM & proxy\_relation & precursor & 23 & 23 & 19 & 4 & 0.826087 & 0.752381 & 0.073706 & -0.0761905 & 0.211905 \\
+ELM & proxy\_relation & unclear & 27 & 27 & 22 & 5 & 0.814815 & 0.752381 & 0.0624339 & -0.0761905 & 0.188581 \\
+GradDiff & proxy\_relation & component & 29 & 29 & 22 & 7 & 0.758621 & 0.802326 & -0.0437049 & -0.169617 & 0.0746205 \\
+GradDiff & proxy\_relation & general\_proxy & 10 & 10 & 8 & 2 & 0.8 & 0.802326 & -0.00232558 & -0.26055 & 0.22093 \\
+GradDiff & proxy\_relation & neighbor & 7 & 7 & 6 & 1 & 0.857143 & 0.802326 & 0.0548173 & -0.277409 & 0.255814 \\
+GradDiff & proxy\_relation & precursor & 15 & 15 & 13 & 2 & 0.866667 & 0.802326 & 0.0643411 & -0.112982 & 0.22093 \\
+GradDiff & proxy\_relation & unclear & 25 & 25 & 20 & 5 & 0.8 & 0.802326 & -0.00232558 & -0.146885 & 0.122346 \\
+PB\_J & proxy\_relation & component & 48 & 48 & 26 & 22 & 0.541667 & 0.538462 & 0.00320513 & -0.106838 & 0.116247 \\
+PB\_J & proxy\_relation & general\_proxy & 15 & 15 & 12 & 3 & 0.8 & 0.538462 & 0.261538 & 0.0412267 & 0.452991 \\
+PB\_J & proxy\_relation & neighbor & 8 & 8 & 3 & 5 & 0.375 & 0.538462 & -0.163462 & -0.521368 & 0.196688 \\
+PB\_J & proxy\_relation & precursor & 21 & 21 & 11 & 10 & 0.52381 & 0.538462 & -0.014652 & -0.215388 & 0.188034 \\
+PB\_J & proxy\_relation & unclear & 25 & 25 & 11 & 14 & 0.44 & 0.538462 & -0.0984615 & -0.277597 & 0.0818102 \\
+RMU-LAT & proxy\_relation & component & 33 & 33 & 16 & 17 & 0.484848 & 0.587629 & -0.10278 & -0.241585 & 0.0378007 \\
+RMU-LAT & proxy\_relation & general\_proxy & 11 & 11 & 7 & 4 & 0.636364 & 0.587629 & 0.0487348 & -0.234303 & 0.32268 \\
+RMU-LAT & proxy\_relation & neighbor & 8 & 8 & 6 & 2 & 0.75 & 0.587629 & 0.162371 & -0.17732 & 0.443299 \\
+RMU-LAT & proxy\_relation & precursor & 17 & 17 & 13 & 4 & 0.764706 & 0.587629 & 0.177077 & -0.0288768 & 0.360825 \\
+RMU-LAT & proxy\_relation & unclear & 28 & 28 & 15 & 13 & 0.535714 & 0.587629 & -0.0519146 & -0.210848 & 0.108732 \\
+RR & proxy\_relation & component & 30 & 30 & 24 & 6 & 0.8 & 0.694737 & 0.105263 & -0.0242763 & 0.233394 \\
+RR & proxy\_relation & general\_proxy & 12 & 12 & 9 & 3 & 0.75 & 0.694737 & 0.0552632 & -0.192602 & 0.294737 \\
+RR & proxy\_relation & neighbor & 10 & 10 & 6 & 4 & 0.6 & 0.694737 & -0.0947368 & -0.414035 & 0.200033 \\
+RR & proxy\_relation & precursor & 16 & 16 & 12 & 4 & 0.75 & 0.694737 & 0.0552632 & -0.163174 & 0.249393 \\
+RR & proxy\_relation & unclear & 27 & 27 & 15 & 12 & 0.555556 & 0.694737 & -0.139181 & -0.301912 & 0.0134896 \\
+RepNoise & proxy\_relation & component & 57 & 57 & 41 & 16 & 0.719298 & 0.706667 & 0.0126316 & -0.08 & 0.109415 \\
+RepNoise & proxy\_relation & general\_proxy & 17 & 17 & 14 & 3 & 0.823529 & 0.706667 & 0.116863 & -0.0790714 & 0.286667 \\
+RepNoise & proxy\_relation & neighbor & 11 & 11 & 10 & 1 & 0.909091 & 0.706667 & 0.202424 & -0.00666667 & 0.346667 \\
+RepNoise & proxy\_relation & precursor & 28 & 28 & 21 & 7 & 0.75 & 0.706667 & 0.0433333 & -0.106667 & 0.182355 \\
+RepNoise & proxy\_relation & unclear & 37 & 37 & 20 & 17 & 0.540541 & 0.706667 & -0.166126 & -0.309588 & -0.0326784 \\
+TAR & proxy\_relation & component & 47 & 47 & 35 & 12 & 0.744681 & 0.710744 & 0.033937 & -0.0681818 & 0.133151 \\
+TAR & proxy\_relation & general\_proxy & 16 & 16 & 11 & 5 & 0.6875 & 0.710744 & -0.0232438 & -0.257381 & 0.188981 \\
+TAR & proxy\_relation & neighbor & 8 & 8 & 6 & 2 & 0.75 & 0.710744 & 0.0392562 & -0.305874 & 0.31405 \\
+TAR & proxy\_relation & precursor & 22 & 22 & 16 & 6 & 0.727273 & 0.710744 & 0.0165289 & -0.165814 & 0.181863 \\
+TAR & proxy\_relation & unclear & 28 & 28 & 18 & 10 & 0.642857 & 0.710744 & -0.0678867 & -0.232682 & 0.0892631 \\
+\hline
+\end{tabular}
+\end{table}

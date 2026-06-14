@@ -1,0 +1,1 @@
+scripts\run_multilabel_analysis.py --labels-input multilabel\wmdp_bio_threat_chain_multilabel_labels_chatgpt_assistant_v1.csv --output-dir analysis_multilabel --bootstrap-repetitions 5000 --cv-repeats 20 --min-cell-n 10 --seed 42

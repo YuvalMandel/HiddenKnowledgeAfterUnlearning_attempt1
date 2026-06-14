@@ -1,0 +1,17 @@
+subset,axis,n_rows,n_unique_questions
+S0_all,risk_mechanism,771,280
+S0_all,risk_stage,771,280
+S0_all,proxy_relation,771,280
+S0_all,topic_category,771,280
+S1_no_review,risk_mechanism,342,125
+S1_no_review,risk_stage,342,125
+S1_no_review,proxy_relation,342,125
+S1_no_review,topic_category,342,125
+S2_high_confidence,risk_mechanism,226,85
+S2_high_confidence,risk_stage,226,85
+S2_high_confidence,proxy_relation,226,85
+S2_high_confidence,topic_category,226,85
+S3_collapse_uncertain,risk_mechanism,771,280
+S3_collapse_uncertain,risk_stage,516,193
+S3_collapse_uncertain,proxy_relation,574,212
+S3_collapse_uncertain,topic_category,771,280
