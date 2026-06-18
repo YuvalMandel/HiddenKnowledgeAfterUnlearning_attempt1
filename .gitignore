@@ -28,6 +28,7 @@ Thumbs.db
 !plots/v6_logodds/*.png
 !plots/v6_question_length_hist/*.png
 !plots/v6_word_pct/*.png
+!activation_question_scores/figures/*.png
 npy_files.tar.gz
 # *.npy tracked via Git LFS — not ignored
 
