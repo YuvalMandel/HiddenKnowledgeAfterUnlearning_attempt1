@@ -12,6 +12,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hk_utils import iclr_figsize, use_iclr_style
+
+use_iclr_style()
 
 OUT_DIR = Path(__file__).parent.parent / "inside_out_out"
 
@@ -114,7 +120,7 @@ ve   = data["k_ext"].values * 100
 vi_e = data["k_int_std"].values * 100
 ve_e = data["k_ext_std"].values * 100
 
-fig, ax = plt.subplots(figsize=(7, 4.2))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=4.2 / 7))
 ax.bar(x - w/2, vi, width=w, color=INT_COLOR, alpha=0.88,
        label=r"$K_\mathrm{int}$ (probe, best layer)", zorder=3,
        yerr=vi_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
