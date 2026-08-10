@@ -25,7 +25,10 @@ sys.path.insert(0, str(REPO / "plots"))
 from hk_utils import (
     METHODS, load_correct_idx, load_split_indices, load_scores_df,
     compute_prefilter_mask, get_parquet_full_single, get_cv_full_df,
+    iclr_figsize, use_iclr_style,
 )
+
+use_iclr_style()
 
 def get_per_layer_single(df):
     """Per-layer single-split data — used as fallback K_ext source."""
@@ -110,7 +113,7 @@ def plot_gap(results, n_filtered):
     x = np.arange(len(labels))
     width = 0.35
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.40))
 
     for i, (ki, ke) in enumerate(zip(k_int_vals, k_ext_vals)):
         # K_int bar (hatched if NaN = full-layer probe unavailable)
