@@ -16,6 +16,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hk_utils import iclr_figsize, use_iclr_style
+
+use_iclr_style()
 
 REPO     = Path(__file__).parent.parent
 OUT_DIR  = REPO / "inside_out_out"
@@ -141,7 +147,7 @@ comp_agg = comp.groupby(["subset", "pair_outcome"])["frac"].mean().reset_index()
 comp_agg.to_csv(SAVE_DIR / "v6_pair_composition_agg.csv", index=False)
 
 # ── Fig:pair-composition — stacked bar, 4 subsets, averaged across methods ──────
-fig, ax = plt.subplots(figsize=(6, 4.5))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=4.5 / 6))
 
 x = np.arange(len(SUBSET_ORDER))
 bottoms = np.zeros(len(SUBSET_ORDER))

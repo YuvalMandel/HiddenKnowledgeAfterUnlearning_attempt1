@@ -40,13 +40,15 @@ def use_iclr_style():
     """
     mpl.rcParams.update({
         "figure.figsize": iclr_figsize(),
-        "font.size": 8,
-        "axes.titlesize": 9,
-        "axes.labelsize": 8,
-        "xtick.labelsize": 7,
-        "ytick.labelsize": 7,
-        "legend.fontsize": 7,
-        "figure.titlesize": 9,
+        # At scale 1.0 these render as-authored, so they sit just under the
+        # 10pt body text rather than being shrunk into illegibility.
+        "font.size": 9,
+        "axes.titlesize": 10,
+        "axes.labelsize": 9,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 8,
+        "figure.titlesize": 10,
         "font.family": "serif",
         "font.serif": ["Times New Roman", "DejaVu Serif"],
         "mathtext.fontset": "stix",

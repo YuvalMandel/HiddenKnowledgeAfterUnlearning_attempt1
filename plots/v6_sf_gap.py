@@ -12,7 +12,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import sys
 from scipy.stats import mannwhitneyu
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hk_utils import iclr_figsize, use_iclr_style
+
+use_iclr_style()
 
 OUT_DIR  = Path(__file__).parent.parent / "inside_out_out"
 SAVE_DIR = Path(__file__).parent
@@ -156,7 +162,7 @@ df_plot = df_sf.dropna(subset=["mean_diff"]).copy()
 n = len(df_plot)
 y = np.arange(n)
 
-fig, ax = plt.subplots(figsize=(7, 0.55 * n + 1.2))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=(0.55 * n + 1.2) / 7))
 ax.axvline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
 
 for i, (_, r) in enumerate(df_plot.iterrows()):

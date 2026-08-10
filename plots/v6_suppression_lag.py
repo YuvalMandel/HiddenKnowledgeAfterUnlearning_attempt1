@@ -16,6 +16,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hk_utils import iclr_figsize, use_iclr_style
+
+use_iclr_style()
 
 OUT_DIR  = Path(__file__).parent.parent / "inside_out_out"
 SAVE_DIR = Path(__file__).parent
@@ -129,7 +135,7 @@ SERIES = [
     ("forgotten",  "ck_int_drop", "#aaaaaa", r"$K_\mathrm{int}$ drop · Forgotten"),
 ]
 
-fig, ax = plt.subplots(figsize=(8, 0.85 * n_m + 1.6))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=(0.85 * n_m + 1.6) / 8))
 
 for mi, meth in enumerate(methods_order):
     y_base = (n_m - 1 - mi) * STEP
@@ -156,7 +162,7 @@ for mi, meth in enumerate(methods_order):
         pct_never = 100 * (supp_ki == NEVER).mean()
         ax.text(NEVER + 0.08, y_base + OFFS[0],
                 f"{pct_never:.0f}% K_int never↓",
-                va="center", ha="left", fontsize=6.5, color="#d62728", style="italic")
+                va="center", ha="left", fontsize=7.5, color="#d62728", style="italic")
 
 ax.set_yticks([( n_m - 1 - mi) * STEP for mi in range(n_m)])
 ax.set_yticklabels(methods_order, fontsize=9)
