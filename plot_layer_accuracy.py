@@ -969,7 +969,12 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                 _vmin = -(local_max or 0.01) if vmin is None else vmin
                 _vmax =  (local_max or 0.01) if vmax is None else vmax
             else:
-                cmap_use = "RdYlGn"
+                # Raw metric values (not a delta), so a *sequential* map is
+                # correct. cividis is monotonic in luminance, so the figure
+                # survives black/white printing (ICLR asks for this) and is
+                # colour-blind safe -- unlike RdYlGn, whose red and green
+                # extremes collapse to the same grey.
+                cmap_use = "cividis"
                 _vmin, _vmax = vmin, vmax
 
             im = ax.imshow(
@@ -989,7 +994,11 @@ def _render_heatmap(data: dict, metrics_to_plot: list, clfs: list,
                 ax.set_xlabel("Layer", fontsize=8)
             tick_pos = list(range(0, N_LAYERS))
             ax.set_xticks(tick_pos)
-            ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=5, rotation=90)
+            # 8pt: labels are rotated 90 deg so each needs only its font height
+            # (~8pt) of horizontal room against ~10pt of column width -- all 32
+            # layer indices still fit, measured 2.4pt clear. Layer index is a
+            # discrete identifier, so do NOT thin these out.
+            ax.set_xticklabels([t + 1 for t in tick_pos], fontsize=8, rotation=90)
 
             ax.set_yticks(range(len(present)))
             display_labels = [lb.replace("Base (Instruct)", "Base") for lb in present]

@@ -141,8 +141,12 @@ ax.legend(fontsize=8.5, loc="upper right")
 for xi, v, se in zip(x - w/2, vi, vi_e):
     ax.text(xi, v + se + 1.5, f"{v:.1f}", ha="center", va="bottom",
             fontsize=6.5, color=INT_COLOR)
+# Offset the K_ext labels onto a higher baseline than the K_int ones: the two
+# bars sit ~14pt apart but a "100.0" label is ~18pt wide, so when the pair have
+# near-equal values (the Base bars are 100.0/100.0 by construction) centred
+# labels would overlap horizontally.
 for xi, v, se in zip(x + w/2, ve, ve_e):
-    ax.text(xi, v + se + 1.5, f"{v:.1f}", ha="center", va="bottom",
+    ax.text(xi, v + se + 6.0, f"{v:.1f}", ha="center", va="bottom",
             fontsize=6.5, color=EXT_COLOR)
 fig.tight_layout()
 out = os.path.join(os.path.dirname(__file__), "k_int_vs_ext_kfold_qstar_bestlayer")
