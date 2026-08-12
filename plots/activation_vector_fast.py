@@ -18,7 +18,7 @@ def load_k(mid):
     df=df[(df.split_type=='cv')&(df.domain=='bio')&(df.clf=='LR')&(df.probe_type=='own')&(df.layer_config=='best_layer')]
     return df[['question_idx','k_internal','k_external']].groupby('question_idx',as_index=False).mean()
 
-tf=pd.read_csv(REPO/'data'/'wmdp_tf_pairs.csv')
+tf=pd.read_csv(REPO/'data'/'wmdp_tf_pairs.csv', keep_default_na=False)
 ci=tf.drop_duplicates('original_id').set_index('original_id')['correct_idx'].reindex(range(1273)).astype(int).values
 base=load_k('base')
 qstar=sorted(base.loc[(base.k_internal==1.0)&(base.k_external==1.0),'question_idx'].astype(int).tolist())

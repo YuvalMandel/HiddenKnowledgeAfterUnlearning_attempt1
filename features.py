@@ -18,7 +18,9 @@ te = np.random.default_rng(SEED).permutation(1273)[700:]
 orig_to_pos = {int(qi): i for i, qi in enumerate(te)}
 
 # labels (local file; avoids datasets dependency)
-tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")
+# keep_default_na=False: two answer options are literally "None" and "NA",
+# which pandas would otherwise coerce to NaN.
+tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)
 q = tf[["original_id", "correct_idx"]].drop_duplicates("original_id")
 correct_idx = (
     q.sort_values("original_id")["correct_idx"]

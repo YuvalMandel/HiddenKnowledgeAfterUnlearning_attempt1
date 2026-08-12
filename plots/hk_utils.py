@@ -112,8 +112,19 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def read_tf_pairs():
+    """Read data/wmdp_tf_pairs.csv without pandas' NA coercion.
+
+    Two answer options are the literal strings "None" and "NA", which pandas'
+    default na_values swallow into NaN -- corrupting `proposed_answer` for
+    those rows. The pipeline's own loader uses csv.DictReader and is unaffected,
+    but every pandas reader of this file must opt out explicitly.
+    """
+    return pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)
+
+
 def load_correct_idx():
-    tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")
+    tf = read_tf_pairs()
     q = tf[["original_id", "correct_idx"]].drop_duplicates("original_id")
     return q.sort_values("original_id")["correct_idx"].astype(int).to_numpy()
 

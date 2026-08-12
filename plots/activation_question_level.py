@@ -77,7 +77,7 @@ def subset_of(ki, ke):
 
 # ---------------------------------------------------------------- load activations
 print("loading base hidden states ...", flush=True)
-tf  = pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv")
+tf  = pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv", keep_default_na=False)
 ci  = tf.drop_duplicates("original_id").set_index("original_id")["correct_idx"].reindex(range(1273)).astype(int).values
 hs  = np.load(OUT/"base"/"bio_hs.npy", mmap_mode="r")          # (1273, 4, 33, 4096)
 NQ, NOPT, NL, NH = hs.shape
