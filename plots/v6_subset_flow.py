@@ -14,7 +14,15 @@ Two consequences worth knowing when reading the figure:
     question moving between subsets is a real reclassification, not churn
     from missing data.
 
-Outputs: plots/v6_subset_flow.pdf/.png, plots/v6_subset_flow.csv
+Pass --all to drop the Q* pre-filter and use every question the base model was
+scored on. That removes the all-retained anchor at ck0: questions the base
+model already failed start out in the other three subsets, so the curves show
+absolute population sizes rather than movement away from a known-good baseline.
+
+Usage:
+    python plots/v6_subset_flow.py [METHOD] [--all]
+
+Outputs: plots/v6_subset_flow{,_all}.pdf/.png/.csv
 """
 import sys
 from pathlib import Path
@@ -33,7 +41,9 @@ use_iclr_style()
 REPO = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO / "inside_out_out"
 SAVE_DIR = Path(__file__).resolve().parent
-METHOD = sys.argv[1] if len(sys.argv) > 1 else "RepNoise"
+ALL_Q = "--all" in sys.argv
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+METHOD = args[0] if args else "RepNoise"
 N_CK = 8
 KNOWS = 0.5
 SEL = dict(split_type="cv", domain="bio", clf="LR",
@@ -57,13 +67,15 @@ def load(model_id):
 
 base = load("base")
 qstar = base[(base.k_internal == 1.0) & (base.k_external == 1.0)].index
-n_qstar = len(qstar)
+pool = base.index if ALL_Q else qstar
+n_pool = len(pool)
+pool_label = f"N={n_pool}" if ALL_Q else f"|\\mathcal{{Q}}^*|={n_pool}"
 
 xs = list(range(0, N_CK + 1))
 counts = {name: [] for name in STYLE}
 for c in xs:
     d = base if c == 0 else load(f"{METHOD}_ck{c}")
-    q = d.loc[d.index.intersection(qstar)]
+    q = d.loc[d.index.intersection(pool)]
     hi_i, hi_e = q.k_internal > KNOWS, q.k_external > KNOWS
     n = {
         "Retained":   int((hi_i & hi_e).sum()),
@@ -75,9 +87,11 @@ for c in xs:
     for k, v in n.items():
         counts[k].append(v)
 
+stem = SAVE_DIR / ("v6_subset_flow_all" if ALL_Q else "v6_subset_flow")
+
 df = pd.DataFrame(counts, index=[f"ck{c}" if c else "base" for c in xs])
 df.index.name = "checkpoint"
-df.to_csv(SAVE_DIR / "v6_subset_flow.csv")
+df.to_csv(f"{stem}.csv")
 
 fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.60))
 for name, (colour, ls, marker) in STYLE.items():
@@ -87,30 +101,28 @@ for name, (colour, ls, marker) in STYLE.items():
 ax.set_xticks(xs)
 ax.set_xticklabels(["base\n(ck0)"] + [f"ck{c}" for c in range(1, N_CK + 1)])
 ax.set_xlabel("unlearning checkpoint")
-ax.set_ylabel(f"questions (of $|\\mathcal{{Q}}^*|={n_qstar}$)")
-ax.set_ylim(-15, n_qstar * 1.04)
+ax.set_ylabel(f"questions (of ${pool_label}$)")
+ax.set_ylim(-15, n_pool * 1.04)
 ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
 ax.set_axisbelow(True)
 
-# right axis in % of Q*, since the absolute count is method-independent only
-# because Q* is fixed
+# right axis as a share of the (fixed) question pool
 sec = ax.secondary_yaxis(
-    "right", functions=(lambda v: 100 * v / n_qstar,
-                        lambda p: p * n_qstar / 100))
-sec.set_ylabel(r"\% of $\mathcal{Q}^*$" if plt.rcParams.get("text.usetex")
-               else "% of $\\mathcal{Q}^*$")
+    "right", functions=(lambda v: 100 * v / n_pool,
+                        lambda p: p * n_pool / 100))
+sec.set_ylabel("% of all questions" if ALL_Q else "% of $\\mathcal{Q}^*$")
 
 label = METHOD.replace("_", "&")
-ax.set_title(f"{label}: subset membership re-assigned at each checkpoint",
-             fontsize=9)
+scope = "all questions" if ALL_Q else "$\\mathcal{Q}^*$"
+ax.set_title(f"{label}: subset membership re-assigned at each checkpoint "
+             f"({scope})", fontsize=9)
 ax.legend(frameon=False, ncol=2, loc="center left", fontsize=8)
-
-stem = SAVE_DIR / "v6_subset_flow"
 fig.savefig(f"{stem}.pdf", bbox_inches="tight")
 fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
 
-print(f"Saved {stem.name}.pdf  (method={METHOD}, |Q*|={n_qstar})\n")
+scope_txt = "all questions" if ALL_Q else "Q*"
+print(f"Saved {stem.name}.pdf  (method={METHOD}, {scope_txt}, n={n_pool})\n")
 print(df.to_string())
-print(f"\nrow sums (must all equal {n_qstar}): "
+print(f"\nrow sums (must all equal {n_pool}): "
       f"{sorted(set(df.sum(axis=1).tolist()))}")
