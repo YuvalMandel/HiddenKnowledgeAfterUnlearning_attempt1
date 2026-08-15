@@ -26,6 +26,18 @@ refs = set(re.findall(r"\\ref\{([^}]+)\}", s))
 dangling = sorted(refs - labels)
 print("dangling refs:", dangling or "none")
 
+# Two \label{x} with the same name compile with only a warning, and every
+# \ref{x} silently resolves to whichever came last -- easy to introduce when
+# moving a block to the appendix while reusing its label in the new text.
+seen = {}
+for i, line in enumerate(s.split("\n"), 1):
+    for lab in re.findall(r"\\label\{([^}]+)\}", line):
+        seen.setdefault(lab, []).append(i)
+dupes = {k: v for k, v in seen.items() if len(v) > 1}
+print("duplicate labels:", "none" if not dupes else "")
+for k, v in sorted(dupes.items()):
+    print("   DUPLICATE %-28s lines %s" % (k, v))
+
 # A \label right after a float binds to that float's counter, not the section,
 # so \ref would render a table/figure number.
 orphan = re.findall(r"\\end\{(?:table|figure)\}\s*\n\s*\\label\{([^}]+)\}", s)
