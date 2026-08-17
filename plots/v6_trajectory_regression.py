@@ -26,7 +26,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
-from sklearn.model_selection import RepeatedKFold, cross_val_predict, cross_val_score, KFold
+from sklearn.model_selection import (RepeatedKFold, cross_val_predict,
+                                     cross_val_score, KFold, GroupKFold,
+                                     GroupShuffleSplit)
+import sys
 
 REPO     = Path(__file__).parent.parent
 OUT_DIR  = REPO / "inside_out_out"
@@ -70,7 +73,17 @@ TARGETS = {
     "int_ext_gap":     "K_int - K_ext gap @ ck8",
 }
 
-CV    = RepeatedKFold(n_splits=5, n_repeats=10, random_state=SEED)
+# The design matrix carries one row per (question, method) -- 8 rows per
+# question with IDENTICAL feature values and 8 different targets. Splitting on
+# rows therefore leaves 7 copies of a test question's features in the training
+# fold, and a flexible model reads the answer off them: row-wise CV reports
+# R2=0.515 for k_int_traj_auc where grouping by question gives 0.106.
+# Grouped CV is the correct default; --rowwise reproduces the old numbers.
+ROWWISE = "--rowwise" in sys.argv
+CV    = (RepeatedKFold(n_splits=5, n_repeats=10, random_state=SEED) if ROWWISE
+         else GroupShuffleSplit(n_splits=50, test_size=0.2, random_state=SEED))
+CV_PRED = (KFold(n_splits=5, shuffle=True, random_state=SEED) if ROWWISE
+           else GroupKFold(n_splits=5))
 MODELS = {
     "Ridge":      Pipeline([("sc", StandardScaler()), ("m", Ridge(alpha=1.0))]),
     "Lasso":      Pipeline([("sc", StandardScaler()), ("m", Lasso(alpha=0.01, max_iter=5000))]),
@@ -211,6 +224,9 @@ data = data.dropna(subset=FEATURE_COLS + list(TARGETS.keys()))
 print(f"  Dataset: {len(data)} rows, {data['question_idx'].nunique()} questions")
 
 X = data[FEATURE_COLS].to_numpy(dtype=float)
+GROUPS = data["question_idx"].to_numpy()
+GKW = {} if ROWWISE else dict(groups=GROUPS)
+print(f"  CV: {'row-wise (LEAKY, legacy)' if ROWWISE else 'grouped by question'}")
 result_rows = []
 
 for t_key, t_label in TARGETS.items():
@@ -218,9 +234,8 @@ for t_key, t_label in TARGETS.items():
     y = data[t_key].to_numpy(dtype=float)
     best_rho, best_name = -1, ""
     for mname, model in MODELS.items():
-        r2s = cross_val_score(model, X, y, cv=CV, scoring="r2", n_jobs=1)
-        y_pred = cross_val_predict(model, X, y,
-                                   cv=KFold(n_splits=5, shuffle=True, random_state=SEED))
+        r2s = cross_val_score(model, X, y, cv=CV, scoring="r2", n_jobs=1, **GKW)
+        y_pred = cross_val_predict(model, X, y, cv=CV_PRED, **GKW)
         rho, _ = spearmanr(y, y_pred)
         print(f"  {mname:12s}  R2={r2s.mean():.3f}±{r2s.std():.3f}  rho={rho:.3f}")
         result_rows.append({

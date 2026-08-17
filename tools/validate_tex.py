@@ -43,6 +43,26 @@ for k, v in sorted(dupes.items()):
 orphan = re.findall(r"\\end\{(?:table|figure)\}\s*\n\s*\\label\{([^}]+)\}", s)
 print("orphaned labels after floats:", orphan or "none")
 
+# Paragraphs in this file are single reflowed lines, so a mid-line '%' comments
+# out the REST OF THE PARAGRAPH. Putting a "% was: ..." note after a corrected
+# number silently deletes the rest of the sentence.
+swallowed = []
+for n, line in enumerate(s.split("\n"), 1):
+    j = None
+    for m in re.finditer(r"(?<!\\)%", line):
+        j = m.start()
+        break
+    if j is None or j == 0 or not line[:j].strip():
+        continue
+    before, after = line[:j].rstrip(), line[j + 1:].strip()
+    # legitimate: comment trails a finished row/environment, or is short
+    if before.endswith(("\\\\", "}", "{")) or len(after.split()) <= 6:
+        continue
+    swallowed.append((n, after[:60]))
+print("mid-line %% swallowing prose:", "none" if not swallowed else "")
+for n, a in swallowed:
+    print("   LINE %d swallows: %s..." % (n, a))
+
 # \section/\paragraph/floats inside \textcolor{}{...} break the compile.
 wrapped = re.findall(r"\\textcolor\{[a-z]+\}\{\\(section|subsection|paragraph|begin)", s)
 print("sectioning/float in textcolor:", wrapped or "none")
