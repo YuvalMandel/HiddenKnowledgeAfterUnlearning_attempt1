@@ -1,0 +1,143 @@
+QUESTIONS FOR THE AUTHORS — raised while answering the YM/Z review notes
+Written 2026-08-20.  Overleaf commit 44c21a1.  Scope of that pass: Experiments (§5) only.
+
+All 21 review notes inside §5 were addressed; each is now a LaTeX comment sitting
+next to the text it referred to, recording what was done and why. Every change is
+wrapped in \textcolor{red}{} for your review.
+
+Recovery: Overleaf's git bridge REJECTS new branches ("You can't push any new
+branches. Please use the main branch."), so a branch could not be created there.
+The pre-change state is preserved two ways instead:
+    tag     pre-review-2026-08-19        (local, at commit bf35a00)
+    branch  overleaf-pre-review-20260819 (local, at commit bf35a00)
+To restore Overleaf exactly as it was before this pass:
+    cd overleaf_claims
+    git reset --hard pre-review-2026-08-19
+    git push --force origin main
+Overleaf's own web version history is a third, independent route back.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q1.  Does "all eight methods collapse K_ext to chance" meet the bar that
+     WMDP / LLM-GAT themselves state?
+────────────────────────────────────────────────────────────────────────────
+Z's note asked to "verify vs our seminal benchmarks e.g. WMDP/GAT and reference
+to their relevant statements".
+
+What I could do: state the result precisely and cite both papers. §5.1 now reads
+"Every one of the eight methods drives K_ext to chance: LogitAUC falls from 0.755
+to 0.511-0.585", with li2024wmdp and llmgat2024 cited.
+
+What I could NOT do: assert that this meets *their* declared success criterion. I
+do not have their reported thresholds locally, and I am not willing to state a
+comparison I cannot check.
+
+NEEDED FROM YOU: the specific claim/threshold in WMDP or LLM-GAT you want to
+compare against (e.g. "accuracy within X of random"), or confirmation to leave
+the sentence as a factual statement of our own numbers with no comparative claim.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q2.  Where should Q* be introduced — §5.1, §5.2, or §5.3?
+────────────────────────────────────────────────────────────────────────────
+Three separate notes point at this (YM on §5.1 "should we mention filtering at
+this point? sounds it would cause confusion"; YM on §5.2 "this entire paragraph
+can be skipped if we introduce Q* at 5.3 and not 5.2 ... that should be verified
+first in my view"; YM on §5.3 "shows that Q* probably should be introduced
+later").
+
+Current state: Q* is defined in \S\ref{sec:subsets-def} (Definitions) and
+restricted-to at the END of §5.1, immediately before §5.2 first uses it. I made
+only the local fixes — removed the confusing "with no pre-filtering" phrase from
+§5.1 and the redundant summation sentence from §5.3.
+
+I did NOT restructure, and I did NOT delete the "Two qualifications" paragraph in
+§5.2, because YM explicitly says the alignment "should be verified first". That
+paragraph currently carries the caveat that the headline 2.7x ratio is measured
+on all 1,273 questions rather than Q*.
+
+NEEDED FROM YOU: which subsection should own the Q* restriction? Note the
+constraint that §5.2's headline transition count (941 -> 309 suppressed / 113
+forgotten) is deliberately computed on all 1,273 questions, not Q*, because a
+transition needs a well-defined starting cell. So §5.2 currently uses BOTH
+populations and that is why the qualification paragraph exists.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q3.  Which layer-selection variant should be the headline?
+────────────────────────────────────────────────────────────────────────────
+YM, twice (§5.5 and again in the layer-targeting appendix): "we had multiple
+attempts at choosing which layers to pick, I think they gave similar results, but
+some are more defensible than others ... focus on one and put the rest in
+appendix".
+
+What I did: kept the fixed grid {3,6,9,12,15} as the main result and added the
+property that makes it defensible — it is ONE method-independent layer set, so no
+per-method tuning enters the headline number. The per-method alternatives (top-k
+and band) stay in app:layer-targeting.
+
+NEEDED FROM YOU: confirm the fixed grid is the one to lead with, or name the
+variant you consider more defensible. I did not reorder them because "more easily
+explained" is a judgement about the argument you want to make, not about the data.
+
+Related: the appendix note (the one remaining un-actioned note, at
+app:layer-targeting) is the same question and was left in place because this pass
+was scoped to Experiments.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q4.  Main text is ~9.4 pages against the 9-page limit — where should the cut come from?
+────────────────────────────────────────────────────────────────────────────
+Measured with plots/estimate_main_text_pages.py (Introduction .. end of
+Discussion; the AI-use / Ethics / Reproducibility statements are ICLR-exempt and
+excluded; Limitations already sits in the appendix):
+
+    Experiments (§5)      3.88 pg   <- WITHIN its own 4-page budget
+    Definitions           1.92 pg
+    Introduction + RW     1.80 pg
+    Methodology           0.83 pg
+    Discussion            0.41 pg
+    title + abstract     ~0.55 pg
+    ------------------------------
+    TOTAL                ~9.40 pg   vs limit 9.0  ->  over by ~0.4 pg (~250 words)
+
+§5 is compliant and my edits net-REDUCED it (1686 -> 1627 words). The overage
+therefore sits in sections this pass was told not to touch — most of it in
+Definitions (1,193 words, largely notation) and Introduction + Related Work.
+
+NEEDED FROM YOU: permission to trim outside §5, and where. Definitions is the
+largest single non-Experiments block and the most compressible without losing
+results.
+
+CAVEAT ON ALL PAGE NUMBERS: there is no LaTeX toolchain on this machine, so every
+figure above is a calibrated estimate (~620 words/page, ~0.36 pg per figure,
+~0.18 pg per table), not a compile. Please check the real Overleaf PDF before
+acting on the 0.4-page overage — it is well inside the error bar of the model.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q5.  Two abstract notes are answered by work already done — apply them?
+────────────────────────────────────────────────────────────────────────────
+Both remaining Z notes sit in the abstract, which was out of scope for this pass,
+so I left them in the text. Both are already resolved analytically:
+
+  (a) "the claim about temporal lag might not be sound and should be verified, as
+      we later under section 5.1 claim the Kint persist and only Kext drop"
+      -> Z is right. K_ext reaches zero in 100% of suppressed questions while
+         K_int never does in 64-86% of them, so the reported mean lag is a lower
+         bound on an event that mostly does not occur. This is why §5.5 was
+         renamed to "A Double Dissociation" on 2026-08-13. The abstract was never
+         updated and still says "temporal suppression lag", contradicting §5.1's
+         own title.
+
+  (b) "that might be strong prediction, and if so, should be under section 5.4,
+      where is the backing data?"
+      -> Traced: it came from tab:regression (now in the appendix). It was also
+         INFLATED by cross-validation leakage — the design matrix holds 8 rows per
+         question with identical features, and row-wise CV put a question's other
+         7 rows in the training fold. Corrected on 2026-08-17 to rho = 0.55,
+         R^2 = 0.28 (was 0.73 / 0.52), and the best model changed from HGB to
+         ElasticNet. The abstract now carries the corrected numbers.
+
+NEEDED FROM YOU: say the word and I will fix the abstract's "temporal suppression
+lag" phrasing and clear both notes.
