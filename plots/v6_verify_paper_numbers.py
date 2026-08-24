@@ -8,6 +8,7 @@ mis-attribution, inverted method rankings, regression CV leakage).
 
 Usage: python plots/v6_verify_paper_numbers.py
 """
+import re
 from pathlib import Path
 
 import numpy as np
@@ -156,8 +157,23 @@ supp_pct = [100 * len(cells(ck8[m].loc[ck8[m].index.intersection(qstar)])["sup"]
             / len(qstar) for m in METHODS]
 check("suppressed share of Q* (%), min/max", (20, 35),
       (min(supp_pct), max(supp_pct)), tol=0.4, fmt="{:.1f}")
-check("INTRO says 17-34% (expected to FAIL)", (17, 34),
-      (min(supp_pct), max(supp_pct)), tol=0.4, fmt="{:.1f}")
+
+# Read the range the paper actually states, in every place it states it, rather
+# than hard-coding it here. The abstract and the Intro bullet disagreed for
+# weeks (20-35 vs 17-34); parsing catches that class of drift automatically.
+tex = REPO / "overleaf_claims" / "iclr2027_conference.tex"
+if tex.exists():
+    body = "\n".join(l for l in tex.read_text(encoding="utf-8").split("\n")
+                     if not l.lstrip().startswith("%"))
+    stated = re.findall(r"(\d{1,2})--(\d{1,2})\\%\s*of\s*questions", body)
+    stated += re.findall(r"(\d{1,2})--(\d{1,2})\\%\s*of\s*(?:pre-filtered\s*)?"
+                         r"questions\s*are\s*suppressed", body)
+    seen = sorted({(int(a), int(b)) for a, b in stated})
+    for lo, hi in seen:
+        check(f"range stated in paper text: {lo}--{hi}%", (lo, hi),
+              (min(supp_pct), max(supp_pct)), tol=0.4, fmt="{:.1f}")
+    if not seen:
+        print("[WARN] could not locate a stated suppression range in the tex")
 
 pc_csv = REPO / "plots" / "v6_pair_composition.csv"
 if pc_csv.exists():
