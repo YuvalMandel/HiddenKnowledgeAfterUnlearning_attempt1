@@ -70,7 +70,16 @@ norm=TwoSlopeNorm(vmin=0.0,vcenter=0.5,vmax=1.0)
 def build(tag,methods,blurb):
     # RdBu stays: the scale is diverging about chance (0.5), so a sequential map
     # would lose the above/below-chance reading. It is also the colour-blind-safe
-    # diverging choice; greyscale symmetry is inherent to any diverging map.
+    # diverging choice.
+    #
+    # Greyscale: any diverging map is luminance-symmetric, so 0.0 and 1.0 print
+    # as the same grey and colour alone cannot say which side of chance a cell
+    # is on. Rather than change the encoding, we add a REDUNDANT non-colour
+    # channel: a contour drawn at K_int=0.5. In colour it marks the chance
+    # boundary explicitly; in greyscale it is the only thing needed to read the
+    # figure, since every cell is then identifiable as inside or outside the
+    # above-chance region. This satisfies the ICLR black/white caveat without
+    # sacrificing the diverging scale.
     fig,axes=plt.subplots(len(methods),2,
                           figsize=(ICLR_TEXTWIDTH_IN,ICLR_TEXTWIDTH_IN*0.86),
                           sharex=True)
@@ -82,6 +91,16 @@ def build(tag,methods,blurb):
             M=method_panel(method,qset)
             im=ax.imshow(M,aspect="auto",cmap="RdBu",norm=norm,
                           extent=[LAYERS[0]-.5,LAYERS[-1]+.5,3-.5,-.5])
+            # Redundant greyscale channel: outline the chance level. A diverging
+            # map prints 0.0 and 1.0 as the same grey, so colour alone cannot say
+            # which side of chance a cell is on; the contour marks the boundary
+            # in a channel that survives black-and-white printing.
+            # (A hatched below-chance overlay was tried and rejected: at 32x3
+            # cells the hatch either renders invisibly or swamps the panel.)
+            if np.isfinite(M).any() and np.nanmin(M)<0.5<np.nanmax(M):
+                ax.contour(np.arange(LAYERS[0],LAYERS[-1]+1),np.arange(3),
+                           np.nan_to_num(M,nan=0.5),levels=[0.5],
+                           colors="k",linewidths=0.7)
             for L in l_steer: ax.axvline(L,color="k",lw=.6,ls=":",alpha=.6)
             ax.set_yticks([0,1,2])
             ax.set_yticklabels(ROW_LABELS if j==0 else [],fontsize=6)
