@@ -23,7 +23,7 @@ VEC = Path(__file__).resolve().parent / "activation_vectors"
 SAVE = Path(__file__).resolve().parent
 METHODS = ["RepNoise", "GradDiff", "PB_J", "TAR", "RR", "ELM", "RMU", "RMU-LAT"]
 MODES = [("fixed", "", 5), ("late", "_late", 5), ("all", "_all", 32),
-         ("topk5", "_topk5", 5), ("band5", "_band5", 5)]
+         ("topk5", "_topk5", 5), ("band5", "_band5", 5), ("allnorm", "_allnorm", 32), ("latenorm", "_latenorm", 5), ("bottomk5", "_bottomk5", 5)]
 
 
 def val(method, suffix, cond, alpha=1.0):
