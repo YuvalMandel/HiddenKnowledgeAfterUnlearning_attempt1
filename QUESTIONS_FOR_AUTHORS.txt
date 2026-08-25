@@ -209,3 +209,35 @@ BLOCKED: Newton was unreachable at the time of writing (DNS failures, and you
 reported an independent connectivity problem). Stage-3 array 1337197 (10 tasks,
 remaining 5 methods x all/late) is queued cluster-side and will run on its own.
 The norm-matched runs have not been submitted.
+
+
+────────────────────────────────────────────────────────────────────────────
+Q4 UPDATE 2026-08-25 — Tier 1 trim applied, STILL OPEN (Overleaf 081605c)
+────────────────────────────────────────────────────────────────────────────
+Applied the "pure redundancy" cuts, all outside Section 5, each with the
+original kept in a "% TRIM (tier 1)" comment:
+
+  - the same-single-forward-pass argument was stated in 4.2, again in 4.3, and
+    a third time in the Intro bullet -> now stated once, keeping the consequence
+  - 4.3's opening re-explained z and h one line after they were defined
+  - the |W|=3 threshold was derived twice in consecutive sentences
+  - "best single-layer LR probe" appeared twice in one sentence
+  - a Gekhman extension note already in Related Work, plus a forward reference
+
+RESULT: 9.73 -> 9.57 estimated pages. Saved 103 words, NOT the ~240 I projected.
+My estimate was inflated because I counted raw source-line words, which include
+LaTeX markup; rendered prose is shorter. Lesson: measure rendered prose, not
+source tokens, before quoting a saving.
+
+STILL OVER BY ~0.57 pg (~350 words). Tier 2 as scoped (~210w by the same flawed
+method) will probably also under-deliver, so closing the gap likely needs Tier 2
+PLUS something structural -- or a decision to move a Section 5 subsection to the
+appendix after all.
+
+RECOMMENDED NEXT STEP: check the COMPILED page count in Overleaf before cutting
+further. 0.57 pg is inside the error bar of a 620-words-per-page model, and
+there is still no LaTeX toolchain locally, so every figure quoted here is an
+estimate. Decide the size of the remaining cut from the real PDF.
+
+Note: the inline (YM: ...) notes are now down to 2 and cost only ~0.04 pg, so
+they are no longer a meaningful factor.
