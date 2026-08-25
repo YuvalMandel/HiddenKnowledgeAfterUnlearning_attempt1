@@ -35,6 +35,13 @@ def select_layers(mode,k):
     #          vs-random comparison stays internally valid either way.
     if mode=="all":  return list(range(1,33))
     if mode=="late": return [18,21,24,27,30]
+    # ...norm variants inject at the same sites but rescale d_S/d_F so the TOTAL
+    # injected L2 norm equals the fixed grid's. Without this the comparison is
+    # confounded by magnitude, not position/spread: at alpha=1 the raw budgets
+    # are fixed 9.5, late 67.4 (7.1x), all 463.7 (48.8x) for GradDiff, because
+    # ||d_S(L)|| grows ~5000x with depth (0.04 at L1 to 222 at L32).
+    if mode=="allnorm":  return list(range(1,33))
+    if mode=="latenorm": return [18,21,24,27,30]
     prof=pd.read_csv(SAVE/"activation_vector_base_results.csv")
     row=prof[(prof.method==CSV_METHOD.get(METHOD,METHOD))&(prof.contrast=="suppressed_vs_retained")].iloc[0]
     auc=np.array([float(x) for x in row.auc_profile.split(";")])  # index 0..32; 0=embedding, excluded below
@@ -50,7 +57,7 @@ def select_layers(mode,k):
     raise ValueError("unknown LAYER_MODE %r"%mode)
 
 L_STEER=select_layers(LAYER_MODE,K)
-SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late") else "_%s%d"%(LAYER_MODE,K))
+SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm") else "_%s%d"%(LAYER_MODE,K))
 if VECTOR_MODE!="correct": SUFFIX+="_%s"%VECTOR_MODE
 ALPHAS=[-4.0,-2.0,-1.0,0.0,0.25,0.5,1.0,2.0,4.0,8.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
 print("=== METHOD",METHOD,"layer_mode",LAYER_MODE,"k",K,"vector_mode",VECTOR_MODE,"L_STEER",L_STEER,"===",flush=True)
@@ -96,6 +103,17 @@ def centroid(H,qs,L):
     raise ValueError("unknown VECTOR_MODE %r"%VECTOR_MODE)
 def diffs(train_qs): return {L:(centroid(Hb,train_qs,L)-centroid(Hc,train_qs,L)).astype(np.float32) for L in L_STEER}
 d_S=diffs(S_tr); d_F=diffs(F_tr)
+if LAYER_MODE.endswith("norm"):
+    # Match the fixed grid's total injected norm, so this run differs from the
+    # headline only in WHERE the same total perturbation is applied.
+    FIXED_REF=[3,6,9,12,15]
+    _ref={L:(centroid(Hb,S_tr,L)-centroid(Hc,S_tr,L)).astype(np.float32) for L in FIXED_REF}
+    BUDGET=float(sum(np.linalg.norm(v) for v in _ref.values()))
+    for _name,_dd in (("d_S",d_S),("d_F",d_F)):
+        _tot=float(sum(np.linalg.norm(v) for v in _dd.values()))
+        _c=BUDGET/_tot if _tot>0 else 1.0
+        for L in _dd: _dd[L]=(_dd[L]*_c).astype(np.float32)
+        print("norm-match %s: total %.2f -> %.2f (scale %.4f)"%(_name,_tot,BUDGET,_c),flush=True)
 rs=np.random.default_rng(123); d_R={}
 for L in L_STEER:
     r=rs.standard_normal(4096).astype(np.float32); d_R[L]=(r/np.linalg.norm(r)*np.linalg.norm(d_S[L])).astype(np.float32)
