@@ -49,6 +49,12 @@ def select_layers(mode,k):
         print("WARNING: %s suppressed_vs_retained not significant (best_layer=%d auc=%.3f q=%.3f) -- selected layers are likely noise"%(METHOD,row.best_layer,row.best_cv_auc,row.perm_q),flush=True)
     if mode=="topk":
         return sorted(sorted(range(1,33),key=lambda L:-auc[L])[:k])
+    # Mirror of topk: the k layers where the base model's suppressed-vs-retained
+    # signal is WEAKEST. Tests whether recovery needs to be injected where the
+    # knowledge is decodable. If bottomk matches topk, the mechanism is not
+    # "amplify the local representation" but unblocking the output pathway.
+    if mode=="bottomk":
+        return sorted(sorted(range(1,33),key=lambda L:auc[L])[:k])
     if mode=="band":
         c=int(row.best_layer); half=k//2; s,e=c-half,c-half+k-1
         if s<1: e+=1-s; s=1
