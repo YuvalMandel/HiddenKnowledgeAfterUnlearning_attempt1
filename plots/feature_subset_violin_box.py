@@ -69,7 +69,7 @@ def sigmoid(x):
 
 
 def load_correct_idx():
-    tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")
+    tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)
     q = tf[["original_id", "correct_idx"]].drop_duplicates("original_id")
     return q.sort_values("original_id")["correct_idx"].astype(int).to_numpy()
 

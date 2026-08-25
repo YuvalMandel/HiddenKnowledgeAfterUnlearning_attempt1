@@ -82,7 +82,7 @@ def boot_ci(v):
     return float(a.mean()),float(np.percentile(a,2.5)),float(np.percentile(a,97.5))
 
 # ---------------- load
-tf=pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv")
+tf=pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv", keep_default_na=False)
 ci=tf.drop_duplicates("original_id").set_index("original_id")["correct_idx"].reindex(range(1273)).astype(int).values
 hs=np.load(OUT/"base"/"bio_hs.npy",mmap_mode="r")           # (1273,4,33,4096)
 ext=np.load(EXT/"base_bio_ext.npy")                          # (1273,4) base per-option external score

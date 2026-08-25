@@ -118,7 +118,7 @@ filt_te = np.array(qstar, dtype=int)
 print(f"Q* size: {len(filt_te)}")
 
 # ── Correct answer indices ────────────────────────────────────────────────────
-tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")
+tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)
 correct_idx = (tf[["original_id", "correct_idx"]]
                .drop_duplicates("original_id")
                .sort_values("original_id")["correct_idx"].astype(int).to_numpy())

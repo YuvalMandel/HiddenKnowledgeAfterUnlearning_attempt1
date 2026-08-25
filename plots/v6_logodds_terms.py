@@ -112,7 +112,7 @@ qstar = set(base_cv.loc[
 ])
 print(f"Q* size: {len(qstar)}")
 
-tf    = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")[
+tf    = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)[
     ["original_id", "question"]].drop_duplicates("original_id")
 qtext = tf.set_index("original_id")["question"].to_dict()
 

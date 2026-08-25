@@ -79,7 +79,7 @@ def score_batch(prompts, model, tokenizer, letter_tok_ids):
 
 
 def main():
-    tf = pd.read_csv(DATA_DIR / "wmdp_tf_pairs.csv")[
+    tf = pd.read_csv(DATA_DIR / "wmdp_tf_pairs.csv", keep_default_na=False)[
         ["original_id", "question"]
     ].drop_duplicates("original_id").reset_index(drop=True)
     n = len(tf)

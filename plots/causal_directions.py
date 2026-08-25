@@ -28,7 +28,7 @@ def subset_of(ki,ke):
     if ki>.5: return "suppressed"
     if ke<=.5: return "forgotten"
     return "lucky"
-tf=pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv").drop_duplicates("original_id").set_index("original_id")
+tf=pd.read_csv(REPO/"data"/"wmdp_tf_pairs.csv", keep_default_na=False).drop_duplicates("original_id").set_index("original_id")
 ci=tf["correct_idx"].reindex(range(1273)).astype(int).values
 base=load_k("base"); qs=np.array(sorted(base.loc[(base.k_internal==1)&(base.k_external==1),"question_idx"].astype(int)))
 print("Q*",len(qs),flush=True)

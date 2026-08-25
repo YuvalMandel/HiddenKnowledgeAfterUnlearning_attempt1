@@ -78,7 +78,7 @@ qstar = set(base_cv.loc[
 ])
 print(f"Q* size: {len(qstar)}")
 
-tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv")
+tf = pd.read_csv(REPO / "data" / "wmdp_tf_pairs.csv", keep_default_na=False)
 correct_idx = (tf[["original_id", "correct_idx"]]
                .drop_duplicates("original_id")
                .sort_values("original_id")["correct_idx"].astype(int).to_numpy())
