@@ -141,3 +141,71 @@ so I left them in the text. Both are already resolved analytically:
 
 NEEDED FROM YOU: say the word and I will fix the abstract's "temporal suppression
 lag" phrasing and clear both notes.
+
+
+════════════════════════════════════════════════════════════════════════════
+UPDATE 2026-08-25 — status of the five questions
+════════════════════════════════════════════════════════════════════════════
+
+Q1  CLOSED (Overleaf 34d8827). Verified WMDP's criterion from the paper itself:
+    four-choice MCQ, "25% is random", RMU takes Zephyr-7B 63.7 -> 31.2. Our
+    checkpoints reach 0.0-30.0 from base 67.9; six of eight fall below 25%, but
+    those six emit no parseable answer on 44-100% of prompts, so accuracy
+    cannot separate knowledge removal from output collapse. Added tab:mcq-acc.
+    ALSO: WMDP explicitly claims RMU knowledge "cannot be recovered by linear
+    probes" (their Fig. 9). The paper had never engaged this. Now addressed in
+    Related Work, scoped honestly (different models, four-way vs pairwise probe,
+    and RMU is our narrowest gap).
+
+Q2  CLOSED (8dca1af). Q / Q_test / Q* now introduced once in Methodology with
+    the principle for which is used where. Also fixed a factual error: the Q*
+    definition said q in Q_test, but Q* (701) is drawn from all 1,273 and spans
+    the split 285/108/308 -- it cannot be a subset of the 573-question test set.
+
+Q3  CLOSED (9424dd2), and then reopened empirically by your own question about
+    layer 15 -- see below.
+
+Q4  OPEN and now the binding constraint. Main text ~9.7 pages vs the 9-page
+    limit (the 10th page is rebuttal only). Section 5 is compliant at ~3.9 of
+    its 4-page budget; the overage sits in Definitions (~1.9) and
+    Introduction + Related Work (~1.8), which this pass was told not to touch.
+    NEEDED: permission to trim outside Section 5, and where.
+    Note your inline (YM: ...) notes render and count -- they are prose, not
+    LaTeX comments.
+
+Q5  OPEN. The two remaining Z notes in the abstract are both already answered
+    analytically: the "temporal suppression lag" phrasing contradicts 5.1's own
+    title (K_ext reaches zero in 100% of suppressed questions, K_int never does
+    in 64-86%), and the rho/R^2 provenance is tab:regression, now corrected for
+    CV leakage to rho=0.55 / R^2=0.06. Say the word and I will apply both.
+
+════════════════════════════════════════════════════════════════════════════
+NEW Q6 — how should the injection-layer question be resolved?
+════════════════════════════════════════════════════════════════════════════
+
+You asked why the injection grid stops at layer 15 of 32. The paper does not
+say, and no experiment in the repo swept the injection layer.
+
+What we found instead: the base->ck8 displacement norm grows ~5000x with depth
+(GradDiff: 0.04 at L1, 5.08 at L15, 222.2 at L32). So at alpha=1 the TOTAL
+injected norm is fixed 9.5, late 67.4 (7.1x), all-32 463.7 (48.8x), and layer 32
+alone is 48% of the all-32 budget. The all-vs-fixed comparison I first reported
+was therefore confounded by magnitude, not position -- your norm-matching
+suggestion is the correct fix and is now implemented (modes allnorm/latenorm).
+
+NEEDED FROM YOU:
+ (a) Does anyone remember why {3,6,9,12,15} was chosen? A documented design
+     reason would be cheaper and more convincing than any of these runs.
+ (b) Even norm-matched, layer 32 keeps ~48% of the budget because scaling
+     preserves the natural per-layer proportions. Do you want a third variant
+     that unit-normalises each layer and splits the budget evenly? That is the
+     cleaner test of "spreading" but alters the relative magnitudes the
+     displacement actually has.
+ (c) causal_recover_pvalue.py hardcodes L_STEER={3,6,9,12,15}, so none of the
+     new modes have p-values. If any of them becomes the headline, that script
+     needs the modes added and re-running.
+
+BLOCKED: Newton was unreachable at the time of writing (DNS failures, and you
+reported an independent connectivity problem). Stage-3 array 1337197 (10 tasks,
+remaining 5 methods x all/late) is queued cluster-side and will run on its own.
+The norm-matched runs have not been submitted.
