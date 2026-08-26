@@ -53,7 +53,7 @@ def select_layers(mode,k):
     # signal is WEAKEST. Tests whether recovery needs to be injected where the
     # knowledge is decodable. If bottomk matches topk, the mechanism is not
     # "amplify the local representation" but unblocking the output pathway.
-    if mode=="bottomk":
+    if mode in ("bottomk","bottomknorm"):
         return sorted(sorted(range(1,33),key=lambda L:auc[L])[:k])
     if mode=="band":
         c=int(row.best_layer); half=k//2; s,e=c-half,c-half+k-1
@@ -63,7 +63,7 @@ def select_layers(mode,k):
     raise ValueError("unknown LAYER_MODE %r"%mode)
 
 L_STEER=select_layers(LAYER_MODE,K)
-SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm") else "_%s%d"%(LAYER_MODE,K))
+SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm","bottomknorm") else "_%s%d"%(LAYER_MODE,K))
 if VECTOR_MODE!="correct": SUFFIX+="_%s"%VECTOR_MODE
 ALPHAS=[-4.0,-2.0,-1.0,0.0,0.25,0.5,1.0,2.0,4.0,8.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
 print("=== METHOD",METHOD,"layer_mode",LAYER_MODE,"k",K,"vector_mode",VECTOR_MODE,"L_STEER",L_STEER,"===",flush=True)
