@@ -17,6 +17,7 @@ Usage:
 
 Outputs: plots/v6_subset_flow_mean{,_qstar}.pdf/.png/.csv
 """
+import os
 import sys
 from pathlib import Path
 
@@ -84,7 +85,13 @@ stem = SAVE_DIR / ("v6_subset_flow_mean_qstar" if QSTAR_ONLY
                    else "v6_subset_flow_mean")
 
 rows = []
-fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.60))
+# Authored at the width it will actually be printed at, so point sizes are true.
+# Scaling a 5.5in figure down with width=0.8\linewidth instead would shrink the
+# fonts by the same factor (~7.5pt -> ~6pt); regenerating keeps them at 8-9pt.
+# ICLR's own template uses \includegraphics[width=0.8\linewidth] as its example,
+# so the narrower width is the venue's own idiom, not a deviation.
+WIDTH_FRAC = float(os.environ.get("FIG_WIDTH_FRAC", "0.80"))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.60, width_frac=WIDTH_FRAC))
 for name, (colour, ls, marker) in STYLE.items():
     a = np.array([counts[name][m] for m in METHODS], dtype=float)  # 8 x 9
     mean, lo, hi = a.mean(0), a.min(0), a.max(0)

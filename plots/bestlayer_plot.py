@@ -56,7 +56,13 @@ ve   = data["k_ext"].values * 100
 vi_e = data["k_int_std"].values * 100
 ve_e = data["k_ext_std"].values * 100
 
-fig, ax = plt.subplots(figsize=iclr_figsize(aspect=4.2 / 7))
+# Authored at the width it is actually printed at, so point sizes are true.
+# Scaling a 5.5in figure down via width=0.8\linewidth would shrink the fonts by
+# the same factor; regenerating re-lays out instead and keeps them legible.
+# ICLR's template uses \includegraphics[width=0.8\linewidth] as its own example.
+WIDTH_FRAC = float(os.environ.get("FIG_WIDTH_FRAC", "0.80"))
+fig, ax = plt.subplots(figsize=iclr_figsize(aspect=4.2 / 7,
+                                            width_frac=WIDTH_FRAC))
 ax.bar(x-w/2, vi, w, color=INT_COLOR, alpha=0.88,
        label=r"$K_\mathrm{int}$ (best-layer probe)", zorder=3,
        yerr=vi_e, capsize=3, error_kw=dict(elinewidth=1.0, ecolor="black", alpha=0.7))
