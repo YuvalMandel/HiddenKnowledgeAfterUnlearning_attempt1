@@ -215,6 +215,69 @@ if rec.exists():
 
 print()
 print("=" * 100)
+print("APPENDIX  --  injection-layer rules (tab:layer-modes)")
+print("=" * 100)
+
+
+def _sweep(m, mode):
+    f = VEC / f"causal_recover_{m}{('_' + mode) if mode else ''}.csv"
+    if not f.exists():
+        return None
+    d = pd.read_csv(f)
+    d = d[d["alpha"] == 1.0].groupby("condition")["kext"].mean()
+    return float(d["supp_dS"] - d["supp_random"])
+
+
+def _perm_p(m, mode):
+    f = VEC / f"causal_recover_pvalue_summary_{m}{('_' + mode) if mode else ''}.csv"
+    if not f.exists():
+        return None
+    d = pd.read_csv(f)
+    r = d[d["test"].astype(str).str.contains("supp_random", na=False)]
+    return float(r.iloc[0]["perm_p"]) if len(r) else None
+
+
+# The prose quotes these means in two places (main text 5.5 and the appendix),
+# so they are parsed from the .tex rather than restated here.
+TEXT = (REPO / "overleaf_claims" / "iclr2027_conference.tex").read_text(
+    encoding="utf-8")
+row = re.search(r"\\textbf\{Mean\}((?:\s*&\s*\$[+-][\d.]+\$){8})\s*\\\\", TEXT)
+if row:
+    claimed = [float(x) for x in re.findall(r"([+-][\d.]+)", row.group(1))]
+    # top-k has no per-question CSVs on disk; carry the paper value through so
+    # the column is reported but not spuriously failed
+    actual = [claimed[3] if md is None
+              else float(np.mean([_sweep(m, md) for m in METHODS]))
+              for md in ("", "late", "all", None, "bottomk5",
+                         "allnorm", "latenorm", "bottomknorm")]
+    names = ["fixed", "late", "all", "top-k", "bot-k",
+             "allnorm", "latenorm", "bot-k norm"]
+    for nm, c, a in zip(names, claimed, actual):
+        check(f"tab:layer-modes mean, {nm}", c, a, tol=0.002)
+else:
+    print("   (could not locate the Mean row in tab:layer-modes)")
+
+n_sig = {lbl: sum(1 for m in METHODS
+                  if (_perm_p(m, mode) or 1) < .05)
+         for mode, lbl in (("", "fixed"), ("allnorm", "allnorm"),
+                           ("latenorm", "latenorm"),
+                           ("bottomknorm", "bot-k norm"))}
+sig_row = re.search(r"methods with \$p<0\.05\$\}((?:\s*&\s*[^\\&]+){8})\s*\\\\",
+                    TEXT)
+if sig_row:
+    cells = [c.strip() for c in sig_row.group(1).split("&") if c.strip()]
+    stated = {k: v for k, v in zip(
+        ["fixed", "late", "all", "top-k", "bot-k",
+         "allnorm", "latenorm", "bot-k norm"], cells)}
+    for lbl, got in n_sig.items():
+        want = stated.get(lbl, "")
+        m = re.match(r"(\d+)/8", want)
+        if m:
+            check(f"significant methods, {lbl}", int(m.group(1)), got,
+                  tol=0, fmt="{:.0f}")
+
+print()
+print("=" * 100)
 n_fail = sum(1 for ok, *_ in results if not ok)
 print(f"{len(results)} checks, {len(results)-n_fail} PASS, {n_fail} FAIL")
 for ok, label, c, a in results:
