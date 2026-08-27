@@ -192,6 +192,17 @@ if lag_csv.exists():
                                     include_groups=False)
     check("K_int censoring in suppressed (%)", (64, 86),
           (100 * cen.min(), 100 * cen.max()), tol=0.6, fmt="{:.1f}")
+    # sec:dissociation now states the definitional limits of the censoring
+    # figure explicitly; these guard the counts it quotes.
+    check("suppressed question-method pairs", 1462, len(s), tol=0, fmt="{:.0f}")
+    check("K_int drops at ck8 (must be 0 by definition)", 0,
+          int((s.ck_int_drop == 8).sum()), tol=0, fmt="{:.0f}")
+    check("K_ext first reaches 0 at ck8", 167,
+          int((s.ck_ext_drop == 8).sum()), tol=0, fmt="{:.0f}")
+    hit = s.groupby("method").apply(lambda g: (g.ck_int_drop != 9).mean(),
+                                    include_groups=False)
+    check("K_int ever reaches 0, suppressed (%)", (14, 36),
+          (100 * hit.min(), 100 * hit.max()), tol=0.6, fmt="{:.1f}")
     lag = s.groupby("method").lag.mean()
     check("mean suppression lag (checkpoints)", (2.05, 5.39),
           (lag.min(), lag.max()), tol=0.02)
