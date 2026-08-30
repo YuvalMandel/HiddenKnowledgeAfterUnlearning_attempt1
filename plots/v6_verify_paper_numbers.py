@@ -244,6 +244,16 @@ from scipy.stats import spearmanr as _sp
 check("rho(K_ext on Q*, suppression rate)", -0.93, _sp(kq, supp_pct)[0], tol=0.01)
 check("rho(K_ext all-1273, suppression rate)", -0.93, _sp(ka, supp_pct)[0],
       tol=0.01)
+# 5.1 states how far K_ext travels toward chance, not that it reaches it
+_kb = base.k_external.mean()
+_clo = [100 * (_kb - v) / (_kb - 0.5) for v in ka]
+check("base K_ext (all 1,273)", 0.780, _kb, tol=0.002)
+check("K_ext closure toward chance, min/max %", (50, 88),
+      (min(_clo), max(_clo)), tol=0.6, fmt="{:.0f}")
+check("K_ext closure toward chance, mean %", 68, sum(_clo) / len(_clo),
+      tol=0.6, fmt="{:.0f}")
+check("no method drives K_ext below 0.5", 0,
+      sum(1 for v in ka if v <= 0.5), tol=0, fmt="{:.0f}")
 
 print()
 print("=" * 100)
