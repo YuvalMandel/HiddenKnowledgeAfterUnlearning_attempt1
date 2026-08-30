@@ -226,6 +226,27 @@ if rec.exists():
 
 print()
 print("=" * 100)
+print("SECTION 5.1/5.2  --  K_ext levels after dropping LogitAUC (note 2a)")
+print("=" * 100)
+kq, ka, supp_pct = [], [], []
+for m in METHODS:
+    q = ck8[m]
+    ka.append(q.k_external.mean())
+    s = q.loc[q.index.intersection(qstar)]
+    kq.append(s.k_external.mean())
+    c = cells(s)
+    supp_pct.append(100 * len(c["sup"]) / len(s))
+check("K_ext on Q* at ck8, min/max", (0.548, 0.737), (min(kq), max(kq)), tol=0.002)
+check("K_ext over all 1,273, min/max", (0.534, 0.638), (min(ka), max(ka)), tol=0.002)
+check("lowest K_ext on Q* is RepNoise", 0.548,
+      kq[METHODS.index("RepNoise")], tol=0.002)
+from scipy.stats import spearmanr as _sp
+check("rho(K_ext on Q*, suppression rate)", -0.93, _sp(kq, supp_pct)[0], tol=0.01)
+check("rho(K_ext all-1273, suppression rate)", -0.93, _sp(ka, supp_pct)[0],
+      tol=0.01)
+
+print()
+print("=" * 100)
 print("SECTION 5.5  --  suppressed vs forgotten recovery (item 7a)")
 print("=" * 100)
 sf = REPO / "plots" / "recovery_supp_vs_forg.csv"
