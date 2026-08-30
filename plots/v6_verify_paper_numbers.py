@@ -226,6 +226,31 @@ if rec.exists():
 
 print()
 print("=" * 100)
+print("SECTION 5.5  --  suppressed vs forgotten recovery (item 7a)")
+print("=" * 100)
+sf = REPO / "plots" / "recovery_supp_vs_forg.csv"
+if sf.exists():
+    d = pd.read_csv(sf)
+    check("mean recovery, suppressed arm", 0.161, d.d_sup.mean(), tol=0.002)
+    check("mean recovery, forgotten arm", 0.054, d.d_forg.mean(), tol=0.002)
+    check("methods where suppressed > forgotten", 8 - 2,
+          int((d.d_sup > d.d_forg).sum()), tol=0, fmt="{:.0f}")
+    for m, v in (("GradDiff", 0.350), ("RepNoise", 0.301)):
+        r = d[d.method == m]
+        if len(r):
+            check(f"suppressed-minus-forgotten, {m}", v,
+                  float(r.d_sup.iloc[0] - r.d_forg.iloc[0]), tol=0.002)
+    # the two methods that invert, quoted in the text
+    for m, s, f in (("RR", 0.066, 0.121), ("RMU", 0.043, 0.074)):
+        r = d[d.method == m]
+        if len(r):
+            check(f"{m} inverts (supp / forg)", (s, f),
+                  (float(r.d_sup.iloc[0]), float(r.d_forg.iloc[0])), tol=0.002)
+else:
+    print("   (run plots/recovery_supp_vs_forg.py first)")
+
+print()
+print("=" * 100)
 print("APPENDIX  --  injection-layer rules (tab:layer-modes)")
 print("=" * 100)
 
