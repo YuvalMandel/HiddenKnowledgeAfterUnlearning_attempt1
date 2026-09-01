@@ -48,9 +48,14 @@ SUP_C, FORG_C = "#762a83", "#1b7837"
 BASE_C = "#c7c7c7"
 CHANCE = 0.5          # K_ext is a pairwise win-fraction over 3 distractors
 
+# Injection rule. "_allnorm" = all 32 layers with the total injected norm matched
+# to the fixed grid's budget; "" = the fixed {3,6,9,12,15} grid. The paper's 5.3
+# uses allnorm, so that is the default here.
+MODE = "_allnorm"
+
 rows = []
 for m in METHODS:
-    d = pd.read_csv(AV / f"causal_recover_{m}.csv")
+    d = pd.read_csv(AV / f"causal_recover_{m}{MODE}.csv")
     a1 = d[d.alpha == 1.0].set_index("condition")
     a0 = d[d.alpha == 0.0].set_index("condition")
     need = ["supp_dS", "supp_random", "forg_dF", "forg_random"]
@@ -104,7 +109,7 @@ print(f"steered above chance ({CHANCE}): suppressed "
 x = np.arange(len(t))
 w = 0.27
 fig, axes = plt.subplots(2, 1, sharex=True, sharey=True,
-                         figsize=iclr_figsize(aspect=6.4 / 7, width_frac=1.0))
+                         figsize=iclr_figsize(aspect=4.9 / 7, width_frac=1.0))
 
 panels = [
     (axes[0], "Suppressed set  (probe finds internal knowledge)", SUP_C,
@@ -134,12 +139,12 @@ for ax, title, col, cb, cr, cs, cn, vec in panels:
     ax.tick_params(labelsize=8)
     ax.legend(fontsize=6.6, ncol=3, loc="upper right", frameon=False,
               handlelength=1.3, columnspacing=1.0, borderpad=0.2)
-    for xi, v in zip(x, t[cr]):
-        ax.text(xi, v + 0.015, f"{v:.2f}", ha="center", va="bottom",
-                fontsize=5.2, color=col, alpha=0.85)
+    # Only the steered bar is labelled. Three labels per group collide at any
+    # legible size on a 5.5in column; the random bar's height is readable
+    # against the grey baseline beside it, which is the comparison that matters.
     for xi, v in zip(x + w, t[cs]):
         ax.text(xi, v + 0.015, f"{v:.2f}", ha="center", va="bottom",
-                fontsize=5.2, color=col, weight="bold")
+                fontsize=7.0, color=col, weight="bold")
 
 axes[1].set_xticks(x)
 axes[1].set_xticklabels(

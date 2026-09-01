@@ -91,7 +91,22 @@ for m in METHODS:
     q = ck8[m].loc[ck8[m].index.intersection(qstar)]
     c = cells(q)
     got = tuple(100 * len(c[k]) / len(q) for k in ("ret", "sup", "forg", "luck"))
-    check(f"tab:subsets {m} (Ret/Supp/Forg/Lucky %)", tab[m], got,
+    check(f"app:qstar-subsets {m} (Ret/Supp/Forg/Lucky %)", tab[m], got,
+          tol=0.1, fmt="{:.1f}")
+
+# Table 1 itself moved to Q (all 1,273) on 2026-09-01; the Q* numbers above are
+# now the appendix table. Guard the main-text one too, or a change to Table 1
+# would go unchecked.
+tab_q = {"GradDiff": (56.2, 21.8, 12.0, 9.9), "RMU": (44.9, 25.8, 13.1, 16.3),
+         "RMU-LAT": (45.9, 25.5, 11.9, 16.7), "RepNoise": (37.8, 31.3, 14.8, 16.1),
+         "ELM": (46.7, 28.0, 13.0, 12.3), "RR": (48.2, 25.8, 10.8, 15.2),
+         "TAR": (46.5, 26.9, 15.2, 11.4), "PB_J": (42.7, 27.5, 14.5, 15.4)}
+_dd = base[~base.index.duplicated()].index
+for m in METHODS:
+    q = ck8[m].loc[_dd]
+    c = cells(q)
+    got = tuple(100 * len(c[k]) / len(q) for k in ("ret", "sup", "forg", "luck"))
+    check(f"tab:subsets {m} (Ret/Supp/Forg/Lucky %)", tab_q[m], got,
           tol=0.1, fmt="{:.1f}")
 
 b = cells(base)
@@ -226,20 +241,36 @@ if lag_csv.exists():
 
 print()
 print("=" * 100)
-print("SECTION 5.5  --  causal recovery (strong stratum)")
+print("SECTION 5.3  --  causal recovery (allnorm, full Q* suppressed set)")
 print("=" * 100)
-rec = REPO / "plots" / "v6_recovery_by_strength.csv"
-if rec.exists():
-    d = pd.read_csv(rec)
-    g = d[d.stratum == "strong (K_int=1)"].set_index("method")
-    for m, k in (("RepNoise", 0.757), ("GradDiff", 0.652),
-                 ("PB_J", 0.510), ("TAR", 0.256)):
-        if m in g.index:
-            check(f"steered K_ext, {m} (strong)", k, g.loc[m, "steered"],
-                  tol=0.002)
-    check("strong vs marginal, mean gain over random", (0.185, 0.090),
-          (g.vs_random.mean(),
-           d[d.stratum == "marginal (K_int=2/3)"].vs_random.mean()), tol=0.002)
+# 2026-09-01: 5.3 moved from the fixed {3,6,9,12,15} grid on the unambiguous
+# K_int=1 stratum to allnorm on the FULL suppressed set. The old checks guarded
+# 0.757/0.652/0.510/0.256 and 0.185-vs-0.090, none of which the paper still says.
+_AV = REPO / "plots" / "activation_vectors"
+_TBL = {"RepNoise": (98, 0.565, 0.160, 0.405), "RMU": (70, 0.410, 0.181, 0.229),
+        "RR": (71, 0.418, 0.216, 0.202), "PB_J": (76, 0.382, 0.180, 0.202),
+        "GradDiff": (56, 0.435, 0.238, 0.196), "RMU-LAT": (66, 0.328, 0.197, 0.131),
+        "TAR": (76, 0.215, 0.171, 0.044), "ELM": (75, 0.209, 0.200, 0.009)}
+_ds, _df, _sig = [], [], 0
+for _m, (_n, _st, _rd, _dl) in _TBL.items():
+    _f = _AV / f"causal_recover_{_m}_allnorm.csv"
+    if not _f.exists():
+        continue
+    _a = pd.read_csv(_f)
+    _a1 = _a[_a.alpha == 1.0].set_index("condition")
+    check(f"tab:causal-recovery steered K_ext, {_m}", _st,
+          _a1.loc["supp_dS", "kext"], tol=0.002)
+    check(f"tab:causal-recovery Delta, {_m}", _dl,
+          _a1.loc["supp_dS", "kext"] - _a1.loc["supp_random", "kext"], tol=0.002)
+    _ds.append(_a1.loc["supp_dS", "kext"] - _a1.loc["supp_random", "kext"])
+    _df.append(_a1.loc["forg_dF", "kext"] - _a1.loc["forg_random", "kext"])
+    _p = pd.read_csv(_AV / f"causal_recover_pvalue_summary_{_m}_allnorm.csv")
+    _sig += float(_p[_p.test.str.contains("supp_random")].perm_p.iloc[0]) < 0.05
+check("5.3 methods significant at p<0.05", 7, _sig, tol=0, fmt="{:.0f}")
+check("5.3 mean Delta, suppressed arm", 0.177, sum(_ds) / len(_ds), tol=0.002)
+check("5.3 mean Delta, forgotten arm", 0.163, sum(_df) / len(_df), tol=0.002)
+check("5.3 methods above chance (K_ext > 0.5)", 1,
+      sum(v[1] > 0.5 for v in _TBL.values()), tol=0, fmt="{:.0f}")
 
 print()
 print("=" * 100)
@@ -279,8 +310,12 @@ print("=" * 100)
 sf = REPO / "plots" / "recovery_supp_vs_forg.csv"
 if sf.exists():
     d = pd.read_csv(sf)
-    check("mean recovery, suppressed arm", 0.161, d.d_sup.mean(), tol=0.002)
-    check("mean recovery, forgotten arm", 0.054, d.d_forg.mean(), tol=0.002)
+    # Fixed-grid values. 5.3 now reports allnorm (checked above); these are
+    # retained because app:layer-targeting still quotes them as the contrast.
+    check("app:layer-targeting fixed-grid suppressed arm", 0.161,
+          d.d_sup.mean(), tol=0.002)
+    check("app:layer-targeting fixed-grid forgotten arm", 0.054,
+          d.d_forg.mean(), tol=0.002)
     check("methods where suppressed > forgotten", 8 - 2,
           int((d.d_sup > d.d_forg).sum()), tol=0, fmt="{:.0f}")
     for m, v in (("GradDiff", 0.350), ("RepNoise", 0.301)):
