@@ -153,10 +153,24 @@ print()
 print("=" * 100)
 print("ABSTRACT  --  headline ranges")
 print("=" * 100)
-supp_pct = [100 * len(cells(ck8[m].loc[ck8[m].index.intersection(qstar)])["sup"])
-            / len(qstar) for m in METHODS]
-check("suppressed share of Q* (%), min/max", (20, 35),
+# 2026-09-01: sections 5.1/5.2 moved from Q* to Q, so the range the paper states
+# is now the Q one. The Q* range is still checked because app:qstar-subsets
+# reports it.
+_dedup = base[~base.index.duplicated()].index
+supp_pct = [100 * len(cells(ck8[m].loc[_dedup])["sup"]) / len(_dedup)
+            for m in METHODS]
+supp_pct_qstar = [
+    100 * len(cells(ck8[m].loc[ck8[m].index.intersection(qstar)])["sup"])
+    / len(qstar) for m in METHODS]
+check("suppressed share of Q (%), min/max", (22, 31),
       (min(supp_pct), max(supp_pct)), tol=0.4, fmt="{:.1f}")
+check("suppressed share of Q* (%), min/max [app:qstar-subsets]", (20, 35),
+      (min(supp_pct_qstar), max(supp_pct_qstar)), tol=0.4, fmt="{:.1f}")
+check("forgotten share of Q (%), min/max", (11, 15),
+      (min(100 * len(cells(ck8[m].loc[_dedup])["forg"]) / len(_dedup)
+           for m in METHODS),
+       max(100 * len(cells(ck8[m].loc[_dedup])["forg"]) / len(_dedup)
+           for m in METHODS)), tol=0.4, fmt="{:.1f}")
 
 # Read the range the paper actually states, in every place it states it, rather
 # than hard-coding it here. The abstract and the Intro bullet disagreed for
@@ -165,9 +179,12 @@ tex = REPO / "overleaf_claims" / "iclr2027_conference.tex"
 if tex.exists():
     body = "\n".join(l for l in tex.read_text(encoding="utf-8").split("\n")
                      if not l.lstrip().startswith("%"))
-    stated = re.findall(r"(\d{1,2})--(\d{1,2})\\%\s*of\s*questions", body)
-    stated += re.findall(r"(\d{1,2})--(\d{1,2})\\%\s*of\s*(?:pre-filtered\s*)?"
-                         r"questions\s*are\s*suppressed", body)
+    # Strip the markup that wraps these numbers, so the pattern survives edits
+    # that add \textcolor{red}{...} or math mode. Without this the parser
+    # silently found nothing and the guard degraded to a WARN (2026-09-01).
+    flat = body.replace(r"\textcolor{red}{", "").replace("$", "")
+    stated = re.findall(r"(\d{1,2})(?:\\%)?--(\d{1,2})\\%\}?\s*of\s*questions",
+                        flat)
     seen = sorted({(int(a), int(b)) for a, b in stated})
     for lo, hi in seen:
         check(f"range stated in paper text: {lo}--{hi}%", (lo, hi),

@@ -113,7 +113,16 @@ if LAYER_MODE.endswith("norm"):
     # Match the fixed grid's total injected norm, so this run differs from the
     # headline only in WHERE the same total perturbation is applied.
     FIXED_REF=[3,6,9,12,15]
-    _ref={L:(centroid(Hb,S_tr,L)-centroid(Hc,S_tr,L)).astype(np.float32) for L in FIXED_REF}
+    # BUDGET uses centroid_correct, NOT centroid(), so every VECTOR_MODE is matched to the
+    # SAME reference magnitude and modes differ only in DIRECTION. Using centroid() here made
+    # each mode match its own fixed-grid norm; contrastive centroids cancel the component
+    # shared by all four options, so its budget came out ~100x smaller (RepNoise 83.59 -> 0.91,
+    # scale 0.0108) and at alpha=1 the intervention was inert -- steered, random and unsteered
+    # baseline all within 0.01 of each other. That was a magnitude artifact, not a null result:
+    # the alpha sweep recovered large effects (GradDiff 0.220 -> 0.619 at alpha=8).
+    # For VECTOR_MODE="correct" this is a NO-OP (centroid IS centroid_correct), so every
+    # existing correct-only allnorm/latenorm/bottomknorm run reproduces unchanged.
+    _ref={L:(centroid_correct(Hb,S_tr,L)-centroid_correct(Hc,S_tr,L)).astype(np.float32) for L in FIXED_REF}
     BUDGET=float(sum(np.linalg.norm(v) for v in _ref.values()))
     for _name,_dd in (("d_S",d_S),("d_F",d_F)):
         _tot=float(sum(np.linalg.norm(v) for v in _dd.values()))
