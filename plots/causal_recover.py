@@ -55,7 +55,13 @@ def select_layers(mode,k):
     auc=np.array([float(x) for x in row.auc_profile.split(";")])  # index 0..32; 0=embedding, excluded below
     if not float(row.perm_q)<0.05:
         print("WARNING: %s suppressed_vs_retained not significant (best_layer=%d auc=%.3f q=%.3f) -- selected layers are likely noise"%(METHOD,row.best_layer,row.best_cv_auc,row.perm_q),flush=True)
-    if mode=="topk":
+    # topknorm is topk with the total injected norm matched to the fixed grid's
+    # budget (the rescale is triggered by the "norm" suffix further down). Added
+    # 2026-09-02: bottomk had a norm variant and topk did not, so every
+    # top-vs-bottom comparison confounded layer choice with injected magnitude.
+    # That confound is live: norm-matching the BOTTOM layers lifts them from
+    # +0.042 to +0.100, level with unnormalised topk (+0.103).
+    if mode in ("topk","topknorm"):
         return sorted(sorted(range(1,33),key=lambda L:-auc[L])[:k])
     # Mirror of topk: the k layers where the base model's suppressed-vs-retained
     # signal is WEAKEST. Tests whether recovery needs to be injected where the
@@ -71,7 +77,7 @@ def select_layers(mode,k):
     raise ValueError("unknown LAYER_MODE %r"%mode)
 
 L_STEER=select_layers(LAYER_MODE,K)
-SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm","bottomknorm") else "_%s%d"%(LAYER_MODE,K))
+SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm","bottomknorm","topknorm") else "_%s%d"%(LAYER_MODE,K))
 if VECTOR_MODE!="correct": SUFFIX+="_%s"%VECTOR_MODE
 if POPULATION!="qstar": SUFFIX+="_%s"%POPULATION   # keeps Q runs from clobbering Q* ones
 ALPHAS=[-4.0,-2.0,-1.0,0.0,0.25,0.5,1.0,2.0,4.0,8.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
