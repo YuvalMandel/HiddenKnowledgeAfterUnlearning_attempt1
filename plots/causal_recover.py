@@ -77,7 +77,12 @@ def select_layers(mode,k):
     raise ValueError("unknown LAYER_MODE %r"%mode)
 
 L_STEER=select_layers(LAYER_MODE,K)
-SUFFIX="" if LAYER_MODE=="fixed" else ("_%s"%LAYER_MODE if LAYER_MODE in ("all","late","allnorm","latenorm","bottomknorm","topknorm") else "_%s%d"%(LAYER_MODE,K))
+# topknorm/bottomknorm are K-based but were writing K-free filenames, so a k=16
+# run would have silently overwritten the k=5 results. K is now recorded whenever
+# it is not the default 5; at K=5 every existing output keeps its exact name, so
+# nothing already on disk is touched and the verifier's paths still resolve.
+_KSUF = "" if K == 5 else str(K)
+SUFFIX="" if LAYER_MODE=="fixed" else ("_%s%s"%(LAYER_MODE,_KSUF) if LAYER_MODE in ("all","late","allnorm","latenorm","bottomknorm","topknorm") else "_%s%d"%(LAYER_MODE,K))
 if VECTOR_MODE!="correct": SUFFIX+="_%s"%VECTOR_MODE
 if POPULATION!="qstar": SUFFIX+="_%s"%POPULATION   # keeps Q runs from clobbering Q* ones
 ALPHAS=[-4.0,-2.0,-1.0,0.0,0.25,0.5,1.0,2.0,4.0,8.0]; SEED=0; BATCH=32; TEST_FRAC=0.4
