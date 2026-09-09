@@ -1,0 +1,2 @@
+method,n,k_ext,resid,gain,lo,hi,sig,layers,betas
+RepNoise,1273,0.5415,0.5415,0.0,0.0,0.0,0,32/32/32/32/32,0/0/0/0/0

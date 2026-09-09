@@ -1,0 +1,2 @@
+method,n,k_ext,resid,gain,lo,hi,sig,layers,betas
+RMU-LAT,1273,0.6125,0.6143,0.0018,-0.0037,0.0076,0,32/32/32/28/20,0/0/0/2/0.5

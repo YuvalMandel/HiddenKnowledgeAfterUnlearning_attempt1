@@ -1,0 +1,2 @@
+method,n,k_ext,resid,gain,lo,hi,sig,layers,betas
+PB_J,1273,0.575,0.5795,0.0045,-0.0052,0.0141,0,28/28/28/28/20,4/4/4/4/4

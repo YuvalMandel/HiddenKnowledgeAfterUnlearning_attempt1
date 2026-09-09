@@ -1,0 +1,2 @@
+method,n,k_ext,resid,gain,lo,hi,sig,layers,betas
+GradDiff,1273,0.6402,0.6402,0.0,0.0,0.0,0,32/32/32/32/32,0/0/0/0/0
