@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt             # noqa: E402
 import pandas as pd                         # noqa: E402
 
 AV = Path(__file__).resolve().parent / "activation_vectors"
+ROOT_IMGS = Path(__file__).resolve().parent.parent / "overleaf_claims" / "imgs"
 ORDER = ["base", "GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR",
          "PB_J"]
 
@@ -142,6 +143,12 @@ ax.set_axisbelow(True)
 fig.tight_layout()
 fig.savefig(AV / "bestlayer_skip.png", dpi=180)
 print(f"wrote {AV/'bestlayer_skip.png'}")
+# vector copy straight into the Overleaf checkout, so the paper figure and the
+# CSV it came from can never drift apart
+imgs = ROOT_IMGS
+if imgs.is_dir():
+    fig.savefig(imgs / "bestlayer_skip.pdf", bbox_inches="tight")
+    print(f"wrote {imgs/'bestlayer_skip.pdf'}")
 
 # ---- figure 2: the point of the whole run. A probe finds the answer in the
 # middle layers of every model; the model's OWN readout direction finds it
