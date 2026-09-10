@@ -9,18 +9,18 @@ above-chance signal that survives unlearning:
     R(M) = 100 * (M - M_chance) / (M_base - M_chance)
 
 so every metric runs 0 (at chance) to 100 (base model) and the three become
-directly comparable. Each method is one column carrying three marks; the column
-reads bottom to top as "what the standard benchmark sees" -> "what the model's
-own readout gives away" -> "what is actually still in there".
+directly comparable.
 
-A grouped bar chart of the same numbers needs 24 bars and reads as texture; the
-dot-and-track form keeps one column per method and makes the WMDP->K_int span
-the visual quantity, which is the claim.
+On this scale the three quantities are additive, so the figure is a stacked bar:
+the grey base is what the standard benchmark still sees, the red segment is what
+the model's own readout gives away on top of that, and the blue segment is what
+only a probe recovers. Segment heights ARE the two gaps, and the full bar is
+K_int. Raw scores stack nowhere -- they are three measurements on two different
+scales -- which is why the companion figure keeps them side by side.
 
-The numeric strip beneath prints every plotted value and all three gaps, so the
-figure is self-contained. Those gaps are differences of the plotted numbers, not
-new measurements -- and the third is the sum of the first two, carried only
-because Table 1 reports it.
+Every number is printed on the plot: each segment carries its own height, inside
+when the segment is tall enough and just outside when it is not, and the bar
+total is printed above.
 
 K_ext and K_int come from the same parquet query as the figure this replaced, so
 figure and table cannot disagree. WMDP accuracies are LLM-GAT's published values.
@@ -100,77 +100,60 @@ def main():
     print("\nmean:", mean.round(1).to_dict(),
           "  (table says 5.8 / 32.1 / 66.7)")
 
-    # ---- methods across, retention up; numeric strip underneath
+    # ---- stacked: grey = WMDP, red = K_ext-WMDP, blue = K_int-K_ext
     cols = list(d.label) + ["mean"]
     vw = d.wmdp.tolist() + [mean.wmdp]
     ve = d.k_ext.tolist() + [mean.k_ext]
     vi = d.k_int.tolist() + [mean.k_int]
-    se = d.k_ext_sd.tolist() + [float("nan")]
-    si = d.k_int_sd.tolist() + [float("nan")]
+    g1 = [b - a for a, b in zip(vw, ve)]            # K_ext - WMDP
+    g2 = [c - b for b, c in zip(ve, vi)]            # K_int - K_ext
     x = list(range(len(cols)))
     x[-1] += 0.6                                    # set the mean column apart
-    LEFT = x[0] - 0.9                               # row-label gutter
+    W = 0.62
 
-    fig, (ax, tb) = plt.subplots(
-        2, 1, figsize=iclr_figsize(aspect=5.4 / 7, width_frac=0.80),
-        gridspec_kw=dict(height_ratios=[2.3, 1.7], hspace=0.05))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
+                                                width_frac=0.80))
+    ax.bar(x, vw, W, color=WMDP_C, zorder=3, label="WMDP-Bio accuracy")
+    ax.bar(x, g1, W, bottom=vw, color=EXT_C, zorder=3,
+           label=r"$+\;K_\mathrm{ext}$ (logit margin)")
+    ax.bar(x, g2, W, bottom=ve, color=INT_C, zorder=3,
+           label=r"$+\;K_\mathrm{int}$ (best-layer probe)")
 
-    for xi, a, c in zip(x, vw, vi):
-        ax.plot([xi, xi], [a, c], color="0.90", lw=4.0, zorder=1,
-                solid_capstyle="round")
-    ax.errorbar(x, ve, yerr=se, fmt="none", ecolor=EXT_C, elinewidth=1.0,
-                capsize=0, alpha=0.9, zorder=2)
-    ax.errorbar(x, vi, yerr=si, fmt="none", ecolor=INT_C, elinewidth=1.0,
-                capsize=0, alpha=0.9, zorder=2)
-    ax.scatter(x, vw, s=24, marker="o", facecolors="white", edgecolors=WMDP_C,
-               linewidths=1.1, zorder=3, label="WMDP-Bio accuracy")
-    ax.scatter(x, ve, s=24, marker="D", color=EXT_C, zorder=3,
-               label=r"$K_\mathrm{ext}$ (logit margin)")
-    ax.scatter(x, vi, s=32, marker="o", color=INT_C, zorder=3,
-               label=r"$K_\mathrm{int}$ (best-layer probe)")
+    def seg(xi, lo, hi, txt, colr):
+        """Number inside its segment, or just outside when it will not fit."""
+        h = hi - lo
+        if abs(h) >= 9:
+            ax.text(xi, (lo + hi) / 2, txt, ha="center", va="center",
+                    fontsize=6.1, color="white", zorder=6)
+        else:
+            ax.text(xi + W / 2 + 0.06, (lo + hi) / 2, txt, ha="left",
+                    va="center", fontsize=6.1, color=colr, zorder=6)
 
-    ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=0)
-    ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=0)
-    ax.text(LEFT - 0.5, 101, "base", fontsize=6.5, color="0.35",
+    for xi, a, b, c in zip(x, vw, ve, vi):
+        seg(xi, 0, a, f"{a:.0f}", "#5a5a5a")
+        seg(xi, a, b, f"+{b - a:.0f}", EXT_C)
+        seg(xi, b, c, f"+{c - b:.0f}", INT_C)
+        ax.text(xi, c + 2.5, f"{c:.0f}", ha="center", va="bottom",
+                fontsize=6.6, color=INT_C, zorder=6)
+
+    ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
+    ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
+    ax.text(-0.95, 101, "base model", fontsize=6.3, color="0.35",
             va="bottom", ha="left")
-    ax.text(LEFT - 0.5, 1.5, "chance", fontsize=6.5, color="0.35",
-            va="bottom", ha="left")
-    ax.set_ylim(-14, 114)
+    ax.set_ylim(-9, 112)
     ax.set_yticks([0, 25, 50, 75, 100])
-    ax.set_ylabel("% of base model's\nabove-chance signal", fontsize=7.5)
+    ax.set_ylabel("% of base model's above-chance\nsignal retained",
+                  fontsize=7.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(cols, rotation=34, ha="right", fontsize=7.5)
     ax.tick_params(labelsize=7.5)
-    ax.set_xlim(LEFT - 0.6, x[-1] + 0.6)
-    ax.set_xticks([])
-    for sp in ("top", "right", "bottom"):
+    ax.set_xlim(-1.0, x[-1] + 0.75)
+    for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    ax.grid(axis="y", ls=":", lw=0.6, alpha=0.5, zorder=0)
+    ax.grid(axis="y", ls=":", lw=0.6, alpha=0.45, zorder=0)
     ax.set_axisbelow(True)
-    ax.legend(fontsize=7, loc="lower center", bbox_to_anchor=(0.5, 1.0),
-              ncol=3, frameon=False, handletextpad=0.35, columnspacing=1.2)
-
-    strip = [("WMDP-Bio", vw, WMDP_C, False),
-             (r"$K_\mathrm{ext}$", ve, EXT_C, False),
-             (r"$K_\mathrm{int}$", vi, INT_C, False),
-             (r"$K_\mathrm{ext}\!-\!$WMDP", [b - a for a, b in zip(vw, ve)],
-              "0.15", True),
-             (r"$K_\mathrm{int}\!-\!K_\mathrm{ext}$",
-              [c - b for b, c in zip(ve, vi)], "0.15", True),
-             (r"$K_\mathrm{int}\!-\!$WMDP", [c - a for a, c in zip(vw, vi)],
-              "0.15", True)]
-    tb.set_xlim(ax.get_xlim())
-    tb.set_ylim(len(strip) + 2.7, -0.9)
-    tb.axis("off")
-    for xi, c in zip(x, cols):
-        tb.text(xi, len(strip) - 0.15, c, fontsize=6.8, ha="center", va="top",
-                rotation=90, style="italic" if c == "mean" else "normal")
-    for yr in (-0.55, 2.5):
-        tb.plot([LEFT - 0.35, x[-1] + 0.45], [yr, yr], color="0.8", lw=0.6)
-    for r, (name, vals, colr, gap) in enumerate(strip):
-        tb.text(LEFT, r, name, fontsize=6.4, ha="right", va="center",
-                color=colr)
-        for xi, v in zip(x, vals):
-            tb.text(xi, r, f"{v:+.0f}" if gap else f"{v:.0f}", fontsize=6.4,
-                    ha="center", va="center", color=colr)
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.28),
+              ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.6)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"retention_three_metric.{ext}"

@@ -5,14 +5,18 @@ The three metrics do not share a scale -- WMDP is four-way (chance 0.25), the tw
 K scores are pairwise (chance 0.5) -- so they get two axes and two chance lines,
 each metric read against its own floor.
 
-Three bars per method, layered rather than side by side: K_int widest at the
-back, K_ext inside it, WMDP narrowest in front.
+Three equal-width bars per method, side by side, styled after the pair-
+composition figure: uniform bars, legend underneath.
 
-The values go in a strip beneath rather than on the bars. On the base model all
-three series finish within 0.03 of each other, so bar-top labels collide there
-whatever offsets they are given; the strip is collision-proof, keeps the bars
-clean, and matches `retention_three_metric.py` so the two figures read as a
-pair.
+Every value is printed above its own bar, rotated upright so that neighbouring
+labels in a group cannot touch. (This is why the bars are side by side and not
+layered: layered bars share one x, and on the base model all three series finish
+within 0.03 of each other, so their labels collide whatever offsets they get.)
+
+Note these three bars are NOT stackable: WMDP is a four-way accuracy on its own
+axis and the K scores are pairwise, so they are three measurements, not parts of
+one whole. The additive decomposition lives in the retention figure, where the
+segments really do sum.
 
 Companion to `retention_three_metric.py`, which normalises these same numbers.
 
@@ -76,22 +80,32 @@ def main():
     print(d.round(3).to_string(index=False))
 
     x = list(range(len(d)))
-    fig, (ax, tb) = plt.subplots(
-        2, 1, figsize=iclr_figsize(aspect=5.2 / 7, width_frac=0.80),
-        gridspec_kw=dict(height_ratios=[2.75, 1.25], hspace=0.08))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
+                                               width_frac=0.80))
     ax2 = ax.twinx()
 
-    # back to front: widest bar is the tallest series, so nothing is hidden
-    ax.bar(x, d.k_int, 0.78, color=INT_C, alpha=0.9, zorder=2,
-           label=r"$K_\mathrm{int}$ (best-layer probe)")
-    ax.bar(x, d.k_ext, 0.46, color=EXT_C, alpha=0.95, zorder=3,
-           label=r"$K_\mathrm{ext}$ (logit margin)")
-    ax2.bar(x, d.wmdp, 0.17, color=WMDP_C, alpha=1.0, zorder=4,
+    W = 0.26
+    xw = [i - W for i in x]
+    xe = list(x)
+    xi_ = [i + W for i in x]
+    ax2.bar(xw, d.wmdp, W, color=WMDP_C, zorder=3,
             label="WMDP-Bio accuracy (right axis)")
-    ax.errorbar(x, d.k_int, yerr=d.k_int_sd, fmt="none", ecolor="black",
-                elinewidth=0.8, capsize=1.5, alpha=0.55, zorder=5)
-    ax.errorbar(x, d.k_ext, yerr=d.k_ext_sd, fmt="none", ecolor="black",
-                elinewidth=0.8, capsize=1.5, alpha=0.55, zorder=5)
+    ax.bar(xe, d.k_ext, W, color=EXT_C, zorder=3,
+           label=r"$K_\mathrm{ext}$ (logit margin)")
+    ax.bar(xi_, d.k_int, W, color=INT_C, zorder=3,
+           label=r"$K_\mathrm{int}$ (best-layer probe)")
+    ax.errorbar(xe, d.k_ext, yerr=d.k_ext_sd, fmt="none", ecolor="black",
+                elinewidth=0.8, capsize=1.5, alpha=0.6, zorder=5)
+    ax.errorbar(xi_, d.k_int, yerr=d.k_int_sd, fmt="none", ecolor="black",
+                elinewidth=0.8, capsize=1.5, alpha=0.6, zorder=5)
+    for xx, v, sd, c in ((xe, d.k_ext, d.k_ext_sd, EXT_C),
+                         (xi_, d.k_int, d.k_int_sd, INT_C)):
+        for xi2, vv, ss in zip(xx, v, sd):
+            ax.text(xi2, vv + ss + 0.015, f"{vv:.3f}", ha="center",
+                    va="bottom", fontsize=5.6, color=c, rotation=90, zorder=6)
+    for xi2, vv in zip(xw, d.wmdp):
+        ax2.text(xi2, vv + 0.012, f"{vv:.2f}", ha="center", va="bottom",
+                 fontsize=5.6, color="#5a5a5a", rotation=90, zorder=6)
 
     ax.axhline(0.5, color=EXT_C, ls=":", lw=1.0, alpha=0.85, zorder=1)
     ax2.axhline(0.25, color="#5a5a5a", ls=":", lw=1.0, alpha=0.85, zorder=1)
@@ -107,7 +121,7 @@ def main():
     ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8])
     ax2.set_yticks([0, 0.2, 0.4, 0.6, 0.8])
     ax.set_xticks(x)
-    ax.set_xticklabels([])
+    ax.set_xticklabels(d.label, rotation=34, ha="right", fontsize=7.5)
     ax.tick_params(labelsize=7.5)
     ax2.tick_params(labelsize=7.5)
     ax.set_xlim(-1.55, len(d) - 0.35)   # left gutter holds the
@@ -119,27 +133,9 @@ def main():
     ax.set_axisbelow(True)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="lower center",
-              bbox_to_anchor=(0.5, 1.0), ncol=3, frameon=False,
-              handletextpad=0.4, columnspacing=1.2)
-    # ---- numeric strip, same idiom as the retention figure
-    LEFT = -0.72
-    strip = [("WMDP-Bio", d.wmdp, "%.2f", "#5a5a5a"),
-             (r"$K_\mathrm{ext}$", d.k_ext, "%.3f", EXT_C),
-             (r"$K_\mathrm{int}$", d.k_int, "%.3f", INT_C)]
-    tb.set_xlim(ax.get_xlim())
-    tb.set_ylim(len(strip) + 1.9, -0.8)
-    tb.axis("off")
-    tb.plot([LEFT - 0.75, len(d) - 0.45], [-0.55, -0.55], color="0.8", lw=0.6)
-    for r, (name, vals, fmt, colr) in enumerate(strip):
-        tb.text(LEFT, r, name, fontsize=6.5, ha="right", va="center",
-                color=colr)
-        for xi, v in zip(x, vals):
-            tb.text(xi, r, fmt % v, fontsize=6.4, ha="center", va="center",
-                    color=colr)
-    for xi, c in zip(x, d.label):
-        tb.text(xi, len(strip) - 0.65, c, fontsize=6.8, ha="center", va="top",
-                rotation=90, style="italic" if c == "Base" else "normal")
+    ax.legend(h2 + h1, l2 + l1, fontsize=7, loc="upper center",
+              bbox_to_anchor=(0.5, -0.30), ncol=3, frameon=False,
+              handletextpad=0.4, columnspacing=1.6)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"knowledge_accuracy_bars.{ext}"
