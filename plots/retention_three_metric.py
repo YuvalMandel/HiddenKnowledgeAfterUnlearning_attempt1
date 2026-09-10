@@ -113,7 +113,11 @@ def main():
 
     fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
                                                 width_frac=0.80))
-    ax.bar(x, vw, W, color=WMDP_C, zorder=3, label="WMDP-Bio accuracy")
+    # zorder above the other two: where WMDP retention is negative (ELM,
+    # whose WMDP accuracy sits below the four-way chance floor) the red
+    # segment also starts below zero, and would otherwise paint over the
+    # grey. Drawn on top, the grey reads 0 to -2 as it should.
+    ax.bar(x, vw, W, color=WMDP_C, zorder=5, label="WMDP-Bio accuracy")
     ax.bar(x, g1, W, bottom=vw, color=EXT_C, zorder=3,
            label=r"$+\;K_\mathrm{ext}$ (logit margin)")
     ax.bar(x, g2, W, bottom=ve, color=INT_C, zorder=3,
