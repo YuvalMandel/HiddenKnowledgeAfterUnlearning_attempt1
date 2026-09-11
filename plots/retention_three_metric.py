@@ -125,27 +125,32 @@ def main():
 
     def seg(xi, lo, hi, txt, colr):
         """Gap number inside its segment; a segment too thin to hold it puts the
-        number on the LEFT, clear of the level markers on the right."""
+        number on the RIGHT, clear of the level markers on the left."""
         h = hi - lo
         if abs(h) >= 9:
             ax.text(xi, (lo + hi) / 2, txt, ha="center", va="center",
                     fontsize=6.1, color="white", zorder=6)
         else:
-            ax.text(xi - W / 2 - 0.03, (lo + hi) / 2, txt, ha="right",
+            ax.text(xi + W / 2 + 0.03, (lo + hi) / 2, txt, ha="left",
                     va="center", fontsize=6.1, color=colr, zorder=6)
 
     def level(xi, y, y_label, txt, colr):
-        """A cumulative level: tick at the true height, number to its right."""
-        ax.plot([xi + W / 2, xi + W / 2 + 0.06], [y, y], color=colr, lw=0.9,
+        """A cumulative level: tick at the true height, number to its left.
+
+        Levels sit left and thin-segment gap labels right, so a gutter holds one
+        column's levels and the previous column's gap label. Only RepNoise has a
+        gap too thin to label inside, and it falls in the wide gutter before the
+        offset mean column."""
+        ax.plot([xi - W / 2 - 0.06, xi - W / 2], [y, y], color=colr, lw=0.9,
                 zorder=6, clip_on=False)
-        ax.text(xi + W / 2 + 0.09, y_label, txt, ha="left", va="center",
+        ax.text(xi - W / 2 - 0.09, y_label, txt, ha="right", va="center",
                 fontsize=6.3, color=colr, zorder=6)
 
     for xi, a, b, c in zip(x, vw, ve, vi):
         seg(xi, a, b, f"+{b - a:.0f}", EXT_C)
         seg(xi, b, c, f"+{c - b:.0f}", INT_C)
         # WMDP and K_ext are both cumulative levels, not segments, so both are
-        # marked on the right. RepNoise is the one method where they are close
+        # marked on the left. RepNoise is the one method where they are close
         # enough (9 vs 12) for the numbers to overlap, so there the two labels
         # are nudged apart while the ticks stay at the true heights.
         ya, yb = a, b
