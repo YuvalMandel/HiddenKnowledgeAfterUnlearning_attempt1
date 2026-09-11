@@ -137,6 +137,13 @@ def main():
         seg(xi, 0, a, f"{a:.0f}", "#5a5a5a")
         seg(xi, a, b, f"+{b - a:.0f}", EXT_C)
         seg(xi, b, c, f"+{c - b:.0f}", INT_C)
+        # K_ext is the red/blue boundary, so its cumulative level has no segment
+        # of its own. Print it just left of the bar, where the thin-segment
+        # fallbacks (which go right) cannot collide with it.
+        ax.plot([xi - W / 2 - 0.10, xi - W / 2], [b, b], color=EXT_C, lw=0.9,
+                zorder=6, clip_on=False)      # tick ties the level to its bar
+        ax.text(xi - W / 2 - 0.15, b, f"{b:.0f}", ha="right", va="center",
+                fontsize=6.3, color=EXT_C, zorder=6)
         ax.text(xi, c + 2.5, f"{c:.0f}", ha="center", va="bottom",
                 fontsize=6.6, color=INT_C, zorder=6)
 
