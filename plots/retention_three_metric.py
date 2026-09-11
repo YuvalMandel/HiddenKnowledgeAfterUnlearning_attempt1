@@ -109,7 +109,7 @@ def main():
     g2 = [c - b for b, c in zip(ve, vi)]            # K_int - K_ext
     x = list(range(len(cols)))
     x[-1] += 0.6                                    # set the mean column apart
-    W = 0.62
+    W = 0.46
 
     fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
                                                 width_frac=0.80))
@@ -124,26 +124,35 @@ def main():
            label=r"$+\;K_\mathrm{int}$ (best-layer probe)")
 
     def seg(xi, lo, hi, txt, colr):
-        """Number inside its segment, or just outside when it will not fit."""
+        """Gap number inside its segment; a segment too thin to hold it puts the
+        number on the LEFT, clear of the level markers on the right."""
         h = hi - lo
         if abs(h) >= 9:
             ax.text(xi, (lo + hi) / 2, txt, ha="center", va="center",
                     fontsize=6.1, color="white", zorder=6)
         else:
-            ax.text(xi + W / 2 + 0.06, (lo + hi) / 2, txt, ha="left",
+            ax.text(xi - W / 2 - 0.03, (lo + hi) / 2, txt, ha="right",
                     va="center", fontsize=6.1, color=colr, zorder=6)
 
+    def level(xi, y, y_label, txt, colr):
+        """A cumulative level: tick at the true height, number to its right."""
+        ax.plot([xi + W / 2, xi + W / 2 + 0.06], [y, y], color=colr, lw=0.9,
+                zorder=6, clip_on=False)
+        ax.text(xi + W / 2 + 0.09, y_label, txt, ha="left", va="center",
+                fontsize=6.3, color=colr, zorder=6)
+
     for xi, a, b, c in zip(x, vw, ve, vi):
-        seg(xi, 0, a, f"{a:.0f}", "#5a5a5a")
         seg(xi, a, b, f"+{b - a:.0f}", EXT_C)
         seg(xi, b, c, f"+{c - b:.0f}", INT_C)
-        # K_ext is the red/blue boundary, so its cumulative level has no segment
-        # of its own. Print it just left of the bar, where the thin-segment
-        # fallbacks (which go right) cannot collide with it.
-        ax.plot([xi - W / 2 - 0.10, xi - W / 2], [b, b], color=EXT_C, lw=0.9,
-                zorder=6, clip_on=False)      # tick ties the level to its bar
-        ax.text(xi - W / 2 - 0.15, b, f"{b:.0f}", ha="right", va="center",
-                fontsize=6.3, color=EXT_C, zorder=6)
+        # WMDP and K_ext are both cumulative levels, not segments, so both are
+        # marked on the right. RepNoise is the one method where they are close
+        # enough (9 vs 12) for the numbers to overlap, so there the two labels
+        # are nudged apart while the ticks stay at the true heights.
+        ya, yb = a, b
+        if abs(b - a) < 7:
+            ya, yb = a - 2.4, b + 2.4
+        level(xi, a, ya, f"{a:.0f}", "#5a5a5a")
+        level(xi, b, yb, f"{b:.0f}", EXT_C)
         ax.text(xi, c + 2.5, f"{c:.0f}", ha="center", va="bottom",
                 fontsize=6.6, color=INT_C, zorder=6)
 
