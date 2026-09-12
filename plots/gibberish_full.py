@@ -44,7 +44,14 @@ import hidden_knowledge_after_unlearning as hk  # noqa: E402
 from readout_edit_all import HF, REPOS          # noqa: E402
 
 OUT = ROOT / "plots" / "activation_vectors"
-BATCH = int(__import__("os").environ.get("GEN_BATCH", "16"))
+import os as _os
+BATCH = int(_os.environ.get("GEN_BATCH", "16"))
+# dtype and batch are the two knobs that make batched greedy decoding
+# non-reproducible across runs; GEN_DTYPE/GEN_BATCH expose them so the
+# published-vs-reproduced gap can be tested rather than assumed.
+DTYPE = {"bfloat16": torch.bfloat16, "float16": torch.float16,
+         "float32": torch.float32}[_os.environ.get("GEN_DTYPE", "bfloat16")]
+TAG = _os.environ.get("GEN_TAG", "")
 
 
 def rate(answers, pairs):
@@ -100,7 +107,7 @@ def main(method, quad=False):
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     model = hk.AutoModelForCausalLM.from_pretrained(
-        repo, cache_dir=str(HF / "hub"), torch_dtype=torch.bfloat16,
+        repo, cache_dir=str(HF / "hub"), torch_dtype=DTYPE,
         device_map="auto")
     model.eval()
 
@@ -117,9 +124,10 @@ def main(method, quad=False):
                full=rate(answers, pairs),
                test_split_only=rate(split_answers, split_pairs),
                construction="quad" if quad else "pairs",
+               dtype=str(DTYPE).replace("torch.", ""),
                max_new_tokens=hk.MAX_NEW_TOKENS, batch=BATCH, repo=repo)
     OUT.mkdir(exist_ok=True)
-    tag = f"{method}_quad" if quad else method
+    tag = (f"{method}_quad" if quad else method) + TAG
     with open(OUT / f"gibberish_full_{tag}.json", "w") as f:
         json.dump({**res, "answers": answers}, f)
     print(f"  FULL  n={res['full']['n']:>5}  gibberish={res['full']['gibberish']:>5}"

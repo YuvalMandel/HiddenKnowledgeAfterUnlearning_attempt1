@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Collect the gibberish runs and set them beside the published table.
+"""Collect the float32 gibberish runs and set them beside the published table.
 
 Three columns matter:
   published   what tab:gibberish reports, on 573 questions x 4 options = 2,292
   reproduced  this run restricted to those same 2,292 prompts -- the gate
   full        this run over all 1,273 questions x 4 options = 5,092
 
-The gate is the interesting one: base and ELM reproduce exactly, GradDiff to
-0.1 pp, while the models that answer in repetition loops come out 1-5 pp lower.
-Greedy decoding is not bit-reproducible across GPU type, batch size and dtype,
-and a loop that runs past MAX_NEW_TOKENS in one run can emit a parseable token
-in another -- which moves exactly the models whose outputs sit on that boundary.
+Everything here is float32, the dtype the LLM-GAT checkpoints are released in.
+That matters: bfloat16 costs three mantissa bits and moved RepNoise by 4.6 pp
+(88.2 -> 92.8), while float16 and float32 agree to 0.1 pp and batch size moves
+nothing (<=1 prompt in 2,292). Use float32 where it fits, float16 otherwise;
+never bfloat16 for this measurement.
+
+After that correction five of nine reproduce the published value to within
+0.5 pp. RR (-3.1), PB&J (-2.0) and RMU-LAT (-1.5) do not, and dtype is not the
+cause -- their rates barely moved between bfloat16 and float32. That residual is
+unexplained and should not be papered over.
 
 Usage: python plots/gibberish_report.py
 """
@@ -31,7 +36,7 @@ PUBLISHED = {"base": (2, 0.1), "GradDiff": (2285, 99.7), "RMU": (341, 14.9),
 def main():
     rows = []
     for m in ORDER:
-        f = AV / f"gibberish_full_{m}_quad.json"
+        f = AV / f"gibberish_full_{m}_quad_f32.json"   # float32 = the released dtype
         if not f.exists():
             print(f"  {m}: missing {f.name}")
             continue
