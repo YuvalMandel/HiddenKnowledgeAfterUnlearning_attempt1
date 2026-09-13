@@ -1,13 +1,15 @@
 """Where do base-retained questions go, and is that consistent with 5.1?
 
-5.1 now says: among questions the probe cannot read (K_int <= 1/2), K_ext is at
-chance, so forgotten and lucky come out about equal. 5.2 says the exits from
-retained are "64% suppressed, 30% lucky, 6% forgotten" -- which inside the
-probe-empty part is 30:6, i.e. 83:17, nowhere near chance.
+5.2 reports two different things and they are easy to confuse:
 
-Those condition on different populations (all questions vs. only those that
-started retained), so they need not agree -- but if they disagree this sharply
-the paper should say why rather than leave a reader to notice.
+  NET   change in cell sizes. retained 941 -> 587 is -354; suppressed, lucky and
+        forgotten grow by 225/105/23, i.e. 64/30/6 percent of that 354. These
+        are the paper's published figures and they are correct.
+  GROSS individual questions leaving retained: 439 on average, splitting
+        55/26/18. Larger than the net because questions also arrive.
+
+tab:transitions counts gross, so it does not contradict the net prose. This
+script computes the gross side; the net side is a difference of cell counts.
 """
 import pandas as pd
 from pathlib import Path
