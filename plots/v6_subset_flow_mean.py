@@ -109,9 +109,9 @@ band = plt.Rectangle((0, 0), 1, 1, color="#888888", alpha=0.28, linewidth=0)
 h, l = ax.get_legend_handles_labels()
 # below the axes, as in kfold_line_methods_auc_lr_all: the four curves plus
 # their bands leave no interior space that does not collide with something
-ax.legend(h + [band], l + ["range over 8 methods"], frameon=False, ncol=5,
-          loc="upper center", bbox_to_anchor=(0.5, -0.16), fontsize=8,
-          columnspacing=1.2, handlelength=1.8)
+leg = ax.legend(h + [band], l + ["range over 8 methods"], frameon=False,
+                ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.16),
+                fontsize=8, columnspacing=1.2, handlelength=1.8)
 
 ax.set_xticks(xs)
 ax.set_xticklabels(["base\n(ck0)"] + [f"ck{c}" for c in range(1, N_CK + 1)])
@@ -132,6 +132,14 @@ sec.set_ylabel("% of all questions" if not QSTAR_ONLY
                else "% of $\\mathcal{Q}^*$")
 ax.set_title("Subset membership re-assigned at each checkpoint, "
              "mean of 8 methods", fontsize=9)
+
+# Drop the legend below the xlabel. A fixed anchor cannot know where the label
+# lands -- the tick labels are two lines tall -- so measure the drawn label and
+# put the legend under its bottom edge.
+fig.canvas.draw()
+y = ax.transAxes.inverted().transform(
+    (0, ax.xaxis.get_label().get_window_extent().y0))[1]
+leg.set_bbox_to_anchor((0.5, y - 0.05), transform=ax.transAxes)
 
 fig.savefig(f"{stem}.pdf", bbox_inches="tight")
 fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
