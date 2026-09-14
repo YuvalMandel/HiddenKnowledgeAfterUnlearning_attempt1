@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""K_int and K_ext across checkpoints, one panel per unlearning method.
+
+The per-method version of v6_k_trajectory_mean.py, in the panel layout of
+v6_subset_flow_panels.py. The mean figure shows the two axes separating; these
+panels show that the separation is produced by visibly different dynamics --
+some methods drop K_ext once and stop, others keep going, and at least one
+partially recovers.
+
+The shaded wedge in each panel is that method's hidden-knowledge gap (eq:hk),
+so the widening can be compared across methods by area rather than by reading
+two lines against each other.
+
+Same query as everywhere else: split_type=cv, domain=bio, clf=LR,
+probe_type=own, layer_config=best_layer, all 1,273 questions, ck0 = base.
+
+Usage: python plots/v6_k_trajectory_panels.py
+
+Outputs: plots/v6_k_trajectory_panels.pdf/.png/.csv
+"""
+import os
+import sys
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hk_utils import iclr_figsize, use_iclr_style  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "inside_out_out"
+METHODS = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
+LABEL = {"PB_J": "PB&J"}
+N_CK = 8
+CHANCE = 0.5
+
+# identical to v6_k_trajectory_mean.py so the two read as one figure
+STYLE = {
+    "$K_\\text{int}$": ("#1f77b4", "-",  "o"),
+    "$K_\\text{ext}$": ("#d62728", "--", "s"),
+}
+
+
+def load(model_id):
+    df = pd.read_parquet(OUT / model_id / "k_scores.parquet")
+    cv = df[(df.split_type == "cv") & (df.domain == "bio") & (df.clf == "LR")
+            & (df.probe_type == "own") & (df.layer_config == "best_layer")]
+    q = cv.groupby("question_idx").agg(ki=("k_internal", "mean"),
+                                       ke=("k_external", "mean"))
+    return q.ki.mean(), q.ke.mean()
+
+
+def main():
+    use_iclr_style()
+    xs = list(range(N_CK + 1))
+
+    b_int, b_ext = load("base")
+    series, rows = {}, []
+    for m in METHODS:
+        pairs = [(b_int, b_ext)] + [load(f"{m}_ck{ck}")
+                                    for ck in range(1, N_CK + 1)]
+        series[m] = (np.array([p[0] for p in pairs]),
+                     np.array([p[1] for p in pairs]))
+        for i, (ki, ke) in enumerate(pairs):
+            rows.append(dict(method=LABEL.get(m, m),
+                             checkpoint="base" if i == 0 else f"ck{i}",
+                             k_int=ki, k_ext=ke, gap_pp=100 * (ki - ke)))
+
+    stem = str(Path(__file__).with_suffix(""))
+    pd.DataFrame(rows).to_csv(f"{stem}.csv", index=False)
+
+    W = float(os.environ.get("FIG_WIDTH_FRAC", "1.0"))
+    w, h = iclr_figsize(aspect=0.52, width_frac=W)
+    fig, axes = plt.subplots(2, 4, figsize=(w, h * 1.55), sharex=True, sharey=True)
+
+    for ax, m in zip(axes.ravel(), METHODS):
+        ki, ke = series[m]
+        ax.fill_between(xs, ke, ki, color="#888888", alpha=0.30, linewidth=0,
+                        zorder=2.5, label="hidden-knowledge gap")
+        for name, (colour, ls, marker) in STYLE.items():
+            v = ki if "int" in name else ke
+            ax.plot(xs, v, ls, color=colour, marker=marker, markersize=2.6,
+                    linewidth=1.3, label=name, zorder=3)
+        ax.axhline(CHANCE, color="black", linestyle=":", linewidth=0.8, zorder=2)
+        ax.set_title(f"{LABEL.get(m, m)}  ({100*(ki[-1]-ke[-1]):.1f} pp)",
+                     fontsize=8.5)
+        ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
+        ax.set_axisbelow(True)
+        ax.set_ylim(0.45, 0.86)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(["0"] + [str(c) for c in range(1, N_CK + 1)],
+                           fontsize=7)
+        ax.tick_params(axis="y", labelsize=7)
+
+    for ax in axes[:, 0]:
+        ax.set_ylabel("mean $K$", fontsize=8)
+    fig.supxlabel("unlearning checkpoint (0 = base)", fontsize=9, y=0.045)
+
+    h_, l_ = axes[0, 0].get_legend_handles_labels()
+    fig.legend(h_, l_, frameon=False, ncol=3, loc="lower center",
+               bbox_to_anchor=(0.5, -0.01), fontsize=8, columnspacing=1.6,
+               handlelength=2.0)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+
+    fig.savefig(f"{stem}.pdf", bbox_inches="tight")
+    fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {Path(stem).name}.pdf  (8 panels, all 1,273 questions)\n")
+
+    print(f"{'method':<10}{'gap ck0':>9}{'gap ck8':>9}{'peak':>7}{'at':>5}"
+          f"{'  monotone':>11}")
+    print("-" * 52)
+    for m in METHODS:
+        ki, ke = series[m]
+        g = 100 * (ki - ke)
+        print(f"{LABEL.get(m, m):<10}{g[0]:>9.2f}{g[-1]:>9.2f}{g.max():>7.1f}"
+              f"{'ck' + str(int(g.argmax())):>5}"
+              f"{str(bool(np.all(np.diff(g) >= 0))):>11}")
+
+
+if __name__ == "__main__":
+    main()
