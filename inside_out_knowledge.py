@@ -540,7 +540,11 @@ def _train_and_score(
     # the C grid is LR-specific. Until 2026-09-14 the sweep was gated on
     # clf_name=="LR", so RF and AdaBoost silently kept best_layer_i = N_LAYERS//2
     # and reported a layer-16 fit as though it were the selected best layer.
-    do_layer_sweep = (va_idx is not None and own_probe and lc == "best_layer")
+    # own_probe is deliberately NOT required: for a cross-probe the sweep reads
+    # X_tr and X_va from hs_train only, so it selects the layer using the source
+    # model's data alone and never sees the target. Without this a cross-probe
+    # "best_layer" row is a layer-16 fit wearing the best-layer label.
+    do_layer_sweep = (va_idx is not None and lc == "best_layer")
     do_hparam  = (va_idx is not None and own_probe
                   and clf_name == "LR" and lc in {"full", "best_layer"})
 
@@ -716,7 +720,7 @@ def _probe_one(
 
     if do_cross and hs_base is not None:
         res_b2m = _train_and_score(
-            hs_base, hs, correct_idx, tr_idx, None, te_idx, lc, clf_name)
+            hs_base, hs, correct_idx, tr_idx, va_idx, te_idx, lc, clf_name)
         gap_b, p_b, hk_b = hidden_knowledge_test(res_b2m["k_internal"], k_ext)
         for i, qi in enumerate(te_idx):
             records.append({
@@ -736,7 +740,7 @@ def _probe_one(
 
         k_ext_base = compute_k(ext_base, correct_idx_base, te_idx)
         res_m2b = _train_and_score(
-            hs, hs_base, correct_idx_base, tr_idx, None, te_idx, lc, clf_name)
+            hs, hs_base, correct_idx_base, tr_idx, va_idx, te_idx, lc, clf_name)
         gap_m, p_m, hk_m = hidden_knowledge_test(res_m2b["k_internal"], k_ext_base)
         for i, qi in enumerate(te_idx):
             records.append({
