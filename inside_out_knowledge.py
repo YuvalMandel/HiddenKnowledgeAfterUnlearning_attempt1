@@ -536,6 +536,11 @@ def _train_and_score(
     best_layer_out = float("nan")
 
     own_probe  = (hs_train is hs_test)
+    # Choosing the layer on validation is meaningful for any probe family; only
+    # the C grid is LR-specific. Until 2026-09-14 the sweep was gated on
+    # clf_name=="LR", so RF and AdaBoost silently kept best_layer_i = N_LAYERS//2
+    # and reported a layer-16 fit as though it were the selected best layer.
+    do_layer_sweep = (va_idx is not None and own_probe and lc == "best_layer")
     do_hparam  = (va_idx is not None and own_probe
                   and clf_name == "LR" and lc in {"full", "best_layer"})
 
@@ -545,27 +550,32 @@ def _train_and_score(
         best_layer_i = N_LAYERS // 2
         best_C       = 1.0
 
-        if do_hparam:
+        if do_layer_sweep:
             y_va        = build_labels(correct_idx, va_idx)
             best_va_auc = -1.0
+            c_grid = C_CANDIDATES if clf_name == "LR" else [None]
             for layer_i in range(N_LAYERS):
                 X_tr_l = extract_features(hs_train, tr_idx, f"layer_{layer_i}")
                 X_va_l = extract_features(hs_train, va_idx, f"layer_{layer_i}")
-                for C in C_CANDIDATES:
-                    pipe = Pipeline([
-                        ("sc",  StandardScaler()),
-                        ("clf", LogisticRegression(C=C, max_iter=1000, random_state=SEED)),
-                    ])
-                    pipe.fit(X_tr_l, y_tr)
+                for C in c_grid:
+                    if C is None:
+                        est = make_clf(clf_name)
+                    else:
+                        est = Pipeline([
+                            ("sc",  StandardScaler()),
+                            ("clf", LogisticRegression(C=C, max_iter=1000,
+                                                       random_state=SEED)),
+                        ])
+                    est.fit(X_tr_l, y_tr)
                     try:
-                        va_auc = roc_auc_score(y_va, pipe.predict_proba(X_va_l)[:, 1])
+                        va_auc = roc_auc_score(y_va, est.predict_proba(X_va_l)[:, 1])
                     except Exception:
                         va_auc = 0.0
                     if va_auc > best_va_auc:
                         best_va_auc  = va_auc
                         best_layer_i = layer_i
-                        best_C       = C
-            best_C_out     = best_C
+                        best_C       = 1.0 if C is None else C
+            best_C_out     = best_C if clf_name == "LR" else float("nan")
             best_layer_out = float(best_layer_i)
 
         trva_idx = np.concatenate([tr_idx, va_idx]) if va_idx is not None else tr_idx
@@ -574,10 +584,14 @@ def _train_and_score(
         X_te     = extract_features(hs_test,  te_idx,   lc_use)
         y_trva   = build_labels(correct_idx, trva_idx)
 
-        pipe_f = Pipeline([
-            ("sc",  StandardScaler()),
-            ("clf", LogisticRegression(C=best_C, max_iter=1000, random_state=SEED)),
-        ])
+        if clf_name == "LR":
+            pipe_f = Pipeline([
+                ("sc",  StandardScaler()),
+                ("clf", LogisticRegression(C=best_C, max_iter=1000,
+                                           random_state=SEED)),
+            ])
+        else:
+            pipe_f = make_clf(clf_name)
         pipe_f.fit(X_trva, y_trva)
         te_proba = pipe_f.predict_proba(X_te)[:, 1].reshape(len(te_idx), N_OPTIONS)
 
