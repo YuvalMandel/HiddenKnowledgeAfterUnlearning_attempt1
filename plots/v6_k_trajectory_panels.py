@@ -75,7 +75,7 @@ def main():
 
     W = float(os.environ.get("FIG_WIDTH_FRAC", "1.0"))
     w, h = iclr_figsize(aspect=0.52, width_frac=W)
-    fig, axes = plt.subplots(2, 4, figsize=(w, h * 1.55), sharex=True, sharey=True)
+    fig, axes = plt.subplots(2, 4, figsize=(w, h * 1.02), sharex=True, sharey=True)
 
     for ax, m in zip(axes.ravel(), METHODS):
         ki, ke = series[m]
@@ -83,28 +83,41 @@ def main():
                         zorder=2.5, label="hidden-knowledge gap")
         for name, (colour, ls, marker) in STYLE.items():
             v = ki if "int" in name else ke
-            ax.plot(xs, v, ls, color=colour, marker=marker, markersize=2.6,
-                    linewidth=1.3, label=name, zorder=3)
+            ax.plot(xs, v, ls, color=colour, marker=marker, markersize=2.0,
+                    linewidth=1.1, label=name, zorder=3)
         ax.axhline(CHANCE, color="black", linestyle=":", linewidth=0.8, zorder=2)
-        ax.set_title(f"{LABEL.get(m, m)}  ({100*(ki[-1]-ke[-1]):.1f} pp)",
-                     fontsize=8.5)
+        ax.set_title(LABEL.get(m, m), fontsize=8)
         ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
         ax.set_axisbelow(True)
-        ax.set_ylim(0.45, 0.86)
+        ax.set_ylim(0.47, 0.85)
+        ax.set_yticks([0.5, 0.6, 0.7, 0.8])
         ax.set_xticks(xs)
         ax.set_xticklabels(["0"] + [str(c) for c in range(1, N_CK + 1)],
-                           fontsize=7)
-        ax.tick_params(axis="y", labelsize=7)
+                           fontsize=6.5)
+        ax.tick_params(axis="y", labelsize=6.5)
 
     for ax in axes[:, 0]:
         ax.set_ylabel("mean $K$", fontsize=8)
-    fig.supxlabel("unlearning checkpoint (0 = base)", fontsize=9, y=0.045)
 
     h_, l_ = axes[0, 0].get_legend_handles_labels()
-    fig.legend(h_, l_, frameon=False, ncol=3, loc="lower center",
-               bbox_to_anchor=(0.5, -0.01), fontsize=8, columnspacing=1.6,
-               handlelength=2.0)
-    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    leg = fig.legend(h_, l_, frameon=False, ncol=3, loc="lower center",
+                     bbox_to_anchor=(0.5, 0.0), fontsize=7.5,
+                     columnspacing=1.4, handlelength=2.0)
+    fig.tight_layout(rect=(0, 0.115, 1, 1), h_pad=0.7, w_pad=0.6)
+
+    # Place the x label and legend from the MEASURED bottom of the lowest row
+    # rather than from guessed figure coordinates: supxlabel(y=...) cannot know
+    # where tight_layout put the axes, which is what opened the white band.
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    inv = fig.transFigure.inverted()
+    y_axes = min(inv.transform((0, ax.get_tightbbox(r).y0))[1]
+                 for ax in axes[-1, :])
+    lab = fig.text(0.5, y_axes - 0.018, "unlearning checkpoint (0 = base)",
+                   ha="center", va="top", fontsize=8)
+    fig.canvas.draw()
+    y_lab = inv.transform((0, lab.get_window_extent().y0))[1]
+    leg.set_bbox_to_anchor((0.5, y_lab - 0.075), transform=fig.transFigure)
 
     fig.savefig(f"{stem}.pdf", bbox_inches="tight")
     fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
