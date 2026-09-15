@@ -63,6 +63,9 @@ groups = {
     "Suppressed": q8[hi_i & ~hi_e].index,
     "Forgotten":  q8[~hi_i & ~hi_e].index,
     "Lucky":      q8[~hi_i & hi_e].index,
+    # one population: everything the probe can no longer read (K_int <= 1/2),
+    # which sec:behavioral shows the external axis splits at chance
+    "Forgotten $+$ Lucky": q8[~hi_i].index,
 }
 
 # checkpoint 0 is the base model, where K_int = K_ext = 1 for all of Q*
@@ -105,32 +108,41 @@ for ax, (name, idx) in zip(flat, groups.items()):
     ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.45)
     ax.set_axisbelow(True)
 
-# last cell carries the legend instead of a sixth panel
-lg = flat[-1]
-lg.axis("off")
+# six panels fill the grid, so the legend sits below the axes
 handles, labels = flat[0].get_legend_handles_labels()
 order = [1, 2, 0]
-lg.legend([handles[i] for i in order], [labels[i] for i in order],
-          frameon=False, loc="center", fontsize=7.5,
-          title=f"{METHOD.replace('_', '&')}", title_fontsize=8)
-lg.text(0.5, 0.16, "dotted line at 0.5:\nsubset threshold, applied at ck8",
-        ha="center", va="center", fontsize=7.0, alpha=0.75,
-        transform=lg.transAxes)
+leg = fig.legend([handles[i] for i in order], [labels[i] for i in order],
+                 frameon=False, loc="lower center", ncol=3, fontsize=7.5,
+                 bbox_to_anchor=(0.5, 0.0), columnspacing=1.6,
+                 handlelength=2.0)
+# no legend title: the caption already names the method and explains the 0.5
+# line, and the title collided with the figure-wide x label
 
 ticklabels = ["base"] + [f"ck{c}" if c % 2 == 0 else ""
                          for c in range(1, N_CK + 1)]
-# top-right panel sits above the legend cell, so it needs its own x labels;
-# sharex hides them by default on every non-bottom row
-for ax in list(axes[1]) + [axes[0][2]]:
+# every bottom-row panel carries the x labels; sharex hides them elsewhere
+for ax in list(axes[1]):
     ax.set_xticks(xs)
     ax.set_xticklabels(ticklabels)
     ax.tick_params(labelbottom=True)
 for ax in axes[:, 0]:
     ax.set_ylabel("knowledge score $K$")
-fig.supxlabel("unlearning checkpoint", fontsize=8.5, y=0.02)
 ax.set_ylim(-0.03, 1.05)
 
-fig.tight_layout(pad=0.4, w_pad=0.8, h_pad=0.9)
+# One layout pass, carrying the original pads plus a rect that reserves the
+# bottom band; the label and legend are then placed from the MEASURED bottom of
+# the last row. Doing this before tight_layout let the later pass re-lay the
+# axes on top of them.
+fig.tight_layout(rect=(0, 0.14, 1, 1), pad=0.4, w_pad=0.8, h_pad=0.9)
+fig.canvas.draw()
+_r = fig.canvas.get_renderer()
+_inv = fig.transFigure.inverted()
+_y = min(_inv.transform((0, a.get_tightbbox(_r).y0))[1] for a in axes[-1, :])
+_lab = fig.text(0.5, _y - 0.015, "unlearning checkpoint", ha="center",
+                va="top", fontsize=8.5)
+fig.canvas.draw()
+_yl = _inv.transform((0, _lab.get_window_extent().y0))[1]
+leg.set_bbox_to_anchor((0.5, _yl - 0.085), transform=fig.transFigure)
 stem = SAVE_DIR / "v6_kint_kext_trajectory"
 fig.savefig(f"{stem}.pdf", bbox_inches="tight")
 fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
