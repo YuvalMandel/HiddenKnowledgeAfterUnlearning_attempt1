@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=03:00:00
-#SBATCH --array=0-8%3
+#SBATCH --array=0-8%2
 #SBATCH --output=inside_out_logs/optml_l3_%A_%a.out
 #SBATCH --error=inside_out_logs/optml_l3_%A_%a.err
 #
@@ -21,8 +21,9 @@
 #   * 32 blocks -> 33 hidden states, hidden 4096 -- N_LAYERS unchanged
 #
 # Each task: download -> extract -> DELETE THE WEIGHTS. We keep the hidden
-# states (1.4 GB); the weights (~16 GB) are re-downloadable. %3 caps peak disk
-# at ~48 GB against the ~131 GB left under the quota.
+# states (1.4 GB); the weights (~16 GB) are re-downloadable. %2 caps peak disk
+# at ~32 GB; the public partition preempts, so a trap below removes a partial
+# download if we are killed before producing output.
 #
 # Extraction also writes bio_ext_alt.npy: the SAME logits scored with the
 # derived ids 2575/4139. Free here (the logits are in hand) and exact, so if we
@@ -60,6 +61,25 @@ CACHEDIR="$HUGGINGFACE_HUB_CACHE/models--${HFREPO//\//--}"
 cd "$REPO"
 mkdir -p inside_out_logs
 echo "host=$(hostname) model=$MODEL repo=$HFREPO start=$(date -Is)"
+
+# Clean up our own download if we die before producing output. The public
+# partition PREEMPTS: array 1405715 lost tasks 0-2 on bruno[1-2,4] four minutes
+# in, leaving 45 GB of orphaned weights that pushed usage to 752/770 GB and
+# made every later task abort on the disk guard. Slurm sends SIGTERM with a
+# grace period on preemption, so this trap normally fires.
+cleanup() {
+    if [ ! -f "inside_out_out/$MODEL/bio_hs.npy" ]; then
+        case "$CACHEDIR" in
+            *"models--OPTML-Group--"*)
+                if [ -d "$CACHEDIR" ]; then
+                    rm -rf "$CACHEDIR"
+                    echo "cleanup: removed unfinished download $CACHEDIR" >&2
+                fi
+                ;;
+        esac
+    fi
+}
+trap cleanup EXIT
 
 # skip if already extracted
 if [ -f "inside_out_out/$MODEL/bio_hs.npy" ]; then

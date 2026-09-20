@@ -43,7 +43,11 @@ PLOT_DIR = OUT_DIR / "plots"
 
 METHODS       = ["GradDiff", "RMU", "RMU-LAT", "RepNoise", "ELM", "RR", "TAR", "PB_J"]
 N_CHECKPOINTS = 8
-N_LAYERS      = 33   # embedding + 32 transformer layers (Llama-3-8B)
+N_LAYERS      = 33   # DEFAULT ONLY: embedding + 32 transformer layers.
+                     # Llama-3-8B, Zephyr/Mistral-7B and Mixtral-8x7B all have
+                     # 33; Yi-34B has 61. set_n_layers() overwrites this from
+                     # the model config (extract) or the saved array (probe),
+                     # so nothing downstream should assume 33.
 N_OPTIONS     = 4    # MCQ: A/B/C/D
 DOMAINS       = ["bio", "cyber"]
 
@@ -114,13 +118,23 @@ LEGACY_TF_MODELS = {
     "l3_nposam", "l3_npo", "l3_simnpo", "l3_undial",
 }
 
-# Repos that ship weights but NO tokenizer. SimNPO-WMDP-zephyr-7b-beta holds
+# Models whose tokenizer must come from somewhere other than their own repo --
+# either because they ship none, or because the one they ship is wrong for the
+# weights. Repos that ship weights but NO tokenizer: SimNPO-WMDP-zephyr-7b-beta holds
 # only config.json, generation_config.json and the safetensors, so
 # AutoTokenizer.from_pretrained fails on it. It is a zephyr-7b-beta fine-tune
 # with the same vocab (32000, per its own config), so the base tokenizer is the
 # correct one, not a workaround.
 TOKENIZER_SOURCE = {
     "zephyr_simnpo": "HuggingFaceH4/zephyr-7b-beta",
+    # cais/Yi-34B-Chat_RMU ships a tokenizer that DISAGREES WITH ITS OWN BASE
+    # about which token follows the prompt: the base emits 'True' (9651) and
+    # the RMU repo's emits '▁True' (11279). Scoring the pair that way would
+    # compare different tokens across the two models and silently corrupt the
+    # gap. Their vocabularies are otherwise identical -- 0 tokens have different
+    # ids; the RMU repo merely registers 8 extra specials (64000 vs 63992) --
+    # so the base tokenizer is correct for both, not a workaround.
+    "yi_rmu": "01-ai/Yi-34B-Chat",
 }
 
 PCA_DIM    = 256
@@ -160,6 +174,15 @@ def all_model_ids() -> list[str]:
             ids.append(f"{m}_ck{ck}")
     return ids  # 65 entries
 
+def set_n_layers(n: int, why: str) -> None:
+    """Point the module at this model's depth. Safe because one process
+    handles one model; see the note on N_LAYERS."""
+    global N_LAYERS
+    if n != N_LAYERS:
+        print(f"[layers] N_LAYERS {N_LAYERS} -> {n} ({why})")
+    N_LAYERS = n
+
+
 def model_path(model_id: str) -> str:
     if model_id in EXTRA_MODELS:
         return EXTRA_MODELS[model_id]
@@ -175,7 +198,7 @@ def load_tokenizer(model_id: str, mp: str, lfo: dict):
     src = TOKENIZER_SOURCE.get(model_id)
     if src is None:
         return AutoTokenizer.from_pretrained(mp, use_fast=True, **lfo)
-    print(f"[tok] {model_id}: tokenizer from {src} (its own repo ships none)")
+    print(f"[tok] {model_id}: tokenizer from {src} (overriding its own repo's)")
     return AutoTokenizer.from_pretrained(src, use_fast=True)
 
 
@@ -368,18 +391,24 @@ def extract_features(hs: np.ndarray, q_indices: np.ndarray, lc: str) -> np.ndarr
     hs: (n_q, N_OPTIONS, N_LAYERS, hidden_dim)
     Returns: (len(q_indices)*N_OPTIONS, features)  float32
     """
-    sub = hs[q_indices].astype(np.float32)  # (n, 4, L, hd)
-    n   = len(q_indices)
+    # Select layers BEFORE widening to float32. Casting first materialises every
+    # layer at 2x the bytes just to throw all but one away: on Yi-34B's
+    # (827, 4, 61, 7168) that is 5.8 GB per call, x5 folds x2 (train+val) in
+    # parallel. Indexing first makes the best_layer sweep ~60x cheaper and is
+    # numerically identical -- fp16 -> fp32 is exact and commutes with slicing.
+    n = len(q_indices)
+    sel = hs[q_indices]                     # (n, 4, L, hd), still fp16
     if lc.startswith("layer_"):
         l = int(lc.split("_", 1)[1])
-        return sub[:, :, l, :].reshape(n * N_OPTIONS, -1)
+        return sel[:, :, l, :].astype(np.float32).reshape(n * N_OPTIONS, -1)
     if lc == "multi":
-        return sub[:, :, ML_LAYERS, :].reshape(n * N_OPTIONS, -1)
+        return sel[:, :, ML_LAYERS, :].astype(np.float32).reshape(n * N_OPTIONS, -1)
     if lc == "full":
+        sub = sel.astype(np.float32)
         return sub.reshape(n * N_OPTIONS, N_LAYERS * sub.shape[-1])
     if lc in BANDS:
         layers = BANDS[lc]
-        return sub[:, :, layers, :].reshape(n * N_OPTIONS, -1)
+        return sel[:, :, layers, :].astype(np.float32).reshape(n * N_OPTIONS, -1)
     raise ValueError(lc)
 
 
@@ -467,6 +496,7 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
           f"True={true_id} False={false_id}; also recording the other rule "
           f"True={alt_true} False={alt_false} -> *_ext_alt.npy")
     hidden_dim = model.config.hidden_size
+    set_n_layers(model.config.num_hidden_layers + 1, f"{model_id} config")
 
     CKPT_EVERY = 1000  # save partial progress every N prompts
 
@@ -958,6 +988,7 @@ def stage_probe(
         print(f"  [{domain}] loading hidden states...", flush=True)
         hs  = np.load(hs_path)
         ext = np.load(ext_path)
+        set_n_layers(hs.shape[2], f"{model_id}/{domain}_hs.npy")
 
         n_q         = hs.shape[0]
         cidx_path   = OUT_DIR / f"{domain}_correct_idx.npy"
@@ -980,6 +1011,14 @@ def stage_probe(
                 hs_base          = np.load(bhs_path)
                 ext_base         = np.load(base_dir / f"{domain}_ext.npy")
                 correct_idx_base = correct_idx
+                # A cross-probe only means anything between models of the same
+                # shape. Yi-34B against a 33-layer base would broadcast-error
+                # at best and silently mismatch layers at worst.
+                if hs_base.shape[2:] != hs.shape[2:]:
+                    print(f"  [{domain}] cross-probe SKIPPED: base is "
+                          f"{hs_base.shape[2:]} but {model_id} is "
+                          f"{hs.shape[2:]}", flush=True)
+                    hs_base = ext_base = correct_idx_base = None
 
         total_configs = len(active_clfs) * len(active_lcs) * N_FOLDS
         print(f"  [{domain}] {total_configs} configs×folds, n_jobs={n_jobs}", flush=True)

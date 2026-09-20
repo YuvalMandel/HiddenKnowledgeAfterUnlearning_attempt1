@@ -30,13 +30,18 @@ MODELS=(zephyr_base zephyr_rmu mixtral_base mixtral_rmu
         zephyr_npo_gp zephyr_npo_rs zephyr_npo_sam zephyr_npo_wa
         zephyr_simnpo
         l3_dpo l3_graddiff l3_idkap l3_ilurmu l3_npoilu
-        l3_nposam l3_npo l3_simnpo l3_undial)
+        l3_nposam l3_npo l3_simnpo l3_undial
+        yi_base yi_rmu)
 #        0            1           2             3
 #        4                5                    6           7
 #        8              9              10              11
 #        12
 #        13     14          15        16        17
 #        18        19     20         21
+#        22      23
+#
+# Yi-34B needs more than this script's defaults (61 layers x hidden 7168):
+#   sbatch --mem=64G --time=24:00:00 --array=22-23 slurm_zephyr_probe.sh
 
 MODEL=${MODELS[$SLURM_ARRAY_TASK_ID]}
 cd "$REPO"; mkdir -p inside_out_logs
