@@ -68,7 +68,7 @@ echo "host=$(hostname) model=$MODEL repo=$HFREPO start=$(date -Is)"
 # made every later task abort on the disk guard. Slurm sends SIGTERM with a
 # grace period on preemption, so this trap normally fires.
 cleanup() {
-    if [ ! -f "inside_out_out/$MODEL/bio_hs.npy" ]; then
+    if [ ! -f "inside_out_out/$MODEL/bio_hs.npy" ] || [ ! -f "inside_out_out/$MODEL/bio_ext_alt.npy" ]; then
         case "$CACHEDIR" in
             *"models--OPTML-Group--"*)
                 if [ -d "$CACHEDIR" ]; then
@@ -82,7 +82,7 @@ cleanup() {
 trap cleanup EXIT
 
 # skip if already extracted
-if [ -f "inside_out_out/$MODEL/bio_hs.npy" ]; then
+if [ -f "inside_out_out/$MODEL/bio_hs.npy" ] && [ -f "inside_out_out/$MODEL/bio_ext_alt.npy" ]; then
     echo "already extracted, nothing to do"; exit 0
 fi
 
@@ -127,7 +127,7 @@ PY
 # 3. delete the weights, but ONLY on success and ONLY an OPTML-Group directory.
 #    The guard matters: a wrong CACHEDIR here would wipe the base model or the
 #    LLM-GAT checkpoints, which are not as cheap to replace.
-if [ -f "inside_out_out/$MODEL/bio_hs.npy" ] && [ -f "inside_out_out/$MODEL/bio_ext.npy" ]; then
+if [ -f "inside_out_out/$MODEL/bio_hs.npy" ] && [ -f "inside_out_out/$MODEL/bio_ext_alt.npy" ]; then
     case "$CACHEDIR" in
         *"models--OPTML-Group--"*)
             du -sh "$CACHEDIR" 2>/dev/null || true

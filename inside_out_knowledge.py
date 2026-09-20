@@ -455,6 +455,7 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
 
     all_done = all(
         (m_dir / f"{d}_hs.npy").exists() and (m_dir / f"{d}_ext.npy").exists()
+        and (m_dir / f"{d}_ext_alt.npy").exists()
         for d in active_domains
     )
     if all_done:
@@ -505,7 +506,11 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         ext_path  = m_dir / f"{domain}_ext.npy"
         alt_path  = m_dir / f"{domain}_ext_alt.npy"
         part_path = m_dir / f"{domain}_partial.npz"
-        if hs_path.exists() and ext_path.exists():
+        # alt_path included deliberately: preemption once killed l3_idkap
+        # between saves, leaving hs+ext but no ext_alt, and this check then
+        # declared it done forever. Every completeness test in this file must
+        # name all three files.
+        if hs_path.exists() and ext_path.exists() and alt_path.exists():
             print(f"  [{domain}] already done."); continue
 
         data = load_wmdp(domain)
@@ -563,9 +568,14 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         all_hs  = all_hs.reshape(n_q, N_OPTIONS, N_LAYERS, hidden_dim)
         all_ext = all_ext.reshape(n_q, N_OPTIONS)
         all_alt = all_alt.reshape(n_q, N_OPTIONS)
-        np.save(hs_path,  all_hs)
-        np.save(ext_path, all_ext)
+        # Order matters: bio_hs.npy is the sentinel every guard checks, so it is
+        # written LAST. Preemption killed l3_idkap between two of these saves,
+        # leaving hs+ext present and ext_alt missing -- a directory that looked
+        # complete to both the shell guard and all_done above. With hs last, an
+        # interrupted save can only ever look INcomplete, which is recoverable.
         np.save(alt_path, all_alt)
+        np.save(ext_path, all_ext)
+        np.save(hs_path,  all_hs)
         correct_idx_path = OUT_DIR / f"{domain}_correct_idx.npy"
         if not correct_idx_path.exists():
             correct_idx = np.array([it["answer"] for it in data], dtype=np.int8)
