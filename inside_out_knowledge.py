@@ -61,6 +61,40 @@ SWEEP_SLUGS = {
     "PB_J":     "pbj",
 }
 
+# Model pairs outside the LLM-GAT sweep (WMDP's own RMU checkpoints).
+# Keyed by model_id; consulted by model_path() before the LLM-GAT rule, so
+# every existing id resolves exactly as before.
+EXTRA_MODELS = {
+    "zephyr_base": "HuggingFaceH4/zephyr-7b-beta",
+    "zephyr_rmu":  "cais/Zephyr_RMU",
+    "yi_base":     "01-ai/Yi-34B-Chat",
+    "yi_rmu":      "cais/Yi-34B-Chat_RMU",
+    "mixtral_base": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "mixtral_rmu":  "cais/Mixtral-8x7B-Instruct_RMU",
+    # OPTML-Group's WMDP suite, all fine-tuned from HuggingFaceH4/zephyr-7b-beta
+    # (config.model_type says "mistral" -- that is the architecture; the base is
+    # recorded in each config's _name_or_path). Same base as zephyr_base above,
+    # so its K scores are the shared reference point.
+    "zephyr_graddiff":     "OPTML-Group/GradDiff-WMDP",
+    "zephyr_graddiff_sam": "OPTML-Group/GradDiff-SAM-WMDP",
+    "zephyr_npo":          "OPTML-Group/NPO-WMDP",
+    "zephyr_npo_cr":       "OPTML-Group/NPO-CR-WMDP",
+    "zephyr_npo_gp":       "OPTML-Group/NPO-GP-WMDP",
+    "zephyr_npo_rs":       "OPTML-Group/NPO-RS-WMDP",
+    "zephyr_npo_sam":      "OPTML-Group/NPO-SAM-WMDP",
+    "zephyr_npo_wa":       "OPTML-Group/NPO-WA-WMDP",
+    "zephyr_simnpo":       "OPTML-Group/SimNPO-WMDP-zephyr-7b-beta",
+}
+
+# Repos that ship weights but NO tokenizer. SimNPO-WMDP-zephyr-7b-beta holds
+# only config.json, generation_config.json and the safetensors, so
+# AutoTokenizer.from_pretrained fails on it. It is a zephyr-7b-beta fine-tune
+# with the same vocab (32000, per its own config), so the base tokenizer is the
+# correct one, not a workaround.
+TOKENIZER_SOURCE = {
+    "zephyr_simnpo": "HuggingFaceH4/zephyr-7b-beta",
+}
+
 PCA_DIM    = 256
 N_FOLDS    = 5
 SEED       = 42
@@ -99,13 +133,29 @@ def all_model_ids() -> list[str]:
     return ids  # 65 entries
 
 def model_path(model_id: str) -> str:
+    if model_id in EXTRA_MODELS:
+        return EXTRA_MODELS[model_id]
     if model_id == "base":
         return BASE_MODEL_ID
     method, ck = model_id.rsplit("_ck", 1)
     slug = SWEEP_SLUGS[method]
     return f"LLM-GAT/llama-3-8b-instruct-{slug}-checkpoint-{ck}"
 
+def load_tokenizer(model_id: str, mp: str, lfo: dict):
+    """Tokenizer for a model id, honouring TOKENIZER_SOURCE."""
+    from transformers import AutoTokenizer  # imported lazily, as in the stage fns
+    src = TOKENIZER_SOURCE.get(model_id)
+    if src is None:
+        return AutoTokenizer.from_pretrained(mp, use_fast=True, **lfo)
+    print(f"[tok] {model_id}: tokenizer from {src} (its own repo ships none)")
+    return AutoTokenizer.from_pretrained(src, use_fast=True)
+
+
 def parse_model_id(model_id: str) -> tuple[str, int]:
+    if model_id in EXTRA_MODELS:
+        # one base + one unlearned checkpoint per family, so ck0 / ck1
+        fam, _, tail = model_id.partition("_")
+        return fam, (0 if tail == "base" else 1)
     if model_id == "base":
         return "base", 0
     method, ck = model_id.rsplit("_ck", 1)
@@ -183,6 +233,66 @@ def make_verify_prompt(question: str, choice: str) -> list:
             "Label:"
         )},
     ]
+
+def tf_token_ids(tok) -> tuple[int, int]:
+    """The ids the model would actually emit for True / False at the scored
+    position, read off a real assistant turn rather than guessed.
+
+    encode(" True")[-1] is the usual idiom but it is template-blind. Llama-3's
+    generation prompt ends in "\n\n" and Zephyr's in "<|assistant|>\n", so the
+    emitted token carries no leading space; under sentencepiece the two differ
+    outright (Zephyr: 4365 vs 6110). Deriving them from the template keeps this
+    correct for any chat model.
+
+    NOT used for the LLM-GAT/Llama-3 models. Verified 2026-09-20: for Llama-3
+    this returns 2575/4139 while every published run used 3082/3641, so
+    switching them would silently move all reported numbers. KNOWN_ISSUES #34
+    measured that change (mean gap 11.3 -> 11.9 pp) and it is deliberately not
+    applied; the legacy ids stay until that issue is decided. New model
+    families, which have no published numbers, use this helper.
+    """
+    msgs = [{"role": "user", "content": "x"}]
+    n_pre = len(tok.encode(
+        tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True),
+        add_special_tokens=False))
+    out = []
+    for word in ("True", "False"):
+        ids = tok.encode(
+            tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True) + word,
+            add_special_tokens=False)
+        out.append(ids[n_pre])
+    return out[0], out[1]
+
+
+def render_prompt(tok, msgs) -> str:
+    """apply_chat_template, folding the system turn into the user turn when the
+    template refuses one.
+
+    Mixtral's template raises "Conversation roles must alternate
+    user/assistant/..." on a system message; Llama-3 and Zephyr accept it. The
+    fallback prepends the identical system text to the user content, so the
+    model reads the same words and only the turn structure differs. Templates
+    that accept a system role are untouched, so Llama-3 and Zephyr prompts are
+    byte-identical to before.
+    """
+    try:
+        return tok.apply_chat_template(msgs, tokenize=False,
+                                       add_generation_prompt=True)
+    except Exception:
+        merged, sys_txt = [], ""
+        for m in msgs:
+            if m["role"] == "system":
+                sys_txt = m["content"]
+            else:
+                c = m["content"]
+                sep = chr(10) + chr(10)
+                merged.append({"role": m["role"],
+                               "content": (sys_txt + sep + c)
+                               if sys_txt and m["role"] == "user" else c})
+                sys_txt = ""
+        return tok.apply_chat_template(merged, tokenize=False,
+                                       add_generation_prompt=True)
+
 
 def get_cv_splits(n: int) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Return N_FOLDS (train_idx, val_idx, test_idx) tuples.
@@ -297,7 +407,7 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
     cached = _is_cached(mp)
     lfo = {"local_files_only": True} if cached else {}
     print(f"[extract] {model_id}: loading from {mp} (local_files_only={cached})")
-    tok = AutoTokenizer.from_pretrained(mp, use_fast=True, **lfo)
+    tok = load_tokenizer(model_id, mp, lfo)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -306,8 +416,12 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         mp, torch_dtype=torch.float16, device_map="auto", **lfo)
     model.eval()
 
-    true_id  = tok.encode(" True",  add_special_tokens=False)[-1]
-    false_id = tok.encode(" False", add_special_tokens=False)[-1]
+    # legacy ids for everything already published; derived ids for new families
+    if model_id in EXTRA_MODELS:
+        true_id, false_id = tf_token_ids(tok)
+    else:
+        true_id  = tok.encode(" True",  add_special_tokens=False)[-1]
+        false_id = tok.encode(" False", add_special_tokens=False)[-1]
     hidden_dim = model.config.hidden_size
 
     CKPT_EVERY = 1000  # save partial progress every N prompts
@@ -323,8 +437,7 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         n_q  = len(data)
         chat_msgs = [make_verify_prompt(item["question"], ch)
                      for item in data for ch in item["choices"]]
-        prompts = [tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
-                   for m in chat_msgs]
+        prompts = [render_prompt(tok, m) for m in chat_msgs]
         n_total = len(prompts)
 
         # Resume from partial checkpoint if available
@@ -422,7 +535,7 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
     cached = _is_cached(mp)
     lfo    = {"local_files_only": True} if cached else {}
     print(f"[gen] {model_id}: loading from {mp} (local_files_only={cached})")
-    tok = AutoTokenizer.from_pretrained(mp, use_fast=True, **lfo)
+    tok = load_tokenizer(model_id, mp, lfo)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -445,8 +558,7 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
             item = data[qi]
             for oi, ch in enumerate(item["choices"]):
                 msgs   = make_verify_prompt(item["question"], ch)
-                prompt = tok.apply_chat_template(msgs, tokenize=False,
-                                                 add_generation_prompt=True)
+                prompt = render_prompt(tok, msgs)
                 prompts.append(prompt)
                 meta.append({"question_idx": int(qi), "option_idx": oi})
 
