@@ -84,6 +84,34 @@ EXTRA_MODELS = {
     "zephyr_npo_sam":      "OPTML-Group/NPO-SAM-WMDP",
     "zephyr_npo_wa":       "OPTML-Group/NPO-WA-WMDP",
     "zephyr_simnpo":       "OPTML-Group/SimNPO-WMDP-zephyr-7b-beta",
+    # OPTML-Group's WMDP suite on OUR OWN base, meta-llama/Meta-Llama-3-8B-Instruct.
+    # 32 blocks -> 33 hidden states, hidden 4096: shape-identical to `base`, so
+    # N_LAYERS and the probe path are unchanged and these compare directly
+    # against the base K scores already in the paper.
+    "l3_dpo":        "OPTML-Group/DPO-WMDP-llama3-8b-instruct",
+    "l3_graddiff":   "OPTML-Group/GradDiff-WMDP-llama3-8b-instruct",
+    "l3_idkap":      "OPTML-Group/IDK-AP-WMDP-llama3-8b-instruct",
+    "l3_ilurmu":     "OPTML-Group/ILU-RMU-WMDP-llama3-8b-instruct",
+    "l3_npoilu":     "OPTML-Group/NPO-ILU-WMDP-llama3-8b-instruct",
+    "l3_nposam":     "OPTML-Group/NPO-SAM-WMDP-llama3-8b-instruct",
+    "l3_npo":        "OPTML-Group/NPO-WMDP-llama3-8b-instruct",
+    "l3_simnpo":     "OPTML-Group/SimNPO-WMDP-llama3-8b-instruct",
+    "l3_undial":     "OPTML-Group/UNDIAL-WMDP-llama3-8b-instruct",
+}
+
+# EXTRA_MODELS that must keep the LEGACY " True"/" False" rule (3082/3641 on
+# Llama-3) instead of tf_token_ids()'s derived ids (2575/4139).
+#
+# These 9 are fine-tunes of the base this paper already published numbers for,
+# and the whole point of running them is to compare against those numbers.
+# plots/check_optml_llama_tokens.py verified on the real tokenizers that all 9
+# give legacy 3082/3641 and render byte-identical prompts; 7 of them append a
+# [pad] token at index 128256, which is strictly after the stock vocabulary and
+# shifts nothing. Scoring them with derived ids would silently make them
+# incomparable with the very base they are being compared to (KNOWN_ISSUES #34).
+LEGACY_TF_MODELS = {
+    "l3_dpo", "l3_graddiff", "l3_idkap", "l3_ilurmu", "l3_npoilu",
+    "l3_nposam", "l3_npo", "l3_simnpo", "l3_undial",
 }
 
 # Repos that ship weights but NO tokenizer. SimNPO-WMDP-zephyr-7b-beta holds
@@ -408,6 +436,14 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
     lfo = {"local_files_only": True} if cached else {}
     print(f"[extract] {model_id}: loading from {mp} (local_files_only={cached})")
     tok = load_tokenizer(model_id, mp, lfo)
+    if model_id in LEGACY_TF_MODELS:
+        # pad exactly like the base did. 7 of the 9 OPTML Llama repos ship
+        # pad_token='[pad]' (id 128256) and one ships '<|eot_id|>', while our
+        # base has pad_token=None and falls through to eos. Padding is masked
+        # out and we index last_idx=N-1 under left-padding, so this should be
+        # inert -- but the padding bugs in MEMORY.md all started as "should be
+        # inert", and id 128256 exists only in the 128257-row embeddings.
+        tok.pad_token = tok.eos_token
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -416,12 +452,20 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
         mp, torch_dtype=torch.float16, device_map="auto", **lfo)
     model.eval()
 
-    # legacy ids for everything already published; derived ids for new families
-    if model_id in EXTRA_MODELS:
-        true_id, false_id = tf_token_ids(tok)
-    else:
-        true_id  = tok.encode(" True",  add_special_tokens=False)[-1]
-        false_id = tok.encode(" False", add_special_tokens=False)[-1]
+    # Which rule scores this model. Legacy (" True"/" False") for everything
+    # already published and for models that must compare against it; derived
+    # (read off a real assistant turn) for genuinely new families, where the
+    # legacy rule picks tokens the model never emits. See KNOWN_ISSUES #34.
+    legacy = (tok.encode(" True",  add_special_tokens=False)[-1],
+              tok.encode(" False", add_special_tokens=False)[-1])
+    derived = tf_token_ids(tok)
+    use_derived = model_id in EXTRA_MODELS and model_id not in LEGACY_TF_MODELS
+    (true_id, false_id), (alt_true, alt_false) = (
+        (derived, legacy) if use_derived else (legacy, derived))
+    print(f"[extract] {model_id}: scoring with "
+          f"{'derived' if use_derived else 'legacy'} ids "
+          f"True={true_id} False={false_id}; also recording the other rule "
+          f"True={alt_true} False={alt_false} -> *_ext_alt.npy")
     hidden_dim = model.config.hidden_size
 
     CKPT_EVERY = 1000  # save partial progress every N prompts
@@ -429,6 +473,7 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
     for domain in active_domains:
         hs_path   = m_dir / f"{domain}_hs.npy"
         ext_path  = m_dir / f"{domain}_ext.npy"
+        alt_path  = m_dir / f"{domain}_ext_alt.npy"
         part_path = m_dir / f"{domain}_partial.npz"
         if hs_path.exists() and ext_path.exists():
             print(f"  [{domain}] already done."); continue
@@ -445,11 +490,15 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
             part = np.load(part_path)
             all_hs     = part["hs"]
             all_ext    = part["ext"]
+            # partials written before the alt margin existed have no "ext_alt"
+            all_alt    = (part["ext_alt"] if "ext_alt" in part.files
+                          else np.zeros_like(all_ext))
             resume_idx = int(part["next_start"])
             print(f"  [{domain}] resuming from {resume_idx}/{n_total}")
         else:
             all_hs     = np.zeros((n_total, N_LAYERS, hidden_dim), dtype=np.float16)
             all_ext    = np.zeros(n_total, dtype=np.float32)
+            all_alt    = np.zeros(n_total, dtype=np.float32)
             resume_idx = 0
 
         for start in range(resume_idx, n_total, BATCH_SIZE):
@@ -471,18 +520,22 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
                 ], axis=0).astype(np.float16)
                 logits = out.logits[bi, li, :]
                 all_ext[start + bi] = (logits[true_id] - logits[false_id]).cpu().item()
+                all_alt[start + bi] = (logits[alt_true] - logits[alt_false]).cpu().item()
 
             # Periodic checkpoint: save progress so preemption doesn't restart from zero
             next_start = start + BATCH_SIZE
             if next_start % CKPT_EVERY < BATCH_SIZE and next_start < n_total:
-                np.savez(part_path, hs=all_hs, ext=all_ext, next_start=next_start)
+                np.savez(part_path, hs=all_hs, ext=all_ext, ext_alt=all_alt,
+                         next_start=next_start)
                 print(f"  [{domain}] checkpoint saved at {next_start}/{n_total}", flush=True)
 
         # Reshape to (n_q, N_OPTIONS, N_LAYERS, hidden_dim) and save final
         all_hs  = all_hs.reshape(n_q, N_OPTIONS, N_LAYERS, hidden_dim)
         all_ext = all_ext.reshape(n_q, N_OPTIONS)
+        all_alt = all_alt.reshape(n_q, N_OPTIONS)
         np.save(hs_path,  all_hs)
         np.save(ext_path, all_ext)
+        np.save(alt_path, all_alt)
         correct_idx_path = OUT_DIR / f"{domain}_correct_idx.npy"
         if not correct_idx_path.exists():
             correct_idx = np.array([it["answer"] for it in data], dtype=np.int8)

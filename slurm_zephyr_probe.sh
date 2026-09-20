@@ -28,11 +28,15 @@ PYTHON=/home/yuval.mandel/miniconda3/envs/unlearning/bin/python3
 MODELS=(zephyr_base zephyr_rmu mixtral_base mixtral_rmu
         zephyr_graddiff zephyr_graddiff_sam zephyr_npo zephyr_npo_cr
         zephyr_npo_gp zephyr_npo_rs zephyr_npo_sam zephyr_npo_wa
-        zephyr_simnpo)
+        zephyr_simnpo
+        l3_dpo l3_graddiff l3_idkap l3_ilurmu l3_npoilu
+        l3_nposam l3_npo l3_simnpo l3_undial)
 #        0            1           2             3
 #        4                5                    6           7
 #        8              9              10              11
 #        12
+#        13     14          15        16        17
+#        18        19     20         21
 
 MODEL=${MODELS[$SLURM_ARRAY_TASK_ID]}
 cd "$REPO"; mkdir -p inside_out_logs
