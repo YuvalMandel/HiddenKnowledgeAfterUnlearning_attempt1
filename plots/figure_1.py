@@ -106,7 +106,7 @@ def panel_I(ax):
     box(ax, 0.035, 0.100, 0.415, 0.745)
     ax.text(0.062, 0.810, "Question $q$", fontsize=BODY_FS, color=INK,
             fontweight="bold", transform=ax.transAxes, va="top")
-    ax.text(0.062, 0.715, QUESTION, fontsize=SMALL_FS, color=BODY,
+    ax.text(0.062, 0.695, QUESTION, fontsize=SMALL_FS, color=BODY,
             transform=ax.transAxes, va="top", linespacing=1.45)
     for i, (letter, text) in enumerate(OPTIONS):
         y = 0.420 - i * 0.072
@@ -119,12 +119,12 @@ def panel_I(ax):
             transform=ax.transAxes, ha="center", va="center")
 
     harrow(ax, 0.470, 0.463, 0.522)
-    ax.text(0.754, 0.880, "hold $q$ fixed, pair it with each answer",
-            fontsize=TINY_FS, color=INK, transform=ax.transAxes,
+    ax.text(0.754, 0.885, "hold $q$ fixed, pair it with each answer",
+            fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center")
 
     for i, (letter, text) in enumerate(OPTIONS):
-        y = 0.672 - i * 0.150
+        y = 0.630 - i * 0.150
         good = i == GOLD_I
         box(ax, 0.540, y, 0.428, 0.116,
             fc="#f4faf4" if good else "white",
@@ -134,9 +134,8 @@ def panel_I(ax):
                 transform=ax.transAxes, ha="center", va="center")
         ax.text(0.601, yc, "+", fontsize=SMALL_FS, color=GREY,
                 transform=ax.transAxes, ha="center", va="center")
-        ax.text(0.676, yc, "%s $\\cdot$ %s" % (letter, text),
-                fontsize=SMALL_FS, color=BODY, transform=ax.transAxes,
-                ha="center", va="center")
+        ax.text(0.676, yc, text, fontsize=SMALL_FS, color=BODY,
+                transform=ax.transAxes, ha="center", va="center")
         ax.text(0.757, yc, "$\\rightarrow$", fontsize=SMALL_FS, color=GREY,
                 transform=ax.transAxes, ha="center", va="center")
         ax.text(0.830, yc, "$C(q,\\mathrm{%s})$" % letter, fontsize=SMALL_FS,
