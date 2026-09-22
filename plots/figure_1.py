@@ -55,7 +55,7 @@ IMGS = ROOT / "overleaf_claims" / "imgs"
 INT_C, EXT_C = "#2166ac", "#d6604d"     # internal blue, external red
 INK, BODY = "#1a1a2e", "#222222"
 EDGE, FILL = "#c8d2e0", "#fafbfd"
-GOLD, GREY = "#2e7d32", "#8c8c8c"
+GOLD, GREY = "#2e7d32", "#6e6e6e"
 
 TITLE_FS, BODY_FS, SMALL_FS, TINY_FS = 7.2, 5.8, 5.2, 4.6
 
@@ -163,14 +163,14 @@ def panel_II(ax):
     gx, gy = np.meshgrid(xs, ys)
     hot = np.zeros_like(gx, dtype=bool)
     hot[:, tap] = True
-    ax.scatter(gx[~hot], gy[~hot], s=1.8, c="#cfd9e6", marker="o",
+    ax.scatter(gx[~hot], gy[~hot], s=1.8, c="#a9bdd4", marker="o",
                linewidths=0, transform=ax.transAxes, zorder=3)
-    ax.scatter(gx[hot], gy[hot], s=2.8, c="#8fa9c6", marker="o",
+    ax.scatter(gx[hot], gy[hot], s=2.8, c="#6d8bad", marker="o",
                linewidths=0, transform=ax.transAxes, zorder=4)
     ax.add_patch(FancyBboxPatch(
         (xt - 0.021, y0 - 0.026), 0.042, (y1 - y0) + 0.052,
         transform=ax.transAxes, boxstyle="round,pad=0,rounding_size=0.016",
-        fc="none", ec="#8fa9c6", lw=0.55, zorder=5))
+        fc="none", ec="#6d8bad", lw=0.55, zorder=5))
     ax.text(0.097, y1, "32", fontsize=TINY_FS, color=GREY,
             transform=ax.transAxes, ha="right", va="center")
     ax.text(0.097, y0, "1", fontsize=TINY_FS, color=GREY,
@@ -189,29 +189,24 @@ def panel_II(ax):
     ax.scatter([xt], [y1], s=11, c=EXT_C, marker="o", linewidths=0,
                transform=ax.transAxes, zorder=6)
 
-    # external leaves from the right at layer 32
-    box(ax, 0.655, 0.585, 0.320, 0.150, fc="#fceeea", ec=EXT_C, lw=0.7)
-    ax.text(0.815, 0.660, "External readout", fontsize=SMALL_FS, color=EXT_C,
-            transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.815, 0.530, "True/False logits, $\\ell{=}32$", fontsize=TINY_FS,
-            color=GREY, transform=ax.transAxes, ha="center", va="center")
-    ax.plot([bx1, 0.622], [y1, y1], color=EXT_C, lw=0.9,
-            transform=ax.transAxes, zorder=2)
-    ax.plot([0.622, 0.622], [y1, 0.660], color=EXT_C, lw=0.9,
-            transform=ax.transAxes, zorder=2)
-    harrow(ax, 0.660, 0.622, 0.655, EXT_C)
+    # both readouts stack on the right: external at layer 32, internal
+    # below it, reached by leaving the bottom of the model
+    box(ax, 0.655, 0.665, 0.320, 0.150, fc="#fceeea", ec=EXT_C, lw=0.7)
+    ax.text(0.815, 0.740, "External readout", fontsize=SMALL_FS,
+            color=EXT_C, transform=ax.transAxes, ha="center", va="center")
+    ax.text(0.815, 0.615, "True/False logits, $\\ell{=}32$",
+            fontsize=TINY_FS, color=GREY, transform=ax.transAxes,
+            ha="center", va="center")
+    harrow(ax, y1, bx1, 0.655, EXT_C)
 
-    # internal leaves from below
-    box(ax, 0.150, 0.065, 0.320, 0.150, fc="#eef3f9", ec=INT_C, lw=0.7)
-    ax.text(0.310, 0.140, "Internal readout", fontsize=SMALL_FS, color=INT_C,
-            transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.500, 0.140, "probe at $\\ell^{*}$", fontsize=TINY_FS, color=GREY,
-            transform=ax.transAxes, ha="left", va="center")
-    ax.plot([xt, xt], [by0, 0.255], color=INT_C, lw=0.9,
-            transform=ax.transAxes, zorder=2)
-    ax.plot([0.310, xt], [0.255, 0.255], color=INT_C, lw=0.9,
-            transform=ax.transAxes, zorder=2)
-    varrow(ax, 0.310, 0.255, 0.215, INT_C)
+    box(ax, 0.655, 0.290, 0.320, 0.150, fc="#eef3f9", ec=INT_C, lw=0.7)
+    ax.text(0.815, 0.365, "Internal readout", fontsize=SMALL_FS,
+            color=INT_C, transform=ax.transAxes, ha="center", va="center")
+    ax.text(0.815, 0.240, "probe at $\\ell^{*}$", fontsize=TINY_FS,
+            color=GREY, transform=ax.transAxes, ha="center", va="center")
+    ax.plot([xt, xt, 0.622, 0.622], [by0, 0.165, 0.165, 0.365],
+            color=INT_C, lw=0.9, transform=ax.transAxes, zorder=2)
+    harrow(ax, 0.365, 0.622, 0.655, INT_C)
 
 
 # ── III ───────────────────────────────────────────────────────────────────
