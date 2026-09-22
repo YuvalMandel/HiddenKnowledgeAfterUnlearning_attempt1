@@ -101,10 +101,9 @@ def logo_row(ax, xs, cy, h):
                           w * bb.width, h * bb.height])
         a.imshow(img)
         a.axis("off")
-        ax.text(x, cy - h / 2 - 0.018, name, fontsize=TINY_FS,
-                color=BODY, transform=ax.transAxes, ha="center",
-                va="top")
-
+        ax.text(x + w / 2 + 0.016, cy, name, fontsize=TINY_FS,
+                color=BODY, transform=ax.transAxes, ha="left",
+                va="center")
 
 def varrow(ax, x, y0, y1, color=INK):
     ax.annotate("", xy=(x, y1), xytext=(x, y0), xycoords=ax.transAxes,
@@ -175,68 +174,66 @@ def panel_I(ax):
 # ── II ────────────────────────────────────────────────────────────────────
 def panel_II(ax):
     panel_frame(ax, "II", "One pass, two readouts", tx=0.078)
+    logo_row(ax, (0.085, 0.330, 0.570, 0.810), 0.775, 0.100)
 
-    bx0, bx1, by0, by1 = 0.035, 0.590, 0.310, 0.860
+    bx0, bx1, by0, by1 = 0.030, 0.590, 0.181, 0.660
     box(ax, bx0, by0, bx1 - bx0, by1 - by0)
-    ax.text((bx0 + bx1) / 2, 0.810, "LLM $(m,\\ell)$", fontsize=BODY_FS,
-            color=INK, transform=ax.transAxes, ha="center", va="center")
+    ax.text(0.062, 0.625, "LLM $(m,\\ell)$", fontsize=BODY_FS,
+            color=INK, transform=ax.transAxes, ha="left", va="center")
 
-    # x is token position, y is layer: the readouts share a token, not a depth
-    nx, ny = 11, 6
-    x0, x1, y0, y1 = 0.120, 0.545, 0.395, 0.740
+    # x is layer, y is token position: both readouts sit on the same token
+    # row, at different depths
+    nx, ny = 9, 5
+    x0, x1, y0, y1 = 0.135, 0.545, 0.290, 0.556
     xs, ys = np.linspace(x0, x1, nx), np.linspace(y0, y1, ny)
-    tap = 7
-    xt = xs[tap]
+    xe = xs[5]                                  # the probed layer
     gx, gy = np.meshgrid(xs, ys)
     hot = np.zeros_like(gx, dtype=bool)
-    hot[:, tap] = True
+    hot[-1, :] = True                           # the tapped token row
     ax.scatter(gx[~hot], gy[~hot], s=1.8, c="#a9bdd4", marker="o",
                linewidths=0, transform=ax.transAxes, zorder=3)
     ax.scatter(gx[hot], gy[hot], s=2.8, c="#6d8bad", marker="o",
                linewidths=0, transform=ax.transAxes, zorder=4)
     ax.add_patch(FancyBboxPatch(
-        (xt - 0.021, y0 - 0.026), 0.042, (y1 - y0) + 0.052,
+        (x0 - 0.026, y1 - 0.030), (x1 - x0) + 0.052, 0.060,
         transform=ax.transAxes, boxstyle="round,pad=0,rounding_size=0.016",
         fc="none", ec="#6d8bad", lw=0.55, zorder=5))
-    ax.text(0.097, y1, "32", fontsize=TINY_FS, color=GREY,
+    ax.text(0.100, y1, "$i^{*}$", fontsize=SMALL_FS, color=BODY,
             transform=ax.transAxes, ha="right", va="center")
-    ax.text(0.097, y0, "1", fontsize=TINY_FS, color=GREY,
+    ax.text(0.100, y0, "1", fontsize=TINY_FS, color=GREY,
             transform=ax.transAxes, ha="right", va="center")
-    ax.text(0.062, (y0 + y1) / 2, "layer", fontsize=TINY_FS, color=GREY,
-            transform=ax.transAxes, rotation=90, ha="center", va="center")
-    ax.text(xt, 0.345, "$i^{*}$", fontsize=SMALL_FS, color=BODY,
-            transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.190, 0.345, "token position", fontsize=TINY_FS, color=GREY,
-            transform=ax.transAxes, ha="center", va="center")
+    ax.text(0.052, (y0 + y1) / 2, "token position", fontsize=TINY_FS,
+            color=GREY, transform=ax.transAxes, rotation=90,
+            ha="center", va="center")
+    for xx, lab in ((x0, "1"), ((x0 + x1) / 2, "layer"), (x1, "32")):
+        ax.text(xx, 0.232, lab, fontsize=TINY_FS, color=GREY,
+                transform=ax.transAxes, ha="center", va="center")
 
-    ax.scatter([xt], [ys[2]], s=11, c=INT_C, marker="o", linewidths=0,
+    ax.scatter([xe], [y1], s=11, c=INT_C, marker="o", linewidths=0,
                transform=ax.transAxes, zorder=6)
-    ax.text(xt + 0.028, ys[2], "$\\ell^{*}$", fontsize=SMALL_FS, color=INT_C,
-            transform=ax.transAxes, ha="left", va="center")
-    ax.scatter([xt], [y1], s=11, c=EXT_C, marker="o", linewidths=0,
+    ax.text(xe, y1 + 0.046, "$\\ell^{*}$", fontsize=SMALL_FS,
+            color=INT_C, transform=ax.transAxes, ha="center", va="bottom")
+    ax.scatter([x1], [y1], s=11, c=EXT_C, marker="o", linewidths=0,
                transform=ax.transAxes, zorder=6)
 
-    # both readouts stack on the right: external at layer 32, internal
-    # below it, reached by leaving the bottom of the model
-    box(ax, 0.655, 0.665, 0.320, 0.150, fc="#fceeea", ec=EXT_C, lw=0.7)
-    ax.text(0.815, 0.740, "External readout", fontsize=SMALL_FS,
+    # external leaves the last layer on that row; internal is tapped at
+    # l* and leaves through the bottom of the model
+    box(ax, 0.655, 0.490, 0.320, 0.131, fc="#fceeea", ec=EXT_C, lw=0.7)
+    ax.text(0.815, 0.556, "External readout", fontsize=SMALL_FS,
             color=EXT_C, transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.815, 0.615, "True/False logits, $\\ell{=}32$",
+    ax.text(0.815, 0.447, "True/False logits, $\\ell{=}32$",
             fontsize=TINY_FS, color=GREY, transform=ax.transAxes,
             ha="center", va="center")
     harrow(ax, y1, bx1, 0.655, EXT_C)
 
-    box(ax, 0.655, 0.290, 0.320, 0.150, fc="#eef3f9", ec=INT_C, lw=0.7)
-    ax.text(0.815, 0.365, "Internal readout", fontsize=SMALL_FS,
+    box(ax, 0.655, 0.164, 0.320, 0.131, fc="#eef3f9", ec=INT_C, lw=0.7)
+    ax.text(0.815, 0.229, "Internal readout", fontsize=SMALL_FS,
             color=INT_C, transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.815, 0.240, "probe at $\\ell^{*}$", fontsize=TINY_FS,
+    ax.text(0.815, 0.120, "probe at $\\ell^{*}$", fontsize=TINY_FS,
             color=GREY, transform=ax.transAxes, ha="center", va="center")
-    ax.plot([xt, xt, 0.622, 0.622], [by0, 0.250, 0.250, 0.365],
+    ax.plot([xe, xe, 0.622, 0.622], [by0, 0.075, 0.075, 0.229],
             color=INT_C, lw=0.9, transform=ax.transAxes, zorder=2)
-    harrow(ax, 0.365, 0.622, 0.655, INT_C)
-
-    logo_row(ax, (0.160, 0.380, 0.600, 0.820), 0.140, 0.100)
-
+    harrow(ax, 0.229, 0.622, 0.655, INT_C)
 
 # ── III ───────────────────────────────────────────────────────────────────
 def panel_III(ax):
