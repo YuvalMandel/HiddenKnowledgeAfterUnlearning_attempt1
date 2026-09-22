@@ -253,11 +253,11 @@ def panel_III(ax):
         ax.add_patch(Rectangle((0.250, y - 0.019), 0.185 * frac, 0.038,
                                transform=ax.transAxes, fc=col, ec="none",
                                zorder=2))
-    harrow(ax, 0.4725, 0.468, 0.532)
-    ax.text(0.500, 0.506, "per\nquestion", fontsize=TINY_FS, color=INK,
-            transform=ax.transAxes, ha="center", va="bottom", linespacing=1.3)
+    harrow(ax, 0.4725, 0.460, 0.611)
+    ax.text(0.535, 0.500, "per question", fontsize=TINY_FS, color=INK,
+            transform=ax.transAxes, ha="center", va="bottom")
 
-    px, py, pw, ph = 0.638, 0.200, 0.320, 0.545
+    px, py, pw, ph = 0.685, 0.200, 0.265, 0.545
     ax.text(px + pw / 2, 0.820, "Unlearning state over time",
             fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center")
@@ -297,7 +297,7 @@ def panel_III(ax):
             transform=ax.transAxes, ha="center", va="bottom")
     ax.text(px - 0.060, py + ph / 2, "Internal", fontsize=TINY_FS, color=INT_C,
             transform=ax.transAxes, rotation=90, ha="center", va="center")
-    ax.text(px + pw / 2, py - 0.082, "External", fontsize=TINY_FS, color=EXT_C,
+    ax.text(px + pw / 2, py - 0.118, "External", fontsize=TINY_FS, color=EXT_C,
             transform=ax.transAxes, ha="center", va="center")
 
 
@@ -330,7 +330,7 @@ def panel_teaser(ax):
     ax.set_yticklabels(["Maximum\nforgetting", "Before\nunlearning"])
     for lbl in ax.get_yticklabels():
         lbl.set_multialignment("center")
-    ax.text(-0.245, 0.5, "Forget Set" + chr(10) + "Performance",
+    ax.text(-0.100, 0.5, "Forget Set" + chr(10) + "Performance",
             transform=ax.transAxes, rotation=90, ha="center",
             va="center", multialignment="center", fontsize=SMALL_FS)
     ax.set_xticks(range(len(rows)))
@@ -365,8 +365,8 @@ def main():
     axbg = fig.add_subplot(gs[1, 1])
     panel_frame(axbg, "IV", "What the lens finds", tx=0.078)
     bb = axbg.get_position()
-    axt = fig.add_axes([bb.x0 + 0.232 * bb.width, bb.y0 + 0.240 * bb.height,
-                        0.713 * bb.width, 0.585 * bb.height])
+    axt = fig.add_axes([bb.x0 + 0.170 * bb.width, bb.y0 + 0.240 * bb.height,
+                        0.775 * bb.width, 0.585 * bb.height])
     panel_teaser(axt)
 
     for ext in ("pdf", "png"):
