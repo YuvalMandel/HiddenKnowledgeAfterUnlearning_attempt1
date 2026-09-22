@@ -51,6 +51,7 @@ matplotlib.rcParams["savefig.bbox"] = None
 
 ROOT = Path(__file__).resolve().parent.parent
 IMGS = ROOT / "overleaf_claims" / "imgs"
+ASSETS = ROOT / "plots" / "assets"
 
 INT_C, EXT_C = "#2166ac", "#d6604d"     # internal blue, external red
 INK, BODY = "#1a1a2e", "#222222"
@@ -77,6 +78,32 @@ def box(ax, x, y, w, h, fc="white", ec=EDGE, lw=0.5, r=0.012, z=1):
         (x, y), w, h, transform=ax.transAxes,
         boxstyle="round,pad=0,rounding_size=%g" % r,
         fc=fc, ec=ec, lw=lw, zorder=z))
+
+
+LOGOS = [("llama", "Llama"), ("mixtral", "Mixtral"),
+         ("zephyr", "Zephyr"), ("yi", "Yi")]
+
+
+def logo_row(ax, xs, cy, h):
+    """The four model families, as inset axes so the printed size is
+    exact instead of dpi-dependent. The bitmaps are cropped from the
+    figure this one replaces (plots/assets, see KNOWN_ISSUES).
+    """
+    fig = ax.figure
+    bb = ax.get_position()
+    for x, (stem, name) in zip(xs, LOGOS):
+        img = plt.imread(ASSETS / (stem + ".png"))
+        hin = h * bb.height * fig.get_figheight()
+        w = (hin * img.shape[1] / img.shape[0]) / (
+            bb.width * fig.get_figwidth())
+        a = fig.add_axes([bb.x0 + (x - w / 2) * bb.width,
+                          bb.y0 + (cy - h / 2) * bb.height,
+                          w * bb.width, h * bb.height])
+        a.imshow(img)
+        a.axis("off")
+        ax.text(x, cy - h / 2 - 0.018, name, fontsize=TINY_FS,
+                color=BODY, transform=ax.transAxes, ha="center",
+                va="top")
 
 
 def varrow(ax, x, y0, y1, color=INK):
@@ -204,9 +231,11 @@ def panel_II(ax):
             color=INT_C, transform=ax.transAxes, ha="center", va="center")
     ax.text(0.815, 0.240, "probe at $\\ell^{*}$", fontsize=TINY_FS,
             color=GREY, transform=ax.transAxes, ha="center", va="center")
-    ax.plot([xt, xt, 0.622, 0.622], [by0, 0.165, 0.165, 0.365],
+    ax.plot([xt, xt, 0.622, 0.622], [by0, 0.250, 0.250, 0.365],
             color=INT_C, lw=0.9, transform=ax.transAxes, zorder=2)
     harrow(ax, 0.365, 0.622, 0.655, INT_C)
+
+    logo_row(ax, (0.160, 0.380, 0.600, 0.820), 0.140, 0.100)
 
 
 # ── III ───────────────────────────────────────────────────────────────────
