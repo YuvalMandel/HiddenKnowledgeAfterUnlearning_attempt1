@@ -176,7 +176,7 @@ def panel_II(ax):
     panel_frame(ax, "II", "One pass, two readouts", tx=0.078)
     logo_row(ax, (0.085, 0.330, 0.570, 0.810), 0.775, 0.100)
 
-    bx0, bx1, by0, by1 = 0.030, 0.590, 0.181, 0.660
+    bx0, bx1, by0, by1 = 0.030, 0.590, 0.090, 0.660
     box(ax, bx0, by0, bx1 - bx0, by1 - by0)
     ax.text(0.062, 0.625, "LLM $(m,\\ell)$", fontsize=BODY_FS,
             color=INK, transform=ax.transAxes, ha="left", va="center")
@@ -184,7 +184,7 @@ def panel_II(ax):
     # x is layer, y is token position: both readouts sit on the same token
     # row, at different depths
     nx, ny = 9, 5
-    x0, x1, y0, y1 = 0.135, 0.545, 0.290, 0.556
+    x0, x1, y0, y1 = 0.135, 0.545, 0.200, 0.490
     xs, ys = np.linspace(x0, x1, nx), np.linspace(y0, y1, ny)
     xe = xs[5]                                  # the probed layer
     gx, gy = np.meshgrid(xs, ys)
@@ -205,8 +205,8 @@ def panel_II(ax):
     ax.text(0.052, (y0 + y1) / 2, "token position", fontsize=TINY_FS,
             color=GREY, transform=ax.transAxes, rotation=90,
             ha="center", va="center")
-    for xx, lab in ((x0, "1"), ((x0 + x1) / 2, "layer"), (x1, "32")):
-        ax.text(xx, 0.232, lab, fontsize=TINY_FS, color=GREY,
+    for xx, lab in ((x0, "1"), ((x0 + x1) / 2, "layer"), (x1, "last")):
+        ax.text(xx, 0.145, lab, fontsize=TINY_FS, color=GREY,
                 transform=ax.transAxes, ha="center", va="center")
 
     ax.scatter([xe], [y1], s=11, c=INT_C, marker="o", linewidths=0,
@@ -218,10 +218,10 @@ def panel_II(ax):
 
     # external leaves the last layer on that row; internal is tapped at
     # l* and leaves through the bottom of the model
-    box(ax, 0.655, 0.490, 0.320, 0.131, fc="#fceeea", ec=EXT_C, lw=0.7)
-    ax.text(0.815, 0.556, "External readout", fontsize=SMALL_FS,
+    box(ax, 0.655, 0.425, 0.320, 0.131, fc="#fceeea", ec=EXT_C, lw=0.7)
+    ax.text(0.815, 0.490, "External readout", fontsize=SMALL_FS,
             color=EXT_C, transform=ax.transAxes, ha="center", va="center")
-    ax.text(0.815, 0.447, "True/False logits, $\\ell{=}32$",
+    ax.text(0.815, 0.382, "True/False logits, last layer",
             fontsize=TINY_FS, color=GREY, transform=ax.transAxes,
             ha="center", va="center")
     harrow(ax, y1, bx1, 0.655, EXT_C)
@@ -231,7 +231,7 @@ def panel_II(ax):
             color=INT_C, transform=ax.transAxes, ha="center", va="center")
     ax.text(0.815, 0.120, "probe at $\\ell^{*}$", fontsize=TINY_FS,
             color=GREY, transform=ax.transAxes, ha="center", va="center")
-    ax.plot([xe, xe, 0.622, 0.622], [by0, 0.075, 0.075, 0.229],
+    ax.plot([xe, xe, 0.622, 0.622], [by0, 0.042, 0.042, 0.229],
             color=INT_C, lw=0.9, transform=ax.transAxes, zorder=2)
     harrow(ax, 0.229, 0.622, 0.655, INT_C)
 
