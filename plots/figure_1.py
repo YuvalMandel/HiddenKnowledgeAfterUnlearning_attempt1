@@ -239,8 +239,8 @@ def panel_II(ax):
 def panel_III(ax):
     panel_frame(ax, "III", "Shared ranking, joint state", tx=0.090)
 
-    box(ax, 0.035, 0.100, 0.415, 0.745)
-    ax.text(0.2425, 0.760, "Score all four claims\non each axis",
+    box(ax, 0.035, 0.100, 0.360, 0.745)
+    ax.text(0.215, 0.760, "Score all four claims\non each axis",
             fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center", linespacing=1.35)
     bars = [("Gold answer", 0.98, INT_C), ("Alternative 1", 0.55, "#9db8d2"),
@@ -250,14 +250,14 @@ def panel_III(ax):
         y = 0.573 - i * 0.120
         ax.text(0.065, y, lab, fontsize=TINY_FS, color=BODY,
                 transform=ax.transAxes, va="center")
-        ax.add_patch(Rectangle((0.250, y - 0.019), 0.185 * frac, 0.038,
+        ax.add_patch(Rectangle((0.218, y - 0.019), 0.158 * frac, 0.038,
                                transform=ax.transAxes, fc=col, ec="none",
                                zorder=2))
-    harrow(ax, 0.4725, 0.460, 0.611)
-    ax.text(0.535, 0.500, "per question", fontsize=TINY_FS, color=INK,
+    harrow(ax, 0.4725, 0.405, 0.558)
+    ax.text(0.480, 0.500, "per question", fontsize=TINY_FS, color=INK,
             transform=ax.transAxes, ha="center", va="bottom")
 
-    px, py, pw, ph = 0.685, 0.200, 0.265, 0.545
+    px, py, pw, ph = 0.638, 0.200, 0.320, 0.545
     ax.text(px + pw / 2, 0.820, "Unlearning state over time",
             fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center")
