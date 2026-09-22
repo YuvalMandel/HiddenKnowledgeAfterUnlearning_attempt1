@@ -330,8 +330,9 @@ def panel_teaser(ax):
     ax.set_yticklabels(["Maximum\nforgetting", "Before\nunlearning"])
     for lbl in ax.get_yticklabels():
         lbl.set_multialignment("center")
-    ax.text(-0.215, 0.5, "Forget Set Performance", transform=ax.transAxes,
-            rotation=90, ha="center", va="center", fontsize=SMALL_FS)
+    ax.text(-0.245, 0.5, "Forget Set" + chr(10) + "Performance",
+            transform=ax.transAxes, rotation=90, ha="center",
+            va="center", multialignment="center", fontsize=SMALL_FS)
     ax.set_xticks(range(len(rows)))
     ax.set_xticklabels([r[0] for r in rows], rotation=38, ha="right",
                        fontsize=TINY_FS)
@@ -364,8 +365,8 @@ def main():
     axbg = fig.add_subplot(gs[1, 1])
     panel_frame(axbg, "IV", "What the lens finds", tx=0.078)
     bb = axbg.get_position()
-    axt = fig.add_axes([bb.x0 + 0.190 * bb.width, bb.y0 + 0.240 * bb.height,
-                        0.755 * bb.width, 0.585 * bb.height])
+    axt = fig.add_axes([bb.x0 + 0.232 * bb.width, bb.y0 + 0.240 * bb.height,
+                        0.713 * bb.width, 0.585 * bb.height])
     panel_teaser(axt)
 
     for ext in ("pdf", "png"):
