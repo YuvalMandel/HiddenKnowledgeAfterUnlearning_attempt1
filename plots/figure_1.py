@@ -178,7 +178,7 @@ def panel_II(ax):
 
     bx0, bx1, by0, by1 = 0.030, 0.590, 0.090, 0.660
     box(ax, bx0, by0, bx1 - bx0, by1 - by0)
-    ax.text(0.062, 0.625, "LLM $(m,\\ell)$", fontsize=BODY_FS,
+    ax.text(0.062, 0.578, "LLM $(m,\\ell)$", fontsize=BODY_FS,
             color=INK, transform=ax.transAxes, ha="left", va="center")
 
     # x is layer, y is token position: both readouts sit on the same token
