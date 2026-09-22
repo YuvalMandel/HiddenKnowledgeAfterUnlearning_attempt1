@@ -153,28 +153,34 @@ if imgs.is_dir():
 # ---- figure 2: the point of the whole run. A probe finds the answer in the
 # middle layers of every model; the model's OWN readout direction finds it
 # there only in the base model.
-titles = ["A. the model's own axis v applied at layer L\n"
-          "(logit lens, no free parameters)",
-          "B. a probe fitted at layer L\n(K_int, cross-validated)"]
-fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.5), sharey=True)
+titles = ["A.  the model's own axis $v$ at layer $\ell$\n(logit lens, no fitted parameters)",
+          "B.  a probe fitted at layer $\ell$\n($K_{int}$, cross-validated)"]
+fig, axes = plt.subplots(1, 2, figsize=(5.5, 2.45), sharey=True)
 for ax, col, ttl in zip(axes, ["k_lens", "k_int_cv"], titles):
     for m in ORDER:
         d = lens[lens.method == m]
         if d.empty:
             continue
-        style = (dict(lw=2.4, color="k", ls="--", zorder=5) if m == "base"
-                 else dict(lw=1.3))
-        ax.plot(d.layer, d[col], marker="o", ms=3, label=m, **style)
-    ax.axhline(0.5, color="k", lw=0.8, ls=":")
-    ax.set_xlabel("layer L")
-    ax.set_title(ttl, fontsize=9.5)
-    ax.grid(color="0.93")
+        style = (dict(lw=1.5, color="k", ls="--", zorder=5) if m == "base"
+                 else dict(lw=0.9))
+        ax.plot(d.layer, d[col], marker="o", ms=1.8,
+                label=m.replace("_", "&"), **style)
+    ax.axhline(0.5, color="k", lw=0.6, ls=":")
+    ax.set_xlabel("layer $\\ell$", fontsize=7)
+    ax.set_title(ttl, fontsize=7)
+    ax.grid(color="0.93", lw=0.5)
     ax.set_axisbelow(True)
-axes[0].set_ylabel("K (win fraction over the 3 distractors)")
-axes[0].text(4.4, 0.505, "chance", fontsize=7.5, va="bottom")
-axes[1].legend(fontsize=7.5, ncol=2, loc="lower right")
-fig.suptitle("The answer is in the middle layers of every model; only the base "
-             "model reads it from there", fontsize=11)
-fig.tight_layout()
-fig.savefig(AV / "bestlayer_lens_by_layer.png", dpi=180)
+    ax.tick_params(labelsize=6.5)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+axes[0].set_ylabel("$K$ (win fraction over the 3 distractors)", fontsize=7)
+axes[0].text(4.2, 0.507, "chance", fontsize=6, va="bottom")
+axes[1].legend(fontsize=5.8, ncol=2, loc="lower right", frameon=False,
+               handlelength=1.4, handletextpad=0.4, labelspacing=0.25,
+               columnspacing=1.0, borderaxespad=0.2)
+fig.tight_layout(pad=0.4)
+fig.savefig(AV / "bestlayer_lens_by_layer.png", dpi=300)
 print(f"wrote {AV/'bestlayer_lens_by_layer.png'}")
+if ROOT_IMGS.is_dir():
+    fig.savefig(ROOT_IMGS / "logit_lens_by_layer.pdf", bbox_inches="tight")
+    print(f"wrote {ROOT_IMGS/'logit_lens_by_layer.pdf'}")
