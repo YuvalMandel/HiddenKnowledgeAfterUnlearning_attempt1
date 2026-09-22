@@ -239,25 +239,25 @@ def panel_II(ax):
 def panel_III(ax):
     panel_frame(ax, "III", "Shared ranking, joint state", tx=0.090)
 
-    box(ax, 0.035, 0.300, 0.395, 0.510)
-    ax.text(0.2325, 0.745, "Score all four claims\non each axis",
+    box(ax, 0.035, 0.100, 0.415, 0.745)
+    ax.text(0.2425, 0.760, "Score all four claims\non each axis",
             fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center", linespacing=1.35)
     bars = [("Gold answer", 0.98, INT_C), ("Alternative 1", 0.55, "#9db8d2"),
             ("Alternative 2", 0.34, "#9db8d2"),
             ("Alternative 3", 0.72, "#9db8d2")]
     for i, (lab, frac, col) in enumerate(bars):
-        y = 0.590 - i * 0.068
+        y = 0.573 - i * 0.120
         ax.text(0.065, y, lab, fontsize=TINY_FS, color=BODY,
                 transform=ax.transAxes, va="center")
-        ax.add_patch(Rectangle((0.245, y - 0.019), 0.168 * frac, 0.038,
+        ax.add_patch(Rectangle((0.250, y - 0.019), 0.185 * frac, 0.038,
                                transform=ax.transAxes, fc=col, ec="none",
                                zorder=2))
-    harrow(ax, 0.545, 0.445, 0.505)
-    ax.text(0.475, 0.605, "per\nquestion", fontsize=TINY_FS, color=INK,
+    harrow(ax, 0.4725, 0.468, 0.532)
+    ax.text(0.500, 0.506, "per\nquestion", fontsize=TINY_FS, color=INK,
             transform=ax.transAxes, ha="center", va="bottom", linespacing=1.3)
 
-    px, py, pw, ph = 0.600, 0.175, 0.345, 0.545
+    px, py, pw, ph = 0.638, 0.200, 0.320, 0.545
     ax.text(px + pw / 2, 0.820, "Unlearning state over time",
             fontsize=SMALL_FS, color=INK, transform=ax.transAxes,
             ha="center", va="center")
@@ -282,7 +282,7 @@ def panel_III(ax):
                 transform=ax.transAxes, ha="center", va="top")
         ax.text(px - 0.010, py + ph * f, lab, fontsize=4.0, color=GREY,
                 transform=ax.transAxes, ha="right", va="center")
-    ty = py + ph * 0.885
+    ty = py + ph * 0.82
     txs = [px + pw * f for f in (0.90, 0.72, 0.54, 0.36, 0.14)]
     ax.plot(txs, [ty] * len(txs), color="#5a5a5a", lw=0.7,
             transform=ax.transAxes, zorder=5, solid_capstyle="butt")
