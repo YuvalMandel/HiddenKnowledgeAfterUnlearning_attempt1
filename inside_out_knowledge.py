@@ -277,7 +277,11 @@ def load_wmdp(domain: str) -> list[dict]:
     if domain in _wmdp_cache:
         return _wmdp_cache[domain]
     from datasets import load_dataset
-    name = "wmdp-bio" if domain == "bio" else "wmdp-cyber"
+    # NOT a bio/else default: that silently loaded cyber for any other
+    # domain name, so a --domains chem run would have scored cyber data
+    # under a chem label.
+    name = {"bio": "wmdp-bio", "cyber": "wmdp-cyber",
+            "chem": "wmdp-chem"}[domain]
     ds = load_dataset("cais/wmdp", name, split="test")
     data = [{"question": ex["question"],
              "choices":  list(ex["choices"]),
@@ -1613,6 +1617,8 @@ def main() -> None:
                     help="Skip cross-probe (base↔method)")
     ap.add_argument("--n_jobs",          type=int, default=1,
                     help="Parallel jobs for probe stage (default: 1)")
+    ap.add_argument("--pairs", nargs="+", default=None,
+                    help="cross_domain source:target pairs, e.g. chem:bio chem:cyber")
     ap.add_argument("--out_suffix",        default="",
                     help="Suffix for output parquet (e.g. 'layer' → k_scores_layer.parquet)")
     ap.add_argument("--include_embedding", action="store_true",
@@ -1646,7 +1652,9 @@ def main() -> None:
             out_suffix=args.out_suffix,
         )
     elif args.stage == "cross_domain":
-        stage_cross_domain(args.model_id,
+        pairs = ([tuple(x.split(":", 1)) for x in args.pairs]
+                 if args.pairs else None)
+        stage_cross_domain(args.model_id, pairs=pairs,
                            out_suffix=args.out_suffix or
                            "cross_domain",
                            n_jobs=args.n_jobs)
