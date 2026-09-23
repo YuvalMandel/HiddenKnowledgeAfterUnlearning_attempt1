@@ -50,7 +50,13 @@ WMDP = {"GradDiff": 0.25, "RMU": 0.26, "RMU-LAT": 0.32, "RepNoise": 0.29,
 INT_C, EXT_C, WMDP_C = "#2166ac", "#d6604d", "#8c8c8c"
 # separate ceilings keep the two chance lines at different heights, which is the
 # point of the second axis: each metric is read against its own floor
-K_TOP, A_TOP = 0.92, 0.80
+# One shared scale: A_TOP == K_TOP so 0.8 sits at the same height on both
+# axes. The two chance lines (0.5 pairwise, 0.25 four-way) still land at
+# different heights, which is what the second axis is for.
+K_TOP, A_TOP = 0.96, 0.96
+# both axes start at 0.15, not 0: nothing lives below it (the lowest value is
+# ELM's 0.24 WMDP accuracy) and the empty band only cost height
+Y_BOT = 0.15
 
 
 def load():
@@ -80,8 +86,8 @@ def main():
     print(d.round(3).to_string(index=False))
 
     x = list(range(len(d)))
-    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
-                                               width_frac=0.80))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.321,
+                                               width_frac=1.0))
     ax2 = ax.twinx()
 
     W = 0.26
@@ -89,11 +95,11 @@ def main():
     xe = list(x)
     xi_ = [i + W for i in x]
     ax2.bar(xw, d.wmdp, W, color=WMDP_C, zorder=3,
-            label="WMDP-Bio accuracy (right axis)")
+            label="WMDP-Bio accuracy")
     ax.bar(xe, d.k_ext, W, color=EXT_C, zorder=3,
-           label=r"$K_\mathrm{ext}$ (logit margin)")
+           label=r"$K_\mathrm{ext}$")
     ax.bar(xi_, d.k_int, W, color=INT_C, zorder=3,
-           label=r"$K_\mathrm{int}$ (best-layer probe)")
+           label=r"$K_\mathrm{int}$")
     ax.errorbar(xe, d.k_ext, yerr=d.k_ext_sd, fmt="none", ecolor="black",
                 elinewidth=0.8, capsize=1.5, alpha=0.6, zorder=5)
     ax.errorbar(xi_, d.k_int, yerr=d.k_int_sd, fmt="none", ecolor="black",
@@ -101,7 +107,7 @@ def main():
     for xx, v, sd, c in ((xe, d.k_ext, d.k_ext_sd, EXT_C),
                          (xi_, d.k_int, d.k_int_sd, INT_C)):
         for xi2, vv, ss in zip(xx, v, sd):
-            ax.text(xi2, vv + ss + 0.015, f"{vv:.3f}", ha="center",
+            ax.text(xi2, vv + ss + 0.015, f"{vv:.2f}", ha="center",
                     va="bottom", fontsize=5.6, color=c, rotation=90, zorder=6)
     for xi2, vv in zip(xw, d.wmdp):
         ax2.text(xi2, vv + 0.012, f"{vv:.2f}", ha="center", va="bottom",
@@ -109,22 +115,22 @@ def main():
 
     ax.axhline(0.5, color=EXT_C, ls=":", lw=1.0, alpha=0.85, zorder=1)
     ax2.axhline(0.25, color="#5a5a5a", ls=":", lw=1.0, alpha=0.85, zorder=1)
-    ax.text(-1.50, 0.507, "chance 0.50", fontsize=6, color=EXT_C,
+    ax.text(-1.32, 0.507, "chance 0.50", fontsize=6, color=EXT_C,
             va="bottom", ha="left")
-    ax2.text(-1.50, 0.256, "chance 0.25", fontsize=6, color="#5a5a5a",
+    ax2.text(-1.32, 0.256, "chance 0.25", fontsize=6, color="#5a5a5a",
              va="bottom", ha="left")
 
-    ax.set_ylim(0, K_TOP)
-    ax2.set_ylim(0, A_TOP)
+    ax.set_ylim(Y_BOT, K_TOP)
+    ax2.set_ylim(Y_BOT, A_TOP)
     ax.set_ylabel("Knowledge: pairwise $K$", fontsize=8)
     ax2.set_ylabel("Accuracy: WMDP-Bio (4-way)", fontsize=8)
-    ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8])
-    ax2.set_yticks([0, 0.2, 0.4, 0.6, 0.8])
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8])
+    ax2.set_yticks([0.2, 0.4, 0.6, 0.8])
     ax.set_xticks(x)
-    ax.set_xticklabels(d.label, rotation=34, ha="right", fontsize=7.5)
+    ax.set_xticklabels(d.label, rotation=0, ha="center", fontsize=7.5)
     ax.tick_params(labelsize=7.5)
     ax2.tick_params(labelsize=7.5)
-    ax.set_xlim(-1.55, len(d) - 0.35)   # left gutter holds the
+    ax.set_xlim(-1.37, len(d) - 0.35)   # left gutter holds the
     #                                     two chance labels clear
     #                                     of the base-model bars
     ax.spines["top"].set_visible(False)
@@ -133,9 +139,14 @@ def main():
     ax.set_axisbelow(True)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h2 + h1, l2 + l1, fontsize=7, loc="upper center",
-              bbox_to_anchor=(0.5, -0.30), ncol=3, frameon=False,
-              handletextpad=0.4, columnspacing=1.6)
+    # One row. The labels lost their parentheticals, so three entries fit
+    # across; at ncol=3 column-major fill is the same as row order.
+    ho = [h2[0], h1[0], h1[1]]
+    lo = [l2[0], l1[0], l1[1]]
+    ax.legend(ho, lo, fontsize=7, loc="upper right",
+              bbox_to_anchor=(1.0, 1.0), ncol=3, frameon=True,
+              framealpha=0.92, edgecolor="0.75", fancybox=False,
+              handletextpad=0.4, columnspacing=1.2, borderaxespad=0.15)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"knowledge_accuracy_bars.{ext}"
