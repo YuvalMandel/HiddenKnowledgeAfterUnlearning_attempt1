@@ -20,7 +20,9 @@ set -euo pipefail
 PYTHON=/home/yuval.mandel/miniconda3/envs/unlearning/bin/python3
 REPO=/home/yuval.mandel/LLMSecurity/HiddenKnowledgeAfterUnlearning_attempt1
 
-MODELS=(zephyr_base zephyr_rmu)
+# submit the pair you want: 0-1 zephyr, 2-3 mixtral, 4-5 yi.
+# Yi is 61 layers x 7168, roughly 3x the sweep -- raise --time before it.
+MODELS=(zephyr_base zephyr_rmu mixtral_base mixtral_rmu yi_base yi_rmu)
 MODEL=${MODELS[$SLURM_ARRAY_TASK_ID]}
 
 cd "$REPO"
