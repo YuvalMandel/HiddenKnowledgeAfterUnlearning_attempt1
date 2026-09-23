@@ -54,6 +54,50 @@ def load(model_id):
     return q.ki.mean(), q.ke.mean()
 
 
+def render_single(xs, series, method="RMU", width_frac=0.32):
+    """One method at the size it had as a cell of the 2x4 grid.
+
+    The grid is 5.5in wide over four columns, so a panel is ~1.375in.
+    At width_frac 0.32 the axes come out the same size once the y label
+    and ticks are allowed for -- the point of the single panel is to buy
+    back the space the other seven took, not to enlarge RMU."""
+    ki, ke = series[method]
+    w, h = iclr_figsize(aspect=1.05, width_frac=width_frac)
+    fig, ax = plt.subplots(figsize=(w, h))
+    ax.fill_between(xs, ke, ki, color="#888888", alpha=0.30, linewidth=0,
+                    zorder=2.5, label="gap")
+    for name, (colour, ls, marker) in STYLE.items():
+        v = ki if "int" in name else ke
+        ax.plot(xs, v, ls, color=colour, marker=marker, markersize=2.2,
+                linewidth=1.2, label=name, zorder=3)
+    ax.axhline(CHANCE, color="black", linestyle=":", linewidth=0.8, zorder=2)
+    ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
+    ax.set_axisbelow(True)
+    ax.set_ylim(0.47, 0.85)
+    ax.set_yticks([0.5, 0.6, 0.7, 0.8])
+    ax.set_xticks(xs)
+    ax.set_xticklabels(["0"] + [str(c) for c in range(1, N_CK + 1)],
+                       fontsize=6.5)
+    ax.tick_params(axis="y", labelsize=6.5)
+    ax.set_ylabel("mean $K$", fontsize=7.5)
+    ax.set_xlabel("unlearning checkpoint (0 = base)", fontsize=7.5)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(frameon=False, fontsize=6.3, loc="upper right",
+              handlelength=1.6, labelspacing=0.25, borderaxespad=0.2)
+    fig.tight_layout(pad=0.3)
+
+    stem = str(Path(__file__).resolve().parent / "v6_k_trajectory_rmu")
+    fig.savefig(f"{stem}.pdf", bbox_inches="tight")
+    fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
+    imgs = Path(__file__).resolve().parent.parent / "overleaf_claims" / "imgs"
+    if imgs.is_dir():
+        fig.savefig(imgs / "v6_k_trajectory_rmu.pdf", bbox_inches="tight")
+        print(f"Saved {imgs / 'v6_k_trajectory_rmu.pdf'}")
+    plt.close(fig)
+    print(f"Saved v6_k_trajectory_rmu.pdf  ({method} only, for the main text)")
+
+
 def main():
     use_iclr_style()
     xs = list(range(N_CK + 1))
@@ -121,8 +165,14 @@ def main():
 
     fig.savefig(f"{stem}.pdf", bbox_inches="tight")
     fig.savefig(f"{stem}.png", dpi=200, bbox_inches="tight")
+    imgs = ROOT / "overleaf_claims" / "imgs"
+    if imgs.is_dir():
+        fig.savefig(imgs / "v6_k_trajectory_panels.pdf",
+                    bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved {Path(stem).name}.pdf  (8 panels, all 1,273 questions)\n")
+    print(f"Saved {Path(stem).name}.pdf  (8 panels, all 1,273 questions)")
+
+    render_single(xs, series)
 
     print(f"{'method':<10}{'gap ck0':>9}{'gap ck8':>9}{'peak':>7}{'at':>5}"
           f"{'  monotone':>11}")
