@@ -54,7 +54,7 @@ def load(model_id):
     return q.ki.mean(), q.ke.mean()
 
 
-def render_single(xs, series, method="RMU", width_frac=0.32):
+def render_single(xs, series, method="RMU", width_frac=0.44):
     """One method at the size it had as a cell of the 2x4 grid.
 
     The grid is 5.5in wide over four columns, so a panel is ~1.375in.
@@ -62,7 +62,7 @@ def render_single(xs, series, method="RMU", width_frac=0.32):
     and ticks are allowed for -- the point of the single panel is to buy
     back the space the other seven took, not to enlarge RMU."""
     ki, ke = series[method]
-    w, h = iclr_figsize(aspect=0.63, width_frac=width_frac)
+    w, h = iclr_figsize(aspect=0.458, width_frac=width_frac)
     fig, ax = plt.subplots(figsize=(w, h))
     ax.fill_between(xs, ke, ki, color="#888888", alpha=0.30, linewidth=0,
                     zorder=2.5, label="gap")
