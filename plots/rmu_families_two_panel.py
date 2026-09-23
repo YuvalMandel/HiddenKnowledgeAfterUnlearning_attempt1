@@ -69,10 +69,10 @@ def panel_raw(ax, d):
                          (xi_, d.raw_ki, d.ki_sd, INT_C)):
         for xi2, vv, ss in zip(xx, v, sd):
             ax.text(xi2, vv + ss + 0.014, f"{vv:.2f}", ha="center",
-                    va="bottom", fontsize=5.4, color=c, rotation=90, zorder=6)
+                    va="bottom", fontsize=6.2, color=c, rotation=90, zorder=6)
     for xi2, vv in zip(xw, d.raw_wmdp):
         ax2.text(xi2, vv + 0.012, f"{vv:.2f}", ha="center", va="bottom",
-                 fontsize=5.4, color="#5a5a5a", rotation=90, zorder=6)
+                 fontsize=6.2, color="#5a5a5a", rotation=90, zorder=6)
 
     ax.axhline(0.5, color=EXT_C, ls=":", lw=0.9, alpha=0.85, zorder=1)
     ax2.axhline(0.25, color="#5a5a5a", ls=":", lw=0.9, alpha=0.85, zorder=1)
@@ -104,7 +104,7 @@ def panel_raw(ax, d):
 def panel_retention(ax, d):
     n = len(d)
     x = list(range(n))
-    W = 0.30
+    W = 0.45
     vw, ve, vi = d.wmdp.tolist(), d.k_ext.tolist(), d.k_int.tolist()
 
     # same construction as the OPTML retention figure: both levels run from
