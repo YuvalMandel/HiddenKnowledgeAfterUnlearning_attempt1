@@ -18,6 +18,7 @@ which IS comparable across bases. Stacked, so segment heights are the gaps.
 
 Usage: python plots/rmu_families_two_panel.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -30,7 +31,39 @@ from matplotlib.lines import Line2D      # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hk_utils import iclr_figsize, use_iclr_style   # noqa: E402
-from rmu_three_families import WMDP_RMU, row, INT_C, EXT_C, WMDP_C  # noqa: E402
+from rmu_three_families import WMDP_RMU, row, R, OUT_DIR, INT_C, EXT_C, WMDP_C  # noqa: E402
+
+DOMAIN = os.environ.get("FIG_DOMAIN", "bio")
+
+# WMDP's own four-way accuracies, Table 2 of arXiv:2403.03218
+CYBER_ACC = {  # label: (rmu, base)
+    "Zephyr-7B":    (0.282, 0.440),
+    "Mixtral-8x7B": (0.308, 0.520),
+    "Yi-34B":       (0.290, 0.497),
+}
+
+
+def k_of_cyber(mid):
+    d = pd.read_parquet(OUT_DIR / mid / "k_scores_cyber.parquet")
+    cv = d[(d.split_type == "cv") & (d.clf == "LR")
+           & (d.probe_type == "own") & (d.layer_config == "best_layer")]
+    f = cv.groupby("fold").agg(ki=("k_internal", "mean"),
+                               ke=("k_external", "mean"))
+    return dict(k_int=f.ki.mean(), k_ext=f.ke.mean(),
+                k_int_sd=f.ki.std(ddof=1), k_ext_sd=f.ke.std(ddof=1))
+
+
+def row_cyber(label, rmu, _acc, bid, _bacc, src):
+    acc, bacc = CYBER_ACC[label]
+    r, b = k_of_cyber(rmu), k_of_cyber(bid)
+    return dict(label=label, src=src,
+                wmdp=R(acc, 0.25, bacc),
+                k_ext=R(r["k_ext"], 0.5, b["k_ext"]),
+                k_int=R(r["k_int"], 0.5, b["k_int"]),
+                raw_ke=r["k_ext"], raw_ki=r["k_int"],
+                ke_sd=r["k_ext_sd"], ki_sd=r["k_int_sd"],
+                base_ke=b["k_ext"], base_ki=b["k_int"],
+                raw_wmdp=acc, base_wmdp=bacc)
 from optml_figs import stack_order                  # noqa: E402
 
 use_iclr_style()
@@ -85,7 +118,7 @@ def panel_raw(ax, d):
     ax.set_ylim(0.15, 0.95)
     ax2.set_ylim(0.15, 0.95)
     ax.set_ylabel("Knowledge: pairwise $K$", fontsize=7.5)
-    ax2.set_ylabel("Accuracy: WMDP-Bio (4-way)", fontsize=7.5)
+    ax2.set_ylabel(f"Accuracy: WMDP-{DOMAIN.capitalize()} (4-way)", fontsize=7.5)
     ax.set_yticks([0.2, 0.4, 0.6, 0.8])
     ax2.set_yticks([0.2, 0.4, 0.6, 0.8])
     ax.set_xticks(x)
@@ -134,8 +167,10 @@ def panel_retention(ax, d):
 
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
-    ax.text(-0.72, 99, "own base model", fontsize=6.3, color="0.35",
-            va="top", ha="left")
+    # right-aligned: on cyber the leftmost bar reaches 90 and collided
+    # with a left-aligned caption
+    ax.text(n - 0.45, 99, "own base model", fontsize=6.3, color="0.35",
+            va="top", ha="right")
     # nothing can exceed its own base, so 100 is the ceiling
     ax.set_ylim(0, 100)
     ax.set_yticks([0, 25, 50, 75, 100])
@@ -157,7 +192,8 @@ def panel_retention(ax, d):
 
 
 def main():
-    d = pd.DataFrame([row(*a) for a in WMDP_RMU])
+    maker = row_cyber if DOMAIN == "cyber" else row
+    d = pd.DataFrame([maker(*a) for a in WMDP_RMU])
     print(d[["label", "raw_wmdp", "raw_ke", "raw_ki", "wmdp", "k_ext",
              "k_int"]].round(3).to_string(index=False))
 
@@ -166,7 +202,7 @@ def main():
     panel_raw(axes[0], d)
     panel_retention(axes[1], d)
 
-    keys = [Patch(color=WMDP_C, label="WMDP-Bio accuracy"),
+    keys = [Patch(color=WMDP_C, label=f"WMDP-{DOMAIN.capitalize()} accuracy"),
             Patch(color=EXT_C, label=r"$K_\mathrm{ext}$ (logit margin)"),
             Patch(color=INT_C, label=r"$K_\mathrm{int}$ (best-layer probe)"),
             Line2D([], [], color="0.35", lw=1.1, ls=(0, (2.0, 1.3)),
@@ -178,13 +214,15 @@ def main():
     fig.tight_layout(rect=(0, 0.045, 1, 1))
 
     for ext in ("pdf", "png"):
-        p = ROOT / "plots" / f"rmu_families_two_panel.{ext}"
+        stem = ("rmu_families_two_panel" if DOMAIN == "bio"
+                else "wmdp_cyber_knowledge_lens_side_by_side")
+        p = ROOT / "plots" / f"{stem}.{ext}"
         fig.savefig(p, bbox_inches="tight",
                     **({"dpi": 300} if ext == "png" else {}))
         print("wrote", p)
     if IMGS.is_dir():
-        fig.savefig(IMGS / "rmu_families_two_panel.pdf", bbox_inches="tight")
-        print("wrote", IMGS / "rmu_families_two_panel.pdf")
+        fig.savefig(IMGS / f"{stem}.pdf", bbox_inches="tight")
+        print("wrote", IMGS / f"{stem}.pdf")
     plt.close(fig)
 
 
