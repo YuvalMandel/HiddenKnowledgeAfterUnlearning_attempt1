@@ -156,6 +156,10 @@ def main():
         ya, yb = a, b
         if abs(b - a) < 7:
             ya, yb = a - 2.4, b + 2.4
+        # a number centred on a small negative level straddles the zero line;
+        # drop it far enough that the whole glyph sits below
+        if a < 0:
+            ya = a - 6.0
         level(xi, a, ya, f"{a:.0f}", "#5a5a5a")
         level(xi, b, yb, f"{b:.0f}", EXT_C)
         ax.text(xi, c + 2.5, f"{c:.0f}", ha="center", va="bottom",
@@ -163,11 +167,11 @@ def main():
 
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
-    ax.text(-0.95, 99, "base model", fontsize=6.3, color="0.35",
-            va="top", ha="left")
+    ax.text(-0.95, 101, "base model", fontsize=6.3, color="0.35",
+            va="bottom", ha="left")
     # nothing can exceed its own base, so 100 is the ceiling; the headroom
     # above it is for the legend, which no bar can reach
-    ax.set_ylim(-9, 118)
+    ax.set_ylim(-18, 118)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_ylabel("% of base model's above-chance\nsignal retained",
                   fontsize=7.5)
