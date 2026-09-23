@@ -182,7 +182,7 @@ def main():
     print(d[["label", "raw_wmdp", "raw_ke", "raw_ki", "wmdp", "k_ext",
              "k_int"]].round(3).to_string(index=False))
 
-    fig, axes = plt.subplots(1, 2, figsize=iclr_figsize(aspect=0.345),
+    fig, axes = plt.subplots(1, 2, figsize=iclr_figsize(aspect=0.362),
                              gridspec_kw={"width_ratios": [2, 1]})
     panel_raw(axes[0], d)
     panel_retention(axes[1], d)
