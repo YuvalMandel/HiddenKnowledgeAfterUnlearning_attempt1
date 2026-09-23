@@ -107,58 +107,37 @@ def panel_retention(ax, d):
     W = 0.45
     vw, ve, vi = d.wmdp.tolist(), d.k_ext.tolist(), d.k_int.tolist()
 
-    # same construction as the OPTML retention figure: both levels run from
-    # zero with the one closer to zero in front, which for 0 <= w <= e is the
-    # ordinary stack and for Yi (K_ext retention -1, WMDP +11) keeps the
-    # negative metric alone below the line
+    # every level runs from zero and the shortest is drawn in front, so
+    # none is hidden behind a taller one. Retention is floored at 0, so
+    # there are no negative levels to special-case.
     for xi, w, e, i2 in zip(x, vw, ve, vi):
-        zg, ze = stack_order(w, e)
-        ax.bar(xi, i2 - e, W, bottom=e, color=INT_C, zorder=2)
-        ax.bar(xi, w, W, color=WMDP_C, zorder=zg)
-        ax.bar(xi, e, W, color=EXT_C, zorder=ze)
+        trio = sorted(((w, WMDP_C), (e, EXT_C), (i2, INT_C)),
+                      key=lambda t: -t[0])
+        for z, (v, colour) in enumerate(trio, start=2):
+            ax.bar(xi, v, W, color=colour, zorder=z)
 
-    def band(xi, lo, hi, colr):
-        """Gap number inside the band when it is tall enough, else to the
-        right. Only ever called where the band IS a visible rectangle."""
-        if abs(hi - lo) >= 9:
-            ax.text(xi, (lo + hi) / 2, f"{hi - lo:+.0f}", ha="center",
-                    va="center", fontsize=6.2, color="white", zorder=6)
-        else:
-            ax.text(xi + W / 2 + 0.04, (lo + hi) / 2, f"{hi - lo:+.0f}",
-                    ha="left", va="center", fontsize=6.2, color=colr,
-                    zorder=6)
-
-    for xi, a, b, c in zip(x, vw, ve, vi):
-        # blue always runs K_ext -> K_int, so its height is always its band,
-        # negative K_ext or not. Red is the one drawn from zero when a level
-        # goes below the line, and then its rectangle is NOT the gap.
-        if a >= 0 and b >= 0:
-            band(xi, a, b, EXT_C)
-        else:
-            ax.text(xi, min(a, b, 0.0) - 1.6, f"{b - a:+.0f}", ha="center",
-                    va="top", fontsize=6.2, color=EXT_C, zorder=6)
-        band(xi, b, c, INT_C)
-        # ticks stay at the true heights; the numbers beside them move
-        ya, yb = a, b
-        if abs(b - a) < 8:
-            mid = (a + b) / 2          # Mixtral: 18 and 22 would collide
+    # each bar carries its own value: with nothing stacked there are no
+    # segment heights to report. Ticks sit at the true height on the left,
+    # numbers beside them, nudged apart only when two levels are close.
+    for xi, a_, b_, c_ in zip(x, vw, ve, vi):
+        ax.text(xi, c_ + 2.0, f'{c_:.0f}', ha='center', va='bottom',
+                fontsize=6.2, color=INT_C, zorder=6)
+        ya, yb = a_, b_
+        if abs(b_ - a_) < 8:
+            mid = (a_ + b_) / 2
             ya, yb = mid - 4.0, mid + 4.0
-        if abs(yb) < 3.0:
-            yb = -4.5                  # Yi: -1 would sit on the zero line
-        for y, ylab, colr in ((a, ya, "#5a5a5a"), (b, yb, EXT_C)):
+        for y, ylab, colr in ((a_, ya, WMDP_C), (b_, yb, EXT_C)):
             ax.plot([xi - W / 2 - 0.06, xi - W / 2], [y, y], color=colr,
                     lw=0.9, zorder=6, clip_on=False)
-            ax.text(xi - W / 2 - 0.09, ylab, f"{y:.0f}", ha="right",
-                    va="center", fontsize=6.3, color=colr, zorder=6)
-        ax.text(xi, c + 2.4, f"{c:.0f}", ha="center", va="bottom",
-                fontsize=7.0, color=INT_C, zorder=6)
+            ax.text(xi - W / 2 - 0.09, ylab, f'{y:.0f}', ha='right',
+                    va='center', fontsize=6.2, color=colr, zorder=6)
 
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
     ax.text(-0.72, 99, "own base model", fontsize=6.3, color="0.35",
             va="top", ha="left")
     # nothing can exceed its own base, so 100 is the ceiling
-    ax.set_ylim(-16, 100)
+    ax.set_ylim(0, 100)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_ylabel("% of its own base model's\nabove-chance signal retained",
                   fontsize=7.5)

@@ -34,6 +34,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt          # noqa: E402
 import pandas as pd                      # noqa: E402
+from matplotlib.patches import Patch     # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hk_utils import iclr_figsize, use_iclr_style  # noqa: E402
@@ -78,7 +79,8 @@ def main():
     base = raw["Base"]
 
     def R(v, chance, top):
-        return 100.0 * (v - chance) / (top - chance)
+        """Floored at 0: below chance is no evidence, not negative"""
+        return max(0.0, 100.0 * (v - chance) / (top - chance))
 
     rows = []
     for _, label in MODELS:
@@ -117,11 +119,16 @@ def main():
     # whose WMDP accuracy sits below the four-way chance floor) the red
     # segment also starts below zero, and would otherwise paint over the
     # grey. Drawn on top, the grey reads 0 to -2 as it should.
-    ax.bar(x, vw, W, color=WMDP_C, zorder=5, label="WMDP-Bio accuracy")
-    ax.bar(x, g1, W, bottom=vw, color=EXT_C, zorder=3,
-           label=r"$+\;K_\mathrm{ext}$ (logit margin)")
-    ax.bar(x, g2, W, bottom=ve, color=INT_C, zorder=3,
-           label=r"$+\;K_\mathrm{int}$ (best-layer probe)")
+    # each level runs from zero and the shortest is drawn in front, so
+    # none is hidden. Retention is floored at 0, so nothing goes below.
+    for xi, w, e, i2 in zip(x, vw, ve, vi):
+        trio = sorted(((w, WMDP_C), (e, EXT_C), (i2, INT_C)),
+                      key=lambda t: -t[0])
+        for z, (v, colour) in enumerate(trio, start=2):
+            ax.bar(xi, v, W, color=colour, zorder=z)
+    keys = [Patch(color=WMDP_C, label='WMDP-Bio accuracy'),
+            Patch(color=EXT_C, label=r'$K_\mathrm{ext}$ (logit margin)'),
+            Patch(color=INT_C, label=r'$K_\mathrm{int}$ (best-layer probe)')]
 
     def seg(xi, lo, hi, txt, colr):
         """Gap number inside its segment; a segment too thin to hold it puts the
@@ -146,32 +153,25 @@ def main():
         ax.text(xi - W / 2 - 0.09, y_label, txt, ha="right", va="center",
                 fontsize=6.3, color=colr, zorder=6)
 
-    for xi, a, b, c in zip(x, vw, ve, vi):
-        seg(xi, a, b, f"+{b - a:.0f}", EXT_C)
-        seg(xi, b, c, f"+{c - b:.0f}", INT_C)
-        # WMDP and K_ext are both cumulative levels, not segments, so both are
-        # marked on the left. RepNoise is the one method where they are close
-        # enough (9 vs 12) for the numbers to overlap, so there the two labels
-        # are nudged apart while the ticks stay at the true heights.
-        ya, yb = a, b
-        if abs(b - a) < 7:
-            ya, yb = a - 2.4, b + 2.4
-        # a number centred on a small negative level straddles the zero line;
-        # drop it far enough that the whole glyph sits below
-        if a < 0:
-            ya = a - 6.0
-        level(xi, a, ya, f"{a:.0f}", "#5a5a5a")
-        level(xi, b, yb, f"{b:.0f}", EXT_C)
-        ax.text(xi, c + 2.5, f"{c:.0f}", ha="center", va="bottom",
+    for xi, a_, b_, c_ in zip(x, vw, ve, vi):
+        ax.text(xi, c_ + 2.5, f'{c_:.0f}', ha='center', va='bottom',
                 fontsize=6.6, color=INT_C, zorder=6)
-
+        ya, yb = a_, b_
+        if abs(b_ - a_) < 7:
+            mid = (a_ + b_) / 2
+            ya, yb = mid - 3.6, mid + 3.6
+        for y, ylab, colr in ((a_, ya, '#5a5a5a'), (b_, yb, EXT_C)):
+            ax.plot([xi - W / 2 - 0.06, xi - W / 2], [y, y], color=colr,
+                    lw=0.9, zorder=6, clip_on=False)
+            ax.text(xi - W / 2 - 0.09, ylab, f'{y:.0f}', ha='right',
+                    va='center', fontsize=6.3, color=colr, zorder=6)
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
     ax.text(-0.95, 101, "base model", fontsize=6.3, color="0.35",
             va="bottom", ha="left")
     # nothing can exceed its own base, so 100 is the ceiling; the headroom
     # above it is for the legend, which no bar can reach
-    ax.set_ylim(-18, 118)
+    ax.set_ylim(0, 118)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_ylabel("% of base model's above-chance\nsignal retained",
                   fontsize=7.5)
@@ -183,7 +183,7 @@ def main():
         ax.spines[sp].set_visible(False)
     ax.grid(axis="y", ls=":", lw=0.6, alpha=0.45, zorder=0)
     ax.set_axisbelow(True)
-    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.0, 1.02),
+    ax.legend(handles=keys, fontsize=7, loc="upper right", bbox_to_anchor=(1.0, 1.02),
               ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.4,
               borderaxespad=0.0)
     fig.tight_layout()
