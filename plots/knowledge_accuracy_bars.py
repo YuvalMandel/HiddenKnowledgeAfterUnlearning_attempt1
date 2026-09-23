@@ -144,8 +144,7 @@ def main():
     ho = [h2[0], h1[0], h1[1]]
     lo = [l2[0], l1[0], l1[1]]
     ax.legend(ho, lo, fontsize=7, loc="upper right",
-              bbox_to_anchor=(1.0, 1.0), ncol=3, frameon=True,
-              framealpha=0.92, edgecolor="0.75", fancybox=False,
+              bbox_to_anchor=(1.0, 1.0), ncol=3, frameon=False,
               handletextpad=0.4, columnspacing=1.2, borderaxespad=0.15)
     fig.tight_layout()
     for ext in ("pdf", "png"):

@@ -52,7 +52,7 @@ MODELS = [("base", "Base"), ("GradDiff_ck8", "GradDiff"), ("PB_J_ck8", "PB&J"),
 WMDP = {"GradDiff": 0.25, "RMU": 0.26, "RMU-LAT": 0.32, "RepNoise": 0.29,
         "ELM": 0.24, "RR": 0.26, "TAR": 0.28, "PB&J": 0.31, "Base": 0.70}
 
-INT_C, EXT_C, WMDP_C = "#2166ac", "#d6604d", "#4d4d4d"
+INT_C, EXT_C, WMDP_C = "#2166ac", "#d6604d", "#8c8c8c"
 
 
 def load():
@@ -111,8 +111,8 @@ def main():
     x[-1] += 0.6                                    # set the mean column apart
     W = 0.46
 
-    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
-                                                width_frac=0.80))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.60 * 3.6 / 7,
+                                                width_frac=1.0))
     # zorder above the other two: where WMDP retention is negative (ELM,
     # whose WMDP accuracy sits below the four-way chance floor) the red
     # segment also starts below zero, and would otherwise paint over the
@@ -163,22 +163,25 @@ def main():
 
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
-    ax.text(-0.95, 101, "base model", fontsize=6.3, color="0.35",
-            va="bottom", ha="left")
-    ax.set_ylim(-9, 112)
+    ax.text(-0.95, 99, "base model", fontsize=6.3, color="0.35",
+            va="top", ha="left")
+    # nothing can exceed its own base, so 100 is the ceiling; the headroom
+    # above it is for the legend, which no bar can reach
+    ax.set_ylim(-9, 118)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_ylabel("% of base model's above-chance\nsignal retained",
                   fontsize=7.5)
     ax.set_xticks(x)
-    ax.set_xticklabels(cols, rotation=34, ha="right", fontsize=7.5)
+    ax.set_xticklabels(cols, rotation=0, ha="center", fontsize=7.5)
     ax.tick_params(labelsize=7.5)
     ax.set_xlim(-1.0, x[-1] + 0.75)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     ax.grid(axis="y", ls=":", lw=0.6, alpha=0.45, zorder=0)
     ax.set_axisbelow(True)
-    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.28),
-              ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.6)
+    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.0, 1.02),
+              ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.4,
+              borderaxespad=0.0)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"retention_three_metric.{ext}"
