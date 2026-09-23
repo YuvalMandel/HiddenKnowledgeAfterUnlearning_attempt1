@@ -98,8 +98,11 @@ def panel_raw(ax, d):
             tgt.plot([xi2 - W / 2, xi2 + W / 2], [vv, vv], color=col, lw=1.1,
                      ls=(0, (2.0, 1.3)), alpha=0.9, zorder=7)
 
-    for xx, v, sd, c, dx in ((xe, d.raw_ke, d.ke_sd, EXT_C, -0.40 * W),
-                             (xi_, d.raw_ki, d.ki_sd, INT_C, +0.40 * W)):
+    # bio (fig 5) keeps the numbers centred; cyber (fig 6) pushes them to
+    # opposite sides of their bars, where the labels sit closer together
+    off = 0.0 if DOMAIN == "bio" else 0.62 * W
+    for xx, v, sd, c, dx in ((xe, d.raw_ke, d.ke_sd, EXT_C, -off),
+                             (xi_, d.raw_ki, d.ki_sd, INT_C, +off)):
         for xi2, vv, ss in zip(xx, v, sd):
             ax.text(xi2 + dx, vv + ss + 0.014, f"{vv:.2f}", ha="center",
                     va="bottom", fontsize=6.2, color=c, rotation=90, zorder=6)

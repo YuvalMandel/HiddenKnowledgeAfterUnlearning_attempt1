@@ -85,8 +85,8 @@ def render_single(xs, series, method="RMU", width_frac=0.44):
         ax.spines[sp].set_visible(False)
     ax.text(0.0, CHANCE + 0.008, "chance", fontsize=5.8, color="0.35",
             va="bottom", ha="left")
-    ax.legend(frameon=False, fontsize=6.0, loc="upper right",
-              handlelength=1.4, labelspacing=0.18, borderaxespad=0.15,
+    ax.legend(frameon=False, fontsize=6.0, loc="upper right", ncol=3,
+              handlelength=1.3, columnspacing=1.0, borderaxespad=0.15,
               handletextpad=0.3)
     fig.tight_layout(pad=0.3)
 
