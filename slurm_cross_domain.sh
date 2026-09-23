@@ -25,6 +25,6 @@ MODEL=${MODELS[$SLURM_ARRAY_TASK_ID]}
 
 cd "$REPO"
 echo "host=$(hostname) model=$MODEL start=$(date -Is)"
-"$PYTHON" inside_out_knowledge.py --stage cross_domain --model_id "$MODEL"
+"$PYTHON" inside_out_knowledge.py --stage cross_domain --model_id "$MODEL" --n_jobs 16
 echo "model=$MODEL end=$(date -Is)"
 ls -l "inside_out_out/$MODEL/k_scores_cross_domain.parquet"

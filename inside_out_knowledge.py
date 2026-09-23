@@ -984,12 +984,40 @@ def _probe_one(
     return records
 
 
+def _cross_feats(hs, q_idx: np.ndarray, layer: int) -> np.ndarray:
+    """One layer's features for the given questions, sliced layer-first."""
+    sub = np.asarray(hs[:, :, layer, :][q_idx])
+    return sub.astype(np.float32).reshape(len(q_idx) * N_OPTIONS, -1)
+
+
+def _cross_sweep_layer(hs_path: str, tr_idx, va_idx, y_tr, y_va, layer: int):
+    """(auc, C) for one layer, chosen on the source domain's held-out slice."""
+    hs = np.load(hs_path, mmap_mode="r")
+    X_tr = _cross_feats(hs, tr_idx, layer)
+    X_va = _cross_feats(hs, va_idx, layer)
+    best_auc, best_C = -1.0, 1.0
+    for C in C_CANDIDATES:
+        est = Pipeline([
+            ("sc", StandardScaler()),
+            ("clf", LogisticRegression(C=C, max_iter=1000, random_state=SEED)),
+        ])
+        est.fit(X_tr, y_tr)
+        try:
+            auc = roc_auc_score(y_va, est.predict_proba(X_va)[:, 1])
+        except Exception:
+            auc = 0.0
+        if auc > best_auc:
+            best_auc, best_C = auc, C
+    return layer, float(best_auc), float(best_C)
+
+
 # ── stage: cross-domain probe transfer ────────────────────────────────────
 CROSS_VAL_FRAC = 0.2
 
 
 def stage_cross_domain(model_id: str, pairs=None, clf_name: str = "LR",
-                       out_suffix: str = "cross_domain") -> None:
+                       out_suffix: str = "cross_domain",
+                       n_jobs: int = 1) -> None:
     """Fit a best-layer probe on one domain, read it at the same layer in the
     other.
 
@@ -1046,37 +1074,29 @@ def stage_cross_domain(model_id: str, pairs=None, clf_name: str = "LR",
         va_idx, tr_idx = np.sort(perm[:n_va]), np.sort(perm[n_va:])
         y_tr, y_va = build_labels(ci_s, tr_idx), build_labels(ci_s, va_idx)
 
-        best_auc, best_layer, best_C = -1.0, N_LAYERS // 2, 1.0
-        for li in range(N_LAYERS):
-            X_tr = extract_features(hs_s, tr_idx, f"layer_{li}")
-            X_va = extract_features(hs_s, va_idx, f"layer_{li}")
-            for C in C_CANDIDATES:
-                est = Pipeline([
-                    ("sc", StandardScaler()),
-                    ("clf", LogisticRegression(C=C, max_iter=1000,
-                                               random_state=SEED)),
-                ])
-                est.fit(X_tr, y_tr)
-                try:
-                    auc = roc_auc_score(y_va, est.predict_proba(X_va)[:, 1])
-                except Exception:
-                    auc = 0.0
-                if auc > best_auc:
-                    best_auc, best_layer, best_C = auc, li, C
+        from joblib import Parallel, delayed
+        hs_s_path = str(OUT_DIR / model_id / f"{src}_hs.npy")
+        swept = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_cross_sweep_layer)(hs_s_path, tr_idx, va_idx,
+                                        y_tr, y_va, li)
+            for li in range(N_LAYERS))
+        # max() keeps the first maximal element, so ties go to the lower layer,
+        # as the serial version did
+        best_layer, best_auc, best_C = max(swept, key=lambda r: r[1])
         print(f"  {src}->{tgt}: selected layer {best_layer}, C={best_C:g} "
               f"(source val AUC {best_auc:.4f})", flush=True)
 
         all_s, all_t = np.arange(n_s), np.arange(hs_t.shape[0])
-        lc_use = f"layer_{best_layer}"
         pipe = Pipeline([
             ("sc", StandardScaler()),
             ("clf", LogisticRegression(C=best_C, max_iter=1000,
                                        random_state=SEED)),
         ])
-        pipe.fit(extract_features(hs_s, all_s, lc_use), build_labels(ci_s, all_s))
+        pipe.fit(_cross_feats(hs_s, all_s, best_layer),
+                 build_labels(ci_s, all_s))
         proba = pipe.predict_proba(
-            extract_features(hs_t, all_t, lc_use))[:, 1].reshape(len(all_t),
-                                                                 N_OPTIONS)
+            _cross_feats(hs_t, all_t, best_layer))[:, 1].reshape(
+                len(all_t), N_OPTIONS)
         try:
             tgt_auc = float(roc_auc_score(build_labels(ci_t, all_t),
                                           proba.ravel()))
@@ -1628,7 +1648,8 @@ def main() -> None:
     elif args.stage == "cross_domain":
         stage_cross_domain(args.model_id,
                            out_suffix=args.out_suffix or
-                           "cross_domain")
+                           "cross_domain",
+                           n_jobs=args.n_jobs)
     elif args.stage == "aggregate":
         stage_aggregate(include_embedding=args.include_embedding)
     else:
