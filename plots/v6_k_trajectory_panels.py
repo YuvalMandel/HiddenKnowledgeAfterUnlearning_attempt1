@@ -62,7 +62,7 @@ def render_single(xs, series, method="RMU", width_frac=0.32):
     and ticks are allowed for -- the point of the single panel is to buy
     back the space the other seven took, not to enlarge RMU."""
     ki, ke = series[method]
-    w, h = iclr_figsize(aspect=1.05, width_frac=width_frac)
+    w, h = iclr_figsize(aspect=0.63, width_frac=width_frac)
     fig, ax = plt.subplots(figsize=(w, h))
     ax.fill_between(xs, ke, ki, color="#888888", alpha=0.30, linewidth=0,
                     zorder=2.5, label="gap")
@@ -83,8 +83,8 @@ def render_single(xs, series, method="RMU", width_frac=0.32):
     ax.set_xlabel("unlearning checkpoint (0 = base)", fontsize=7.5)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    ax.legend(frameon=False, fontsize=6.3, loc="upper right",
-              handlelength=1.6, labelspacing=0.25, borderaxespad=0.2)
+    # no legend: at 40% of the original height it lands on the curves,
+    # and the colour key costs nothing in the caption
     fig.tight_layout(pad=0.3)
 
     stem = str(Path(__file__).resolve().parent / "v6_k_trajectory_rmu")
