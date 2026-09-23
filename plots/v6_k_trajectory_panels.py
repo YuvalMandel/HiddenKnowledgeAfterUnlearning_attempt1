@@ -83,8 +83,11 @@ def render_single(xs, series, method="RMU", width_frac=0.44):
     ax.set_xlabel("unlearning checkpoint (0 = base)", fontsize=7.5)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    # no legend: at 40% of the original height it lands on the curves,
-    # and the colour key costs nothing in the caption
+    # the band between the curves and the chance line is the only part of
+    # the axes both series leave empty
+    ax.legend(frameon=False, fontsize=6.0, loc="lower center", ncol=3,
+              handlelength=1.5, columnspacing=1.1, borderaxespad=0.2,
+              handletextpad=0.35)
     fig.tight_layout(pad=0.3)
 
     stem = str(Path(__file__).resolve().parent / "v6_k_trajectory_rmu")
