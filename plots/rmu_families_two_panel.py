@@ -160,8 +160,12 @@ def panel_retention(ax, d):
                 fontsize=6.2, color=INT_C, zorder=6)
         ya, yb = a_, b_
         if abs(b_ - a_) < 8:
+            # push the two apart in the order they actually stand, or the
+            # lower value prints above the higher one (cyber Mixtral: 21
+            # grey against 19 red)
             mid = (a_ + b_) / 2
-            ya, yb = mid - 4.0, mid + 4.0
+            ya, yb = ((mid + 4.0, mid - 4.0) if a_ >= b_
+                      else (mid - 4.0, mid + 4.0))
         # a clamped level reads 0; lift its number clear of the zero line
         if a_ < 0.5:
             ya = 3.0
