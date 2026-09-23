@@ -142,6 +142,22 @@ N_FOLDS    = 5
 SEED       = 42
 BATCH_SIZE = 8   # prompts per GPU forward pass
 
+# Prompt truncation. This MUST clear the longest rendered prompt in every
+# domain, because the claim ends '... is <choice>. Label:' and the chat
+# template's assistant turn follows it -- right truncation removes exactly
+# the choice and the scored position. At the old value of 512 that silently
+# destroyed ~32% of WMDP-Cyber: the four prompts for a question became
+# byte-identical, their True/False margins tied exactly, and last_idx read
+# hidden states from an arbitrary token mid-question (KNOWN_ISSUES, 2026-09-22).
+# Measured longest rendered prompt, all four tokenizers:
+#   wmdp-bio    291-316 tokens   (512 was never reached)
+#   wmdp-cyber  2824-2839 tokens (512 cut 31.5-32.3% of prompts)
+MAX_PROMPT_TOKENS = 4096
+
+# Long domains blow up activation memory at BATCH_SIZE prompts of ~2.8k
+# tokens, so they get a smaller batch. Short domains are unaffected.
+LONG_DOMAIN_BATCH = {"cyber": 2}
+
 TRAIN_FRAC = 0.65
 VAL_FRAC   = 0.15
 TEST_FRAC  = 0.20   # = 1/N_FOLDS; non-overlapping via KFold
@@ -536,12 +552,13 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
             all_alt    = np.zeros(n_total, dtype=np.float32)
             resume_idx = 0
 
-        for start in range(resume_idx, n_total, BATCH_SIZE):
-            batch = prompts[start:start + BATCH_SIZE]
-            if start % (BATCH_SIZE * 25) == 0:
+        bs = LONG_DOMAIN_BATCH.get(domain, BATCH_SIZE)
+        for start in range(resume_idx, n_total, bs):
+            batch = prompts[start:start + bs]
+            if start % (bs * 25) == 0:
                 print(f"  [{domain}] {start}/{n_total}", flush=True)
             enc = tok(batch, return_tensors="pt", padding=True,
-                      truncation=True, max_length=512)
+                      truncation=True, max_length=MAX_PROMPT_TOKENS)
             enc = {k: v.to(model.device) for k, v in enc.items()}
             with torch.no_grad():
                 out = model(**enc, output_hidden_states=True, return_dict=True)
@@ -558,8 +575,8 @@ def stage_extract(model_id: str, domains: "list[str] | None" = None) -> None:
                 all_alt[start + bi] = (logits[alt_true] - logits[alt_false]).cpu().item()
 
             # Periodic checkpoint: save progress so preemption doesn't restart from zero
-            next_start = start + BATCH_SIZE
-            if next_start % CKPT_EVERY < BATCH_SIZE and next_start < n_total:
+            next_start = start + bs
+            if next_start % CKPT_EVERY < bs and next_start < n_total:
                 np.savez(part_path, hs=all_hs, ext=all_ext, ext_alt=all_alt,
                          next_start=next_start)
                 print(f"  [{domain}] checkpoint saved at {next_start}/{n_total}", flush=True)
@@ -666,14 +683,15 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
         SAVE_EVERY = 200
         n_total    = len(prompts)
 
-        for start in range(resume_from, n_total, BATCH_SIZE):
-            batch_p = prompts[start:start + BATCH_SIZE]
-            batch_m = meta[start:start + BATCH_SIZE]
-            if start % (BATCH_SIZE * 25) == 0:
+        bs = LONG_DOMAIN_BATCH.get(domain, BATCH_SIZE)
+        for start in range(resume_from, n_total, bs):
+            batch_p = prompts[start:start + bs]
+            batch_m = meta[start:start + bs]
+            if start % (bs * 25) == 0:
                 print(f"  [{domain}] {start}/{n_total}", flush=True)
 
             enc = tok(batch_p, return_tensors="pt", padding=True,
-                      truncation=True, max_length=512)
+                      truncation=True, max_length=MAX_PROMPT_TOKENS)
             enc = {k: v.to(model.device) for k, v in enc.items()}
             N   = enc["input_ids"].shape[1]   # padded sequence length
 
@@ -689,8 +707,8 @@ def stage_gen(model_id: str, domains: "list[str] | None" = None,
                 text = tok.decode(gen_ids[bi][N:], skip_special_tokens=True).strip()
                 results.append({**batch_m[bi], "text": text})
 
-            next_start = start + BATCH_SIZE
-            if next_start % SAVE_EVERY < BATCH_SIZE and next_start < n_total:
+            next_start = start + bs
+            if next_start % SAVE_EVERY < bs and next_start < n_total:
                 with open(part_path, "w") as f:
                     json.dump(results, f)
 
@@ -964,6 +982,133 @@ def _probe_one(
             })
 
     return records
+
+
+# ── stage: cross-domain probe transfer ────────────────────────────────────
+CROSS_VAL_FRAC = 0.2
+
+
+def stage_cross_domain(model_id: str, pairs=None, clf_name: str = "LR",
+                       out_suffix: str = "cross_domain") -> None:
+    """Fit a best-layer probe on one domain, read it at the same layer in the
+    other.
+
+    The two domains share a model but not a question set (WMDP-bio has 1,273
+    questions, WMDP-cyber 1,987), so there is no index correspondence between
+    them -- and no leakage to guard against. The probe is therefore fitted on
+    EVERY source question and scored on EVERY target question; no folds.
+
+    (layer, C) are chosen on a held-out slice of the SOURCE domain alone, and
+    that layer is then read at the same depth in the target. Sweeping layers on
+    the target would answer a different, easier question.
+    """
+    out_path = OUT_DIR / model_id / f"k_scores_{out_suffix}.parquet"
+    if out_path.exists():
+        print(f"[cross] {model_id}: already done ({out_path.name}).")
+        return
+
+    pairs = pairs or [("bio", "cyber"), ("cyber", "bio")]
+    cache: dict = {}
+
+    def load(d):
+        if d not in cache:
+            hs_p = OUT_DIR / model_id / f"{d}_hs.npy"
+            if not hs_p.exists():
+                cache[d] = None
+            else:
+                ci_p = OUT_DIR / f"{d}_correct_idx.npy"
+                if ci_p.exists():
+                    ci = np.load(ci_p).astype(int)
+                else:
+                    ci = np.array([it["answer"] for it in load_wmdp(d)], dtype=int)
+                    np.save(ci_p, ci.astype(np.int8))
+                cache[d] = (np.load(hs_p, mmap_mode="r"),
+                            np.load(OUT_DIR / model_id / f"{d}_ext.npy"), ci)
+        return cache[d]
+
+    records = []
+    for src, tgt in pairs:
+        a, b = load(src), load(tgt)
+        if a is None or b is None:
+            print(f"  {src}->{tgt}: missing hidden states, skipping.")
+            continue
+        hs_s, _, ci_s = a
+        hs_t, ext_t, ci_t = b
+        if hs_s.shape[2:] != hs_t.shape[2:]:
+            print(f"  {src}->{tgt}: shape mismatch {hs_s.shape[2:]} vs "
+                  f"{hs_t.shape[2:]}, skipping.")
+            continue
+        set_n_layers(hs_s.shape[2], f"{model_id}/{src}_hs.npy")
+
+        n_s = hs_s.shape[0]
+        perm = np.random.default_rng(SEED).permutation(n_s)
+        n_va = int(round(CROSS_VAL_FRAC * n_s))
+        va_idx, tr_idx = np.sort(perm[:n_va]), np.sort(perm[n_va:])
+        y_tr, y_va = build_labels(ci_s, tr_idx), build_labels(ci_s, va_idx)
+
+        best_auc, best_layer, best_C = -1.0, N_LAYERS // 2, 1.0
+        for li in range(N_LAYERS):
+            X_tr = extract_features(hs_s, tr_idx, f"layer_{li}")
+            X_va = extract_features(hs_s, va_idx, f"layer_{li}")
+            for C in C_CANDIDATES:
+                est = Pipeline([
+                    ("sc", StandardScaler()),
+                    ("clf", LogisticRegression(C=C, max_iter=1000,
+                                               random_state=SEED)),
+                ])
+                est.fit(X_tr, y_tr)
+                try:
+                    auc = roc_auc_score(y_va, est.predict_proba(X_va)[:, 1])
+                except Exception:
+                    auc = 0.0
+                if auc > best_auc:
+                    best_auc, best_layer, best_C = auc, li, C
+        print(f"  {src}->{tgt}: selected layer {best_layer}, C={best_C:g} "
+              f"(source val AUC {best_auc:.4f})", flush=True)
+
+        all_s, all_t = np.arange(n_s), np.arange(hs_t.shape[0])
+        lc_use = f"layer_{best_layer}"
+        pipe = Pipeline([
+            ("sc", StandardScaler()),
+            ("clf", LogisticRegression(C=best_C, max_iter=1000,
+                                       random_state=SEED)),
+        ])
+        pipe.fit(extract_features(hs_s, all_s, lc_use), build_labels(ci_s, all_s))
+        proba = pipe.predict_proba(
+            extract_features(hs_t, all_t, lc_use))[:, 1].reshape(len(all_t),
+                                                                 N_OPTIONS)
+        try:
+            tgt_auc = float(roc_auc_score(build_labels(ci_t, all_t),
+                                          proba.ravel()))
+        except Exception:
+            tgt_auc = float("nan")
+        k_ext_t = compute_k(ext_t, ci_t, all_t)
+
+        k_int = np.zeros(len(all_t), dtype=np.float32)
+        for i, qi in enumerate(all_t):
+            c = ci_t[qi]
+            ws = [proba[i, j] for j in range(N_OPTIONS) if j != c]
+            k_int[i] = sum(float(proba[i, c] > w) for w in ws) / len(ws)
+        for i, qi in enumerate(all_t):
+            records.append({
+                "model_id": model_id, "src_domain": src, "domain": tgt,
+                "clf": clf_name, "layer_config": "best_layer",
+                "probe_type": f"{src}_to_{tgt}", "question_idx": int(qi),
+                "k_internal": float(k_int[i]), "k_external": float(k_ext_t[i]),
+                "test_auc": tgt_auc, "src_val_auc": float(best_auc),
+                "best_C": float(best_C), "best_layer": float(best_layer),
+            })
+        print(f"  {src}->{tgt}: target AUC {tgt_auc:.4f}, "
+              f"mean K_int {k_int.mean():.4f}, "
+              f"mean K_ext {float(np.mean(k_ext_t)):.4f}", flush=True)
+
+    if not records:
+        print(f"[cross] {model_id}: nothing to write.")
+        return
+    df = pd.DataFrame(records)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out_path, index=False)
+    print(f"[cross] {model_id}: saved {out_path} ({len(df):,} rows).")
 
 
 def stage_probe(
@@ -1433,7 +1578,8 @@ def stage_aggregate(include_embedding: bool = False) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["extract", "gen", "probe", "aggregate"])
+    ap.add_argument("--stage", choices=["extract", "gen", "probe", "aggregate",
+                                    "cross_domain"])
     ap.add_argument("--model_id", default="base")
     ap.add_argument("--list_models", action="store_true",
                     help="Print all model IDs (one per line) and exit.")
@@ -1479,6 +1625,10 @@ def main() -> None:
             n_jobs=args.n_jobs,
             out_suffix=args.out_suffix,
         )
+    elif args.stage == "cross_domain":
+        stage_cross_domain(args.model_id,
+                           out_suffix=args.out_suffix or
+                           "cross_domain")
     elif args.stage == "aggregate":
         stage_aggregate(include_embedding=args.include_embedding)
     else:
