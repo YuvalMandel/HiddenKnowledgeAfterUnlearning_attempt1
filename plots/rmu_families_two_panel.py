@@ -98,10 +98,10 @@ def panel_raw(ax, d):
             tgt.plot([xi2 - W / 2, xi2 + W / 2], [vv, vv], color=col, lw=1.1,
                      ls=(0, (2.0, 1.3)), alpha=0.9, zorder=7)
 
-    for xx, v, sd, c in ((xe, d.raw_ke, d.ke_sd, EXT_C),
-                         (xi_, d.raw_ki, d.ki_sd, INT_C)):
+    for xx, v, sd, c, dx in ((xe, d.raw_ke, d.ke_sd, EXT_C, -0.40 * W),
+                             (xi_, d.raw_ki, d.ki_sd, INT_C, +0.40 * W)):
         for xi2, vv, ss in zip(xx, v, sd):
-            ax.text(xi2, vv + ss + 0.014, f"{vv:.2f}", ha="center",
+            ax.text(xi2 + dx, vv + ss + 0.014, f"{vv:.2f}", ha="center",
                     va="bottom", fontsize=6.2, color=c, rotation=90, zorder=6)
     for xi2, vv in zip(xw, d.raw_wmdp):
         ax2.text(xi2, vv + 0.012, f"{vv:.2f}", ha="center", va="bottom",
@@ -159,6 +159,11 @@ def panel_retention(ax, d):
         if abs(b_ - a_) < 8:
             mid = (a_ + b_) / 2
             ya, yb = mid - 4.0, mid + 4.0
+        # a clamped level reads 0; lift its number clear of the zero line
+        if a_ < 0.5:
+            ya = 3.0
+        if b_ < 0.5:
+            yb = 3.0
         for y, ylab, colr in ((a_, ya, WMDP_C), (b_, yb, EXT_C)):
             ax.plot([xi - W / 2 - 0.06, xi - W / 2], [y, y], color=colr,
                     lw=0.9, zorder=6, clip_on=False)

@@ -73,7 +73,7 @@ def render_single(xs, series, method="RMU", width_frac=0.44):
     ax.axhline(CHANCE, color="black", linestyle=":", linewidth=0.8, zorder=2)
     ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
     ax.set_axisbelow(True)
-    ax.set_ylim(0.47, 0.85)
+    ax.set_ylim(0.47, 0.93)
     ax.set_yticks([0.5, 0.6, 0.7, 0.8])
     ax.set_xticks(xs)
     ax.set_xticklabels(["0"] + [str(c) for c in range(1, N_CK + 1)],
@@ -83,11 +83,11 @@ def render_single(xs, series, method="RMU", width_frac=0.44):
     ax.set_xlabel("unlearning checkpoint (0 = base)", fontsize=7.5)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    # the band between the curves and the chance line is the only part of
-    # the axes both series leave empty
-    ax.legend(frameon=False, fontsize=6.0, loc="lower center", ncol=3,
-              handlelength=1.5, columnspacing=1.1, borderaxespad=0.2,
-              handletextpad=0.35)
+    ax.text(0.0, CHANCE + 0.008, "chance", fontsize=5.8, color="0.35",
+            va="bottom", ha="left")
+    ax.legend(frameon=False, fontsize=6.0, loc="upper right",
+              handlelength=1.4, labelspacing=0.18, borderaxespad=0.15,
+              handletextpad=0.3)
     fig.tight_layout(pad=0.3)
 
     stem = str(Path(__file__).resolve().parent / "v6_k_trajectory_rmu")
