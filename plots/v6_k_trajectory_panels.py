@@ -127,7 +127,7 @@ def main():
     for ax, m in zip(axes.ravel(), METHODS):
         ki, ke = series[m]
         ax.fill_between(xs, ke, ki, color="#888888", alpha=0.30, linewidth=0,
-                        zorder=2.5, label="hidden-knowledge gap")
+                        zorder=2.5, label="gap")
         for name, (colour, ls, marker) in STYLE.items():
             v = ki if "int" in name else ke
             ax.plot(xs, v, ls, color=colour, marker=marker, markersize=2.0,
