@@ -174,10 +174,10 @@ for ax, col, ttl in zip(axes, ["k_lens", "k_int_cv"], titles):
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
 axes[0].set_ylabel("$K$ (win fraction over the 3 distractors)", fontsize=7)
-axes[0].text(4.2, 0.507, "chance", fontsize=6, va="bottom")
-axes[1].legend(fontsize=5.8, ncol=2, loc="lower right", frameon=False,
-               handlelength=1.4, handletextpad=0.4, labelspacing=0.25,
-               columnspacing=1.0, borderaxespad=0.2)
+axes[0].text(33, 0.494, "chance", fontsize=6, va="top", ha="right")
+axes[1].legend(fontsize=5.8, ncol=5, loc="lower right", frameon=False,
+               handlelength=1.0, handletextpad=0.3, labelspacing=0.25,
+               columnspacing=0.6, borderaxespad=0.2)
 fig.tight_layout(pad=0.4)
 fig.savefig(AV / "bestlayer_lens_by_layer.png", dpi=300)
 print(f"wrote {AV/'bestlayer_lens_by_layer.png'}")
