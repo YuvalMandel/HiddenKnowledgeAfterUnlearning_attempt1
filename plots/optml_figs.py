@@ -77,7 +77,7 @@ INT_C, EXT_C = "#2166ac", "#d6604d"
 WMDP_C3, WMDP_C4 = "#8c8c8c", "#4d4d4d"   # Fig 3 grey, Fig 4 grey
 # A_TOP == K_TOP: shared scale, so a value reads at the same height on
 # either axis. See knowledge_accuracy_bars.py.
-K_TOP, A_TOP, Y_BOT = 0.92, 0.92, 0.15
+K_TOP, A_TOP, Y_BOT = 0.96, 0.96, 0.15
 
 
 def k_of(mid):
@@ -109,7 +109,7 @@ def build():
 def fig_raw(d):
     n = len(d)
     x = list(range(n))
-    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.62, width_frac=0.80))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.321, width_frac=1.0))
     ax2 = ax.twinx()
 
     W = 0.26
@@ -119,11 +119,11 @@ def fig_raw(d):
     gx = [xi2 for xi2, lab in zip(xw, d.label) if lab in ACC]
     gv = [ACC[lab] for lab in d.label if lab in ACC]
     ax2.bar(gx, gv, W, color=WMDP_C3, zorder=3,
-            label="WMDP-Bio accuracy (right axis)")
+            label="WMDP-Bio accuracy")
     ax.bar(xe, d.k_ext, W, color=EXT_C, zorder=3,
-           label=r"$K_\mathrm{ext}$ (logit margin)")
+           label=r"$K_\mathrm{ext}$")
     ax.bar(xi_, d.k_int, W, color=INT_C, zorder=3,
-           label=r"$K_\mathrm{int}$ (best-layer probe)")
+           label=r"$K_\mathrm{int}$")
     ax.errorbar(xe, d.k_ext, yerr=d.k_ext_sd, fmt="none", ecolor="black",
                 elinewidth=0.8, capsize=1.5, alpha=0.6, zorder=5)
     ax.errorbar(xi_, d.k_int, yerr=d.k_int_sd, fmt="none", ecolor="black",
@@ -131,7 +131,7 @@ def fig_raw(d):
     for xx, v, sd, c in ((xe, d.k_ext, d.k_ext_sd, EXT_C),
                          (xi_, d.k_int, d.k_int_sd, INT_C)):
         for xi2, vv, ss in zip(xx, v, sd):
-            ax.text(xi2, vv + ss + 0.015, f"{vv:.3f}", ha="center",
+            ax.text(xi2, vv + ss + 0.015, f"{vv:.2f}", ha="center",
                     va="bottom", fontsize=5.6, color=c, rotation=90, zorder=6)
     for xi2, vv in zip(gx, gv):
         ax2.text(xi2, vv + 0.012, f"{vv:.2f}", ha="center", va="bottom",
@@ -144,9 +144,9 @@ def fig_raw(d):
     ax.axhline(0.5, color=EXT_C, ls=":", lw=1.0, alpha=0.85, zorder=1)
     ax2.axhline(ACC_CHANCE, color="#5a5a5a", ls=":", lw=1.0, alpha=0.85,
                 zorder=1)
-    ax.text(-1.85, 0.507, "chance 0.50", fontsize=6, color=EXT_C,
+    ax.text(-1.62, 0.507, "chance 0.50", fontsize=6, color=EXT_C,
             va="bottom", ha="left")
-    ax2.text(-1.85, 0.256, "chance 0.25", fontsize=6, color="#5a5a5a",
+    ax2.text(-1.62, 0.256, "chance 0.25", fontsize=6, color="#5a5a5a",
              va="bottom", ha="left")
 
     ax.set_ylim(Y_BOT, K_TOP)
@@ -156,19 +156,22 @@ def fig_raw(d):
     ax.set_yticks([0.2, 0.4, 0.6, 0.8])
     ax2.set_yticks([0.2, 0.4, 0.6, 0.8])
     ax.set_xticks(x)
-    ax.set_xticklabels(d.label, rotation=34, ha="right", fontsize=7.5)
+    # ten columns at Fig 2's width: "NPO+SAM" etc. only fit on two lines
+    ax.set_xticklabels([l.replace("+", "\n+") for l in d.label], rotation=0,
+                       ha="center", fontsize=7.5)
     ax.tick_params(labelsize=7.5)
     ax2.tick_params(labelsize=7.5)
-    ax.set_xlim(-1.90, n - 0.35)   # left gutter holds the two chance labels
+    ax.set_xlim(-1.67, n - 0.35)   # left gutter holds the two chance labels
     ax.spines["top"].set_visible(False)
     ax2.spines["top"].set_visible(False)
     ax.grid(axis="y", ls=":", lw=0.6, alpha=0.4, zorder=0)
     ax.set_axisbelow(True)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h2 + h1, l2 + l1, fontsize=7, loc="upper center",
-              bbox_to_anchor=(0.5, -0.30), ncol=3, frameon=False,
-              handletextpad=0.4, columnspacing=1.6)
+    # above the axes: the K_int labels here reach the top, unlike Fig 2's
+    ax.legend(h2 + h1, l2 + l1, fontsize=7, loc="lower right",
+              bbox_to_anchor=(1.0, 1.0), ncol=3, frameon=False,
+              handletextpad=0.4, columnspacing=1.2, borderaxespad=0.15)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"optml_raw.{ext}"
@@ -213,8 +216,8 @@ def fig_retention(d):
     x = list(range(len(cols)))
     W = 0.46
 
-    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=5.0 / 7,
-                                                width_frac=0.80))
+    fig, ax = plt.subplots(figsize=iclr_figsize(aspect=0.60 * 3.6 / 7,
+                                                width_frac=1.0))
     # Retention is floored at 0, as in the main-text figures: below chance
     # is no evidence, not negative evidence. Every level then runs from zero
     # with the SHORTEST drawn in front, so none is hidden.
@@ -243,10 +246,12 @@ def fig_retention(d):
         if a_ < 0.5:
             ya = 3.0
         if b_ < 0.5:
-            yb = 3.0
+            yb = -7.0          # below the x axis, clear of the grey label
         if lab in ACC:
             level(xi, a_, ya, f'{a_:.0f}', '#5a5a5a')
         level(xi, b_, yb, f'{b_:.0f}', EXT_C)
+        if b_ < 0.5:
+            ax.texts[-1].set_clip_on(False)
         level(xi, c_, c_, f'{c_:.0f}', INT_C)
     ax.axhline(0, color="0.35", ls=":", lw=0.8, zorder=1)
     ax.axhline(100, color="0.35", ls="--", lw=0.8, zorder=1)
@@ -254,12 +259,14 @@ def fig_retention(d):
     # collide with it at the top left. The y label already says the bars are a
     # percentage of the base, and the axis now tops out exactly at the line.
     # nothing can exceed its own base, so 100 is the ceiling
-    ax.set_ylim(0, 100)
+    # headroom above 100 holds the legend, as in Fig 3
+    ax.set_ylim(0, 118)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_ylabel("% of base model's above-chance\nsignal retained",
                   fontsize=7.5)
     ax.set_xticks(x)
-    ax.set_xticklabels(cols, rotation=34, ha="right", fontsize=7.5)
+    ax.set_xticklabels(cols, rotation=0, ha="center", fontsize=7.5)
+    ax.tick_params(axis="x", pad=9)   # room for the orange 0s under the axis
     ax.tick_params(labelsize=7.5)
     ax.set_xlim(-1.0, x[-1] + 0.75)
     for sp in ("top", "right"):
@@ -271,8 +278,9 @@ def fig_retention(d):
             (EXT_C, r"$K_\mathrm{ext}$ (logit margin)"),
             (INT_C, r"$K_\mathrm{int}$ (best-layer probe)")]
     ax.legend(handles=[Patch(color=c, label=t) for c, t in keys],
-              fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.28),
-              ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.6)
+              fontsize=7, loc="upper right", bbox_to_anchor=(1.0, 1.02),
+              ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.4,
+              borderaxespad=0.0)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         p = ROOT / "plots" / f"optml_retention.{ext}"
