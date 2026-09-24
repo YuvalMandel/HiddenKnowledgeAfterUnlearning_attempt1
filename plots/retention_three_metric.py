@@ -160,6 +160,8 @@ def main():
         if abs(b_ - a_) < 7:
             mid = (a_ + b_) / 2
             ya, yb = mid - 3.6, mid + 3.6
+        elif a_ < 5:
+            ya = 4.5 + 2 * a_       # lift off the axis, keep 2 above 0
         for y, ylab, colr in ((a_, ya, '#5a5a5a'), (b_, yb, EXT_C)):
             ax.plot([xi - W / 2 - 0.06, xi - W / 2], [y, y], color=colr,
                     lw=0.9, zorder=6, clip_on=False)
