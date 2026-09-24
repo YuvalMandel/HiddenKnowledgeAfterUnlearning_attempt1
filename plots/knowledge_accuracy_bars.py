@@ -47,7 +47,7 @@ MODELS = [("base", "Base"), ("GradDiff_ck8", "GradDiff"), ("PB_J_ck8", "PB&J"),
 WMDP = {"GradDiff": 0.25, "RMU": 0.26, "RMU-LAT": 0.32, "RepNoise": 0.29,
         "ELM": 0.24, "RR": 0.26, "TAR": 0.28, "PB&J": 0.31, "Base": 0.70}
 
-INT_C, EXT_C, WMDP_C = "#2166ac", "#d6604d", "#8c8c8c"
+INT_C, EXT_C, WMDP_C = "#2166ac", "#d6604d", "#4d4d4d"   # Fig 5 grey
 # separate ceilings keep the two chance lines at different heights, which is the
 # point of the second axis: each metric is read against its own floor
 # One shared scale: A_TOP == K_TOP so 0.8 sits at the same height on both

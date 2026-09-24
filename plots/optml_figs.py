@@ -74,7 +74,7 @@ ACC = {"Base": 0.648, "SimNPO": 0.416, "NPO": 0.26, "NPO+SAM": 0.26,
 ACC_CHANCE, ACC_BASE = 0.25, 0.648
 
 INT_C, EXT_C = "#2166ac", "#d6604d"
-WMDP_C3, WMDP_C4 = "#8c8c8c", "#4d4d4d"   # Fig 3 grey, Fig 4 grey
+WMDP_C3 = WMDP_C4 = "#4d4d4d"   # Fig 5 grey
 # A_TOP == K_TOP: shared scale, so a value reads at the same height on
 # either axis. See knowledge_accuracy_bars.py.
 K_TOP, A_TOP, Y_BOT = 0.96, 0.96, 0.15
