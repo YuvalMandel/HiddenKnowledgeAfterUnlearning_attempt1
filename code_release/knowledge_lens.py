@@ -86,7 +86,7 @@ SWEEP_SLUGS = {
 }
 
 # Models outside the LLM-GAT sweep: WMDP's own RMU releases (Section 4.5, 4.6)
-# and the OPTML suite on Zephyr-7B-beta (Appendix E).
+# and the OPTML suite on Zephyr-7B-beta (Appendix D).
 EXTRA_MODELS = {
     "zephyr_base":  "HuggingFaceH4/zephyr-7b-beta",
     "zephyr_rmu":   "cais/Zephyr_RMU",
@@ -156,7 +156,7 @@ VERIFY_SYSTEM_PROMPT = (
 
 
 def make_verify_prompt(question: str, choice: str) -> list[dict]:
-    """The True/False verification prompt of Appendix B."""
+    """The True/False verification prompt of Appendix A."""
     return [
         {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
         {"role": "user", "content": (

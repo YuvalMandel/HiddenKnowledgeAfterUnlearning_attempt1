@@ -1,12 +1,11 @@
 # Versions the paper's results were produced and re-verified with (Python 3.11).
-# The figure scripts alone need only numpy, pandas, pyarrow and matplotlib.
+# The number scripts alone need only numpy, pandas and pyarrow.
 numpy==2.2.3
 pandas==3.0.0
 pyarrow==23.0.0
 scipy==1.14.1
 scikit-learn==1.5.2
 joblib==1.5.3
-matplotlib==3.10.8
 torch==2.4.1
 transformers==4.45.1
 tokenizers==0.20.3
