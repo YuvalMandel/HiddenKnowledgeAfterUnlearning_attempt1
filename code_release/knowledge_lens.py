@@ -79,6 +79,9 @@ N_CHECKPOINTS = 8
 SWEEP_SLUGS = {
     "GradDiff": "graddiff", "RMU": "rmu", "RMU-LAT": "rmu-lat",
     "RepNoise": "repnoise", "ELM": "elm", "RR": "rr", "TAR": "tar",
+    # PB&J ("PullBack & proJect") is the name in LLM-GAT's first version and
+    # in its repository names; the same method is published as K-FADE
+    # (McKinney et al., "Gauss-Newton Unlearning for the LLM Era").
     "PB_J": "pbj",
 }
 
