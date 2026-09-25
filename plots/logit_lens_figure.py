@@ -23,9 +23,9 @@ K_CHANCE = 0.5
 def main(csv, out):
     df = pd.read_csv(csv)
     df = df[df.layer >= 1]
-    titles = ["A.  the model's own axis $v$ at layer $\\ell$\n"
+    titles = ["(a) the model's own axis $v$ at layer $\\ell$\n"
               "(logit lens, no fitted parameters)",
-              "B.  a probe fitted at layer $\\ell$\n($K_{int}$, cross-validated)"]
+              "(b) a probe fitted at layer $\\ell$\n($K_{int}$, cross-validated)"]
     fig, axes = plt.subplots(1, 2, figsize=(5.5, 2.45), sharey=True)
     for ax, col, ttl in zip(axes, ["k_lens", "k_probe"], titles):
         for mid in MODELS:
