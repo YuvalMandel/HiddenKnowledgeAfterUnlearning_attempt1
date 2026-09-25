@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Appendix D (Figures 8 and 9): the nine OPTML unlearning models on Zephyr-7B-beta.
+"""Appendix C (Figures 7 and 8): the nine OPTML unlearning models on Zephyr-7B-beta.
 
 Prints the raw scores (published WMDP-Bio accuracy, K_ext, K_int), each
-metric's share of the base model's above-chance signal retained (Figure 9
-floors it at 0, here it is unfloored), and the numbers quoted in Appendix D:
+metric's share of the base model's above-chance signal retained (Figure 8
+floors it at 0, here it is unfloored), and the numbers quoted in Appendix C:
 the ranges of K_int and K_ext, their retention, the gap, and the suppressed and
 forgotten shares against the base model's own.
 

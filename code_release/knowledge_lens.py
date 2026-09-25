@@ -86,7 +86,7 @@ SWEEP_SLUGS = {
 }
 
 # Models outside the LLM-GAT sweep: WMDP's own RMU releases (Section 4.5, 4.6)
-# and the OPTML suite on Zephyr-7B-beta (Appendix D).
+# and the OPTML suite on Zephyr-7B-beta (Appendix C).
 EXTRA_MODELS = {
     "zephyr_base":  "HuggingFaceH4/zephyr-7b-beta",
     "zephyr_rmu":   "cais/Zephyr_RMU",

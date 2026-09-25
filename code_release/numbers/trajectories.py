@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Section 4.3 (Figures 4 and 10): K_int and K_ext across the unlearning checkpoints.
+"""Section 4.3 (Figures 4 and 9): K_int and K_ext across the unlearning checkpoints.
 
 Prints, for every method, K_int and K_ext at each checkpoint (the values of
-Figure 10; Figure 4 is the RMU row), then, at every checkpoint, their mean over
+Figure 9; Figure 4 is the RMU row), then, at every checkpoint, their mean over
 the eight methods, the mean gap and the range across methods: the numbers
 quoted in Section 4.3. Checkpoint 0 is the shared base model.
 
